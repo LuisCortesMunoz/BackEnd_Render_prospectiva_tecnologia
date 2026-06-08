@@ -1,0 +1,258 @@
+EXPLICACIÓN DETALLADA DEL PROGRAMA LADDER CON CONTADOR CTU
+PLC HORNER HE-XC1E5 XL4 – CSCAPE 10.2
+
+1. CONTEXTO GENERAL DEL PROGRAMA
+
+El programa mostrado corresponde a un diagrama ladder, también conocido como código en escalera. Este tipo de programación se utiliza comúnmente en programadores lógicos programables, conocidos como PLC, para aplicaciones de automatización industrial.
+
+En este caso, el programa está desarrollado en el software Cscape 10.2, utilizado para programar PLC de la marca Horner, específicamente de la serie HE-XC1E5 XL4.
+
+El lenguaje ladder representa el funcionamiento lógico de un circuito eléctrico de control. Por eso, sus elementos se interpretan como si existiera un flujo de corriente de izquierda a derecha. Cuando las condiciones de una línea se cumplen, la corriente lógica puede avanzar hasta activar una bobina, una marca interna, una salida física o un bloque de función, como un contador.
+
+Este programa utiliza entradas físicas, una marca interna, una salida física y un contador ascendente. Su función principal es contar cuántas veces se presiona un botón de arranque y, cuando el conteo llega a 4 pulsos, activar una lámpara verde conectada a la salida Q10. La lámpara permanece encendida hasta que se activa una entrada de reset, que reinicia el contador y apaga el sistema.
+
+2. ASIGNACIÓN GENERAL DE ENTRADAS Y SALIDAS DEL PLC
+
+Para este PLC Horner HE-XC1E5 XL4 se consideran las siguientes entradas físicas:
+
+- I1: Botón normalmente abierto, utilizado como botón de arranque o pulsador de conteo.
+- I2: Botón normalmente cerrado, utilizado comúnmente como botón de paro.
+- I3: Entrada normalmente abierta asociada al selector o a un botón utilizado para resetear el contador.
+- I4: Entrada normalmente abierta asociada al selector.
+- I8: Botón de paro de emergencia normalmente cerrado.
+
+También se consideran las siguientes salidas físicas para las lámparas del tablero:
+
+- Q10: Lámpara verde.
+- Q11: Lámpara amarilla.
+- Q12: Lámpara roja.
+
+En este programa en particular se utiliza la salida Q10, por lo tanto, la lámpara que se enciende al cumplirse la condición del contador es la lámpara verde.
+
+3. ELEMENTOS PRINCIPALES DEL PROGRAMA
+
+En la imagen del programa ladder se pueden identificar principalmente los siguientes elementos:
+
+- Contacto normalmente abierto %I0001.
+- Bloque contador ascendente CTU asociado a %R0001.
+- Entrada de reset del contador conectada a %I0003.
+- Valor de preset PV igual a 4.
+- Bobina interna %M00001.
+- Contacto normalmente abierto %M00001.
+- Bobina de salida física %Q0010.
+
+Cada uno de estos elementos cumple una función específica dentro del programa.
+
+4. CONTACTO %I0001 – BOTÓN DE ARRANQUE O PULSADOR DE CONTEO
+
+El primer elemento del programa es un contacto normalmente abierto asociado a la entrada física %I0001.
+
+La entrada I1 corresponde a un botón físico normalmente abierto. Esto significa que, en condiciones normales, cuando el botón no está presionado, el contacto se encuentra abierto y no permite el paso de corriente lógica dentro del ladder.
+
+Cuando el operador presiona el botón conectado a I1, la entrada cambia de estado y el contacto %I0001 se cierra. Al cerrarse, permite el paso de corriente lógica hacia el bloque contador CTU.
+
+En este programa, el botón I1 no se usa directamente para encender la lámpara, sino para generar pulsos de conteo. Cada vez que el botón se presiona, el contador recibe una señal en su entrada de conteo.
+
+Es importante mencionar que, en un contador ascendente, normalmente el conteo se realiza por flanco de subida. Esto quiere decir que el contador aumenta su valor cuando la señal pasa de 0 a 1, es decir, cuando el botón se presiona. Si el botón se queda presionado de manera continua, el contador no debería seguir aumentando indefinidamente, sino que cuenta el cambio de estado. Para volver a contar, el botón debe soltarse y presionarse nuevamente.
+
+5. BLOQUE CTU – CONTADOR ASCENDENTE
+
+El bloque que aparece en la primera línea del programa es un contador CTU. Las siglas CTU significan Count Up, es decir, contador ascendente.
+
+Un contador ascendente se utiliza para contar eventos. En este caso, el evento que se está contando es la cantidad de veces que se presiona el botón conectado a la entrada I1.
+
+El contador está asociado a la dirección %R0001. Esto significa que el contador utiliza el registro R1 como espacio de memoria para guardar su valor acumulado de conteo y su estado interno.
+
+Los registros %R en los PLC Horner se utilizan para almacenar valores numéricos o información interna del programa. En este caso, %R0001 funciona como memoria del contador. Ahí se guarda el valor actual del conteo, por ejemplo 0, 1, 2, 3 o 4.
+
+6. ENTRADA C DEL CONTADOR
+
+Dentro del bloque CTU, la entrada marcada como C corresponde a la entrada de conteo.
+
+La señal que llega a esta entrada proviene del contacto %I0001. Por lo tanto, cada vez que se presiona el botón I1, el contador recibe un pulso de conteo.
+
+El funcionamiento es el siguiente:
+
+- Si I1 está en 0, el contacto está abierto y no se genera conteo.
+- Si I1 cambia de 0 a 1, el contacto se cierra y el contador detecta un pulso.
+- Cada pulso incrementa el valor acumulado del contador en una unidad.
+- Después de presionar el botón una vez, el contador vale 1.
+- Después de presionarlo dos veces, el contador vale 2.
+- Después de presionarlo tres veces, el contador vale 3.
+- Después de presionarlo cuatro veces, el contador llega al valor establecido en PV.
+
+7. ENTRADA R DEL CONTADOR – RESET
+
+El bloque CTU también tiene una entrada marcada como R. Esta entrada corresponde al reset del contador.
+
+En este programa, la entrada R está conectada a %I0003. La entrada I3 corresponde a otro botón normalmente abierto o a una posición del selector físico del tablero.
+
+La función del reset es regresar el contador a su estado inicial. Cuando se activa la entrada I3, el contador se reinicia y su valor acumulado vuelve a 0.
+
+Es importante diferenciar dos cosas:
+
+- %R0001 es el registro de memoria asociado al contador.
+- La letra R dentro del bloque CTU representa la entrada de reset.
+
+Aunque ambos usan la letra R, no significan exactamente lo mismo. El registro %R0001 almacena información, mientras que la entrada R del bloque es la condición que reinicia el conteo.
+
+Cuando se activa el reset:
+
+- El valor acumulado del contador regresa a 0.
+- La salida lógica del contador se desactiva.
+- La marca %M00001 se apaga.
+- El contacto %M00001 de la segunda línea se abre.
+- La salida %Q0010 se desactiva.
+- La lámpara verde conectada a Q10 se apaga.
+
+8. PV = 4 – VALOR PREESTABLECIDO DEL CONTADOR
+
+El parámetro PV significa Preset Value, es decir, valor preestablecido.
+
+En este programa, el valor PV está configurado en 4. Esto indica que el contador debe llegar a 4 pulsos para activar su salida lógica.
+
+Mientras el contador tenga un valor menor a 4, la salida del bloque CTU permanece desactivada. Por ejemplo:
+
+- Conteo en 0: salida del contador apagada.
+- Conteo en 1: salida del contador apagada.
+- Conteo en 2: salida del contador apagada.
+- Conteo en 3: salida del contador apagada.
+- Conteo en 4: salida del contador activada.
+
+Cuando el contador alcanza el valor 4, el bloque CTU permite el paso de corriente lógica hacia la bobina %M00001.
+
+9. BOBINA INTERNA %M00001
+
+Después del contador se encuentra la bobina %M00001.
+
+La dirección %M00001 corresponde a una marca interna del PLC. Las marcas internas son memorias internas que no necesariamente están conectadas a una salida física. Se utilizan para guardar estados lógicos dentro del programa.
+
+En este caso, la marca M1 funciona como una señal interna que indica que el contador ya llegó al valor requerido.
+
+Cuando el contador llega a 4, su salida se activa y energiza la bobina %M00001. Al activarse esta marca, todos los contactos asociados a %M00001 dentro del programa cambian de estado.
+
+En este programa, la marca %M00001 se utiliza en la segunda línea para activar la salida física Q10.
+
+10. SEGUNDA LÍNEA DEL LADDER – ACTIVACIÓN DE LA LÁMPARA VERDE
+
+La segunda línea del programa contiene un contacto normalmente abierto %M00001 y una bobina de salida %Q0010.
+
+El contacto %M00001 está asociado a la marca interna que se activó en la primera línea.
+
+Cuando la marca M1 está apagada, el contacto %M00001 permanece abierto y no permite el paso de corriente lógica hacia la salida Q10. Por lo tanto, la lámpara verde permanece apagada.
+
+Cuando el contador llega a 4 y activa la marca M1, el contacto %M00001 se cierra. Al cerrarse este contacto, la corriente lógica pasa por la segunda línea hasta llegar a la bobina %Q0010.
+
+La salida %Q0010 corresponde físicamente a la lámpara verde del tablero. Por lo tanto, cuando se activa Q10, la lámpara verde se enciende.
+
+11. FUNCIONAMIENTO PASO A PASO DEL PROGRAMA
+
+El funcionamiento completo del programa puede describirse de la siguiente manera:
+
+Paso 1: Estado inicial
+
+Al iniciar el sistema, el contador se encuentra en 0. La marca %M00001 está apagada y la salida %Q0010 también está apagada. Por lo tanto, la lámpara verde permanece apagada.
+
+Paso 2: Primer pulso del botón I1
+
+El operador presiona el botón I1. El contacto %I0001 se cierra y envía un pulso a la entrada C del contador CTU. El contador aumenta su valor de 0 a 1.
+
+Como el valor todavía no llega a PV = 4, el contador no activa su salida. La marca M1 sigue apagada y la lámpara verde también sigue apagada.
+
+Paso 3: Segundo pulso del botón I1
+
+El operador suelta y vuelve a presionar el botón I1. El contador recibe otro pulso y aumenta su valor de 1 a 2.
+
+Como el valor acumulado sigue siendo menor que 4, la salida del contador continúa desactivada.
+
+Paso 4: Tercer pulso del botón I1
+
+El operador presiona nuevamente el botón I1. El contador incrementa su valor de 2 a 3.
+
+El sistema todavía no activa la lámpara porque el valor de conteo aún no alcanza el valor preestablecido.
+
+Paso 5: Cuarto pulso del botón I1
+
+El operador presiona el botón I1 por cuarta vez. El contador incrementa su valor de 3 a 4.
+
+En este momento, el valor acumulado del contador alcanza el valor PV = 4. Por esta razón, el contador activa su salida lógica.
+
+Al activarse la salida del contador, se energiza la bobina interna %M00001.
+
+Paso 6: Activación de la marca M1
+
+Cuando la bobina %M00001 se activa, la marca interna M1 queda encendida dentro del programa. Esto provoca que el contacto %M00001 de la segunda línea se cierre.
+
+Paso 7: Encendido de la salida Q10
+
+Al cerrarse el contacto %M00001 en la segunda línea, la corriente lógica puede llegar hasta la bobina %Q0010.
+
+La salida Q10 se activa y, como Q10 está conectada físicamente a la lámpara verde, la lámpara verde se enciende.
+
+Paso 8: Sistema activo
+
+Una vez que el contador llegó a 4, la lámpara verde permanece encendida porque el contador mantiene su estado activo mientras no se reinicie.
+
+El programa queda indicando que ya se alcanzó la cantidad de pulsos configurada.
+
+Paso 9: Activación del reset con I3
+
+Cuando se activa la entrada I3, la señal llega a la entrada R del contador. Esto provoca que el contador se reinicie.
+
+El valor acumulado regresa a 0, la salida del contador se apaga, la marca M1 se desactiva y el contacto M1 de la segunda línea se abre.
+
+Paso 10: Apagado de Q10
+
+Al desactivarse M1, la segunda línea deja de permitir el paso de corriente lógica hacia Q10. Por lo tanto, la salida Q10 se apaga y la lámpara verde se desactiva.
+
+Después del reset, el sistema queda listo para iniciar nuevamente el conteo desde cero.
+
+12. INTERPRETACIÓN DEL FLUJO DE CORRIENTE LÓGICO
+
+En ladder se interpreta que la corriente lógica fluye de izquierda a derecha.
+
+En la primera línea, la corriente lógica inicia en el lado izquierdo y pasa por el contacto %I0001 cuando el botón I1 se presiona. Esa señal entra al contador por la entrada C y permite incrementar el conteo.
+
+El contador solamente deja pasar la condición de salida cuando su valor acumulado llega al PV configurado, que en este caso es 4. Cuando eso ocurre, se energiza la marca %M00001.
+
+En la segunda línea, la corriente lógica depende del estado de la marca M1. Cuando M1 está activa, su contacto se cierra y permite que la corriente llegue hasta la salida %Q0010.
+
+Por eso, la lámpara verde no depende directamente del botón I1, sino del resultado del contador. El botón solo genera pulsos; el contador decide cuándo activar la marca, y la marca activa la lámpara.
+
+13. FUNCIÓN GENERAL DEL SISTEMA
+
+En términos prácticos, este sistema funciona como un contador de eventos.
+
+Su objetivo es contar cuántas veces se presiona el botón de arranque I1. Cuando el conteo llega a 4, el PLC interpreta que ya se cumplió la condición programada y activa la salida Q10.
+
+Como Q10 corresponde a la lámpara verde, el resultado visible en el tablero es que la lámpara verde se enciende después de cuatro pulsaciones del botón.
+
+El sistema permanece en ese estado hasta que se active la entrada I3, la cual reinicia el contador y apaga la lámpara.
+
+14. APLICACIÓN EN AUTOMATIZACIÓN
+
+Este tipo de lógica es muy común en automatización, ya que permite activar una salida después de que ocurre un número determinado de eventos.
+
+Algunos ejemplos de uso pueden ser:
+
+- Encender una lámpara después de contar cierta cantidad de piezas.
+- Activar una alarma después de cierto número de pulsaciones.
+- Permitir el avance de una secuencia después de varias señales de sensores.
+- Contar ciclos de trabajo de una máquina.
+- Activar una etapa del proceso después de que se complete una cantidad específica de acciones.
+
+En este caso, la aplicación es didáctica y permite comprender cómo se utiliza un contador CTU en Cscape para controlar una salida física del PLC Horner.
+
+15. RESUMEN DEL PROGRAMA
+
+Este programa utiliza un contador ascendente CTU para contar las veces que se presiona el botón físico conectado a la entrada I1.
+
+El contador utiliza el registro %R0001 para guardar su valor acumulado. El valor preestablecido PV es igual a 4, por lo que el contador activa su salida cuando recibe cuatro pulsos.
+
+Al llegar a 4, se activa la marca interna %M00001. Esta marca cierra un contacto en la segunda línea del programa, permitiendo activar la salida física %Q0010.
+
+La salida Q10 corresponde a la lámpara verde, por lo tanto, la lámpara verde se enciende cuando el operador ha presionado cuatro veces el botón I1.
+
+La entrada I3 está conectada al reset del contador. Cuando se activa I3, el contador vuelve a 0, se apaga la marca M1 y se desactiva la salida Q10, apagando la lámpara verde.
+
+En conclusión, el programa implementa un sistema de conteo con reset, donde una lámpara verde se enciende después de cuatro pulsaciones y se apaga cuando se reinicia el contador mediante la entrada I3.
