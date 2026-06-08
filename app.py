@@ -1,8 +1,6 @@
 # app.py — Backend LadderVoice
-# Servidor FastAPI que combina:
-#   - Groq Vision para leer PDFs de la carpeta codigos/
-#   - Modelo generador para crear programas Ladder desde texto
-# Despliegue: Render.com
+# Generador : Groq  (openai/gpt-oss-120b)
+# Vision    : Anthropic (claude-opus-4-5)
 
 import os
 import sys
@@ -19,9 +17,6 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s — %(levelname)s — %(message)s")
 log = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────
-# Importar funciones del módulo principal
-# ─────────────────────────────────────────────────────────────────
 from test_con_contexto import (
     cargar_carpeta_vision,
     construir_system_prompt,
@@ -33,35 +28,33 @@ from test_con_contexto import (
     MODELO,
     es_enclavamiento,
 )
-import json as _json
 
 # ─────────────────────────────────────────────────────────────────
-# Estado global — se carga UNA vez al iniciar
+# Estado global
 # ─────────────────────────────────────────────────────────────────
 STATE = {"system_prompt": "", "contexto_chars": 0}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Carga los PDFs con Vision al arrancar el servidor."""
     carpeta = os.environ.get("CODIGOS_PATH", "codigos")
-    log.info(f"Cargando PDFs desde '{carpeta}/' con Groq Vision...")
+    log.info(f"Cargando PDFs desde '{carpeta}/' con Anthropic Vision...")
     try:
         contexto = cargar_carpeta_vision(carpeta)
         if not contexto:
-            log.warning("No se encontraron PDFs — el contexto estará vacío.")
+            log.warning("No se encontraron PDFs — contexto vacio.")
             contexto = "(sin programas de referencia)"
-        STATE["system_prompt"]   = construir_system_prompt(contexto)
-        STATE["contexto_chars"]  = len(contexto)
+        STATE["system_prompt"]  = construir_system_prompt(contexto)
+        STATE["contexto_chars"] = len(contexto)
         log.info(f"Contexto listo — {STATE['contexto_chars']} chars")
     except Exception as e:
         log.error(f"Error cargando contexto: {e}")
         STATE["system_prompt"]  = construir_system_prompt("(sin programas de referencia)")
         STATE["contexto_chars"] = 0
-    yield  # servidor corriendo
+    yield
     log.info("Servidor detenido.")
 
 # ─────────────────────────────────────────────────────────────────
-# App FastAPI
+# App
 # ─────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="LadderVoice Backend",
@@ -70,7 +63,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — permite peticiones desde GitHub Pages y localhost
 ALLOWED_ORIGINS = os.environ.get(
     "ALLOWED_ORIGINS",
     "http://localhost:3000,http://127.0.0.1:5500,https://sebas30073007.github.io"
@@ -85,28 +77,23 @@ app.add_middleware(
 )
 
 # ─────────────────────────────────────────────────────────────────
-# Modelos de request / response
+# Modelos request/response
 # ─────────────────────────────────────────────────────────────────
 class PromptRequest(BaseModel):
     prompt: str
 
 class LadderResponse(BaseModel):
-    program: dict
-    nombre:  str
-    rungs:   int
-    ramas_paralelas: int
-    variables: int
+    program:          dict
+    nombre:           str
+    rungs:            int
+    ramas_paralelas:  int
+    variables:        int
     es_enclavamiento: bool
 
 # ─────────────────────────────────────────────────────────────────
-# Función principal — consulta al modelo y retorna el schema
+# Funcion principal
 # ─────────────────────────────────────────────────────────────────
-def consultar_retorna_schema(pregunta: str) -> tuple[dict, dict]:
-    """
-    Llama al modelo Groq con el system prompt cargado,
-    convierte la respuesta al schema del editor Ladder
-    y retorna (datos_raw, schema).
-    """
+def consultar_retorna_schema(pregunta: str) -> tuple:
     system_prompt   = STATE["system_prompt"]
     mensaje_usuario = construir_mensaje_usuario(pregunta)
 
@@ -128,20 +115,18 @@ def consultar_retorna_schema(pregunta: str) -> tuple[dict, dict]:
     log.info(f"Tokens — entrada: {ti}  salida: {ts}  total: {ti+ts}")
 
     try:
-        datos = _json.loads(texto_raw)
-    except _json.JSONDecodeError as e:
-        raise ValueError(f"JSON inválido del modelo: {e}\n{texto_raw[:300]}")
+        datos = json.loads(texto_raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"JSON invalido del modelo: {e}\n{texto_raw[:300]}")
 
-    # Validar enclavamiento
     ok, msg = validar_enclavamiento(datos, pregunta)
     if not ok:
         log.warning(f"Enclavamiento sin rama paralela: {msg}")
     else:
-        log.info(f"Validación: {msg}")
+        log.info(f"Validacion: {msg}")
 
     schema = a_schema(datos)
 
-    # Guardar copia local en respuestas/ (opcional en producción)
     try:
         guardar_js(datos, pregunta)
     except Exception as e:
@@ -149,9 +134,8 @@ def consultar_retorna_schema(pregunta: str) -> tuple[dict, dict]:
 
     return datos, schema
 
-
 # ─────────────────────────────────────────────────────────────────
-# ENDPOINTS
+# Endpoints
 # ─────────────────────────────────────────────────────────────────
 @app.get("/")
 def root():
@@ -173,15 +157,10 @@ def health():
 
 @app.post("/generar-ladder", response_model=LadderResponse)
 async def generar_ladder(req: PromptRequest):
-    """
-    Recibe un prompt en lenguaje natural y retorna
-    el schema JSON listo para cargar en el editor Ladder.
-    """
     if not req.prompt or not req.prompt.strip():
-        raise HTTPException(status_code=400, detail="El prompt no puede estar vacío.")
-
+        raise HTTPException(status_code=400, detail="El prompt no puede estar vacio.")
     if len(req.prompt) > 2000:
-        raise HTTPException(status_code=400, detail="El prompt es demasiado largo (máx 2000 chars).")
+        raise HTTPException(status_code=400, detail="Prompt demasiado largo (max 2000 chars).")
 
     try:
         datos, schema = consultar_retorna_schema(req.prompt.strip())
@@ -191,11 +170,11 @@ async def generar_ladder(req: PromptRequest):
         log.error(f"Error generando Ladder: {e}")
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
-    rungs    = schema.get("rungs", [])
-    n_rungs  = len(rungs)
-    n_ramas  = sum(len(r["network"]) - 1 for r in rungs if len(r["network"]) > 1)
-    n_vars   = len(schema.get("symbol_table", {}))
-    nombre   = schema.get("metadata", {}).get("name", "Programa")
+    rungs   = schema.get("rungs", [])
+    n_rungs = len(rungs)
+    n_ramas = sum(len(r["network"]) - 1 for r in rungs if len(r["network"]) > 1)
+    n_vars  = len(schema.get("symbol_table", {}))
+    nombre  = schema.get("metadata", {}).get("name", "Programa")
 
     return LadderResponse(
         program          = schema,
