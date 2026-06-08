@@ -4,7 +4,6 @@
 # Vision    : Groq Vision desde test_con_contexto.py
 
 import os
-import sys
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -37,12 +36,11 @@ from test_con_contexto import (
 # Configuracion STT
 # ─────────────────────────────────────────────────────────────────
 
-# IMPORTANTE:
-# En Render debes crear una variable de entorno llamada exactamente:
+# En Render crea esta variable exactamente así:
 # GROQ_API_KEY_stt
 GROQ_API_KEY_STT = os.environ.get("GROQ_API_KEY_stt")
 
-# Opcionales en Render:
+# Opcionales en Render
 GROQ_STT_MODEL = os.environ.get("GROQ_STT_MODEL", "whisper-large-v3")
 GROQ_STT_LANGUAGE = os.environ.get("GROQ_STT_LANGUAGE", "es")
 MAX_AUDIO_MB = int(os.environ.get("MAX_AUDIO_MB", "25"))
@@ -93,8 +91,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="LadderVoice Backend",
-    description="Genera programas Ladder para PLC Horner desde lenguaje natural y transcribe voz con STT",
-    version="1.1.0",
+    description="Genera programas Ladder desde lenguaje natural y transcribe voz con STT",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -142,6 +140,12 @@ class STTResponse(BaseModel):
     archivo: str
 
 
+class VozLadderResponse(BaseModel):
+    texto: str
+    stt: STTResponse
+    ladder: LadderResponse
+
+
 # ─────────────────────────────────────────────────────────────────
 # Funcion principal Ladder
 # ─────────────────────────────────────────────────────────────────
@@ -150,7 +154,7 @@ def consultar_retorna_schema(pregunta: str) -> tuple:
     system_prompt = STATE["system_prompt"]
     mensaje_usuario = construir_mensaje_usuario(pregunta)
 
-    log.info(f"Consultando modelo: {MODELO}")
+    log.info(f"Consultando modelo Ladder: {MODELO}")
 
     respuesta = groq_client.chat.completions.create(
         messages=[
@@ -192,13 +196,30 @@ def consultar_retorna_schema(pregunta: str) -> tuple:
     return datos, schema
 
 
+def crear_ladder_response(prompt: str, schema: dict) -> LadderResponse:
+    rungs = schema.get("rungs", [])
+    n_rungs = len(rungs)
+    n_ramas = sum(len(r["network"]) - 1 for r in rungs if len(r.get("network", [])) > 1)
+    n_vars = len(schema.get("symbol_table", {}))
+    nombre = schema.get("metadata", {}).get("name", "Programa")
+
+    return LadderResponse(
+        program=schema,
+        nombre=nombre,
+        rungs=n_rungs,
+        ramas_paralelas=n_ramas,
+        variables=n_vars,
+        es_enclavamiento=es_enclavamiento(prompt),
+    )
+
+
 # ─────────────────────────────────────────────────────────────────
-# Utilidad STT
+# Utilidades STT
 # ─────────────────────────────────────────────────────────────────
 
-def obtener_extension_audio(content_type: Optional[str], filename: Optional[str]) -> str:
+def obtener_nombre_audio(content_type: Optional[str], filename: Optional[str]) -> str:
     """
-    Ayuda a darle una extension correcta al archivo cuando el navegador
+    Ayuda a darle extension correcta al archivo cuando el navegador
     manda algo como 'blob' sin extension.
     """
 
@@ -218,6 +239,69 @@ def obtener_extension_audio(content_type: Optional[str], filename: Optional[str]
     return mapa.get(content_type or "", "audio.webm")
 
 
+async def transcribir_uploadfile(archivo_audio: UploadFile) -> STTResponse:
+    if groq_client_stt is None:
+        raise HTTPException(
+            status_code=500,
+            detail="No se encontro GROQ_API_KEY_stt en las variables de entorno de Render.",
+        )
+
+    audio_bytes = await archivo_audio.read()
+
+    if not audio_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail="El archivo de audio esta vacio.",
+        )
+
+    max_bytes = MAX_AUDIO_MB * 1024 * 1024
+
+    if len(audio_bytes) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"El audio supera el limite de {MAX_AUDIO_MB} MB.",
+        )
+
+    nombre_archivo = obtener_nombre_audio(
+        archivo_audio.content_type,
+        archivo_audio.filename,
+    )
+
+    log.info(
+        f"Transcribiendo audio '{nombre_archivo}' "
+        f"({len(audio_bytes)} bytes, tipo={archivo_audio.content_type}) "
+        f"con modelo {GROQ_STT_MODEL}"
+    )
+
+    transcripcion = groq_client_stt.audio.transcriptions.create(
+        file=(nombre_archivo, audio_bytes),
+        model=GROQ_STT_MODEL,
+        language=GROQ_STT_LANGUAGE,
+        response_format="json",
+    )
+
+    texto = getattr(transcripcion, "text", "") or ""
+
+    return STTResponse(
+        texto=texto.strip(),
+        modelo=GROQ_STT_MODEL,
+        idioma=GROQ_STT_LANGUAGE,
+        archivo=nombre_archivo,
+    )
+
+
+def seleccionar_archivo_audio(audio: Optional[UploadFile], file: Optional[UploadFile]) -> UploadFile:
+    archivo_audio = audio or file
+
+    if archivo_audio is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No se recibio archivo de audio. Usa FormData con campo 'audio'.",
+        )
+
+    return archivo_audio
+
+
 # ─────────────────────────────────────────────────────────────────
 # Endpoints
 # ─────────────────────────────────────────────────────────────────
@@ -226,13 +310,14 @@ def obtener_extension_audio(content_type: Optional[str], filename: Optional[str]
 def root():
     return {
         "service": "LadderVoice Backend",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "status": "ok",
         "contexto_chars": STATE["contexto_chars"],
         "docs": "/docs",
         "endpoints": {
             "health": "/health",
             "stt": "/transcribir",
+            "voz_a_ladder": "/voz-a-ladder",
             "ladder": "/generar-ladder",
         },
     }
@@ -257,74 +342,12 @@ async def transcribir_audio(
 ):
     """
     Recibe audio desde el frontend y lo transcribe con Groq Whisper.
-
-    Acepta el archivo con nombre de campo:
-    - audio
-    - file
-
-    Esto ayuda por si el frontend manda FormData con cualquiera de esos nombres.
+    Acepta FormData con campo 'audio' o 'file'.
     """
 
-    if groq_client_stt is None:
-        raise HTTPException(
-            status_code=500,
-            detail="No se encontro GROQ_API_KEY_stt en las variables de entorno de Render.",
-        )
-
-    archivo_audio = audio or file
-
-    if archivo_audio is None:
-        raise HTTPException(
-            status_code=400,
-            detail="No se recibio archivo de audio. Usa FormData con campo 'audio'.",
-        )
-
     try:
-        audio_bytes = await archivo_audio.read()
-
-        if not audio_bytes:
-            raise HTTPException(
-                status_code=400,
-                detail="El archivo de audio esta vacio.",
-            )
-
-        max_bytes = MAX_AUDIO_MB * 1024 * 1024
-
-        if len(audio_bytes) > max_bytes:
-            raise HTTPException(
-                status_code=413,
-                detail=f"El audio supera el limite de {MAX_AUDIO_MB} MB.",
-            )
-
-        nombre_archivo = obtener_extension_audio(
-            archivo_audio.content_type,
-            archivo_audio.filename,
-        )
-
-        log.info(
-            f"Transcribiendo audio '{nombre_archivo}' "
-            f"({len(audio_bytes)} bytes, tipo={archivo_audio.content_type}) "
-            f"con modelo {GROQ_STT_MODEL}"
-        )
-
-        transcripcion = groq_client_stt.audio.transcriptions.create(
-            file=(nombre_archivo, audio_bytes),
-            model=GROQ_STT_MODEL,
-            language=GROQ_STT_LANGUAGE,
-            response_format="json",
-        )
-
-        texto = getattr(transcripcion, "text", "")
-
-        if not texto:
-            texto = ""
-
-        return STTResponse(
-            texto=texto.strip(),
-            modelo=GROQ_STT_MODEL,
-            idioma=GROQ_STT_LANGUAGE,
-            archivo=nombre_archivo,
-        )
+        archivo_audio = seleccionar_archivo_audio(audio, file)
+        return await transcribir_uploadfile(archivo_audio)
 
     except HTTPException:
         raise
@@ -334,6 +357,60 @@ async def transcribir_audio(
         raise HTTPException(
             status_code=500,
             detail=f"Error transcribiendo audio: {str(e)}",
+        )
+
+
+@app.post("/voz-a-ladder", response_model=VozLadderResponse)
+async def voz_a_ladder(
+    audio: Optional[UploadFile] = File(None),
+    file: Optional[UploadFile] = File(None),
+):
+    """
+    Flujo completo:
+    1. Recibe audio.
+    2. Transcribe con STT.
+    3. Manda el texto transcrito al modelo generador de Ladder.
+    4. Regresa texto + programa ladder.
+    """
+
+    try:
+        archivo_audio = seleccionar_archivo_audio(audio, file)
+        stt = await transcribir_uploadfile(archivo_audio)
+
+        prompt = stt.texto.strip()
+
+        if not prompt:
+            raise HTTPException(
+                status_code=422,
+                detail="La transcripcion salio vacia. Intenta hablar mas claro o grabar de nuevo.",
+            )
+
+        if len(prompt) > 2000:
+            raise HTTPException(
+                status_code=400,
+                detail="La transcripcion es demasiado larga, maximo 2000 caracteres.",
+            )
+
+        datos, schema = consultar_retorna_schema(prompt)
+        ladder_response = crear_ladder_response(prompt, schema)
+
+        return VozLadderResponse(
+            texto=prompt,
+            stt=stt,
+            ladder=ladder_response,
+        )
+
+    except HTTPException:
+        raise
+
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    except Exception as e:
+        log.error(f"Error en voz-a-ladder: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generando Ladder desde voz: {str(e)}",
         )
 
 
@@ -347,6 +424,7 @@ async def generar_ladder(req: PromptRequest):
 
     try:
         datos, schema = consultar_retorna_schema(req.prompt.strip())
+        return crear_ladder_response(req.prompt.strip(), schema)
 
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -354,18 +432,3 @@ async def generar_ladder(req: PromptRequest):
     except Exception as e:
         log.error(f"Error generando Ladder: {e}")
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
-
-    rungs = schema.get("rungs", [])
-    n_rungs = len(rungs)
-    n_ramas = sum(len(r["network"]) - 1 for r in rungs if len(r["network"]) > 1)
-    n_vars = len(schema.get("symbol_table", {}))
-    nombre = schema.get("metadata", {}).get("name", "Programa")
-
-    return LadderResponse(
-        program=schema,
-        nombre=nombre,
-        rungs=n_rungs,
-        ramas_paralelas=n_ramas,
-        variables=n_vars,
-        es_enclavamiento=es_enclavamiento(req.prompt),
-    )
