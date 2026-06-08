@@ -1,8 +1,7 @@
-# test_con_contexto.py  v10
+# test_con_contexto.py  v11
 # Modelo generador : openai/gpt-oss-120b  (Groq)
-# Modelo vision    : claude-opus-4-5      (Anthropic)
+# Modelo vision    : meta-llama/llama-4-scout-17b-16e-instruct (Groq) — GRATIS
 # Lector PDF       : pymupdf (sin Poppler)
-# FIX              : verificacion de enclavamiento en mensaje de usuario
 
 import os
 import re
@@ -10,18 +9,15 @@ import sys
 import json
 import base64
 import datetime
-import io
-import fitz          # pymupdf — pip install pymupdf
-import anthropic
+import fitz
 from groq import Groq
 from dotenv import load_dotenv
 
 load_dotenv()
 
 MODELO        = "openai/gpt-oss-120b"
-MODELO_VISION = "claude-opus-4-5"
+MODELO_VISION = "meta-llama/llama-4-scout-17b-16e-instruct"
 groq_client   = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-vision_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 print(f"Modelo generador : {MODELO}")
 print(f"Modelo vision    : {MODELO_VISION}")
@@ -42,9 +38,6 @@ SALIDAS (%Q):
 MARCAS (%M): bits internos    REGISTROS (%R): palabras 16 bits
 """
 
-# ─────────────────────────────────────────────────────────────────
-# LECTURA DE PDF CON ANTHROPIC VISION (pymupdf, sin Poppler)
-# ─────────────────────────────────────────────────────────────────
 PROMPT_VISION = """Eres un experto en PLCs Horner programados en Ladder con Cscape.
 Analiza esta imagen de un diagrama Ladder y extrae la logica exacta.
 
@@ -88,23 +81,20 @@ def pagina_a_base64(pdf_path: str, numero_pagina: int) -> str:
     return base64.standard_b64encode(png).decode("utf-8")
 
 def analizar_pagina_vision(pdf_path: str, numero_pagina: int) -> dict:
-    """Manda una pagina a Anthropic Vision y retorna el JSON con la logica."""
     b64  = pagina_a_base64(pdf_path, numero_pagina)
-    resp = vision_client.messages.create(
+    resp = groq_client.chat.completions.create(
         model=MODELO_VISION,
         max_tokens=2000,
         messages=[{
             "role": "user",
             "content": [
-                {"type": "image",
-                 "source": {"type": "base64",
-                            "media_type": "image/png",
-                            "data": b64}},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/png;base64,{b64}"}},
                 {"type": "text", "text": PROMPT_VISION}
             ]
         }]
     )
-    texto = resp.content[0].text.strip()
+    texto = resp.choices[0].message.content.strip()
     texto = re.sub(r"^```json\s*", "", texto)
     texto = re.sub(r"```$",        "", texto.strip())
     try:
@@ -370,10 +360,6 @@ def guardar_js(datos, pregunta, carpeta="respuestas"):
     print(f"  Variables   : {len(schema['symbol_table'])}")
     return ruta, schema
 
-
-# ─────────────────────────────────────────────────────────────────
-# PROMPTS Y CONSULTA AL MODELO GENERADOR
-# ─────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT_BASE = """Eres un experto en PLCs Horner XL4/XC1E5 programados con Cscape en lenguaje Ladder.
 
 VARIABLES DEL SISTEMA:
@@ -473,7 +459,6 @@ def consultar(pregunta, system_prompt):
     print("-" * 60)
 
     mensaje_usuario = construir_mensaje_usuario(pregunta)
-
     respuesta = groq_client.chat.completions.create(
         messages=[
             {"role": "system", "content": system_prompt},
@@ -499,33 +484,22 @@ def consultar(pregunta, system_prompt):
         datos = {"programa_nombre": "error", "raw": texto_raw}
 
     print(f"\n[Modelo: {MODELO} | entrada={ti} salida={ts} total={tt}]")
-
     ok, msg = validar_enclavamiento(datos, pregunta)
     print(f"\n  {'OK' if ok else 'ADVERTENCIA'}  {msg}")
-
     ruta_js, schema = guardar_js(datos, pregunta)
     return datos
 
-
-# ─────────────────────────────────────────────────────────────────
-# EJECUCION DIRECTA
-# ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-
-    print("\nCargando codigos/ con Anthropic Vision...")
+    print("\nCargando codigos/ con Groq Vision...")
     print("=" * 60)
     contexto = cargar_carpeta_vision("codigos")
-
     if not contexto:
-        print("No hay contexto. Agrega PDFs en la carpeta codigos/")
+        print("No hay contexto.")
         sys.exit(1)
-
     system_prompt = construir_system_prompt(contexto)
     print(f"\nSystem prompt: {len(system_prompt)} chars")
     print("=" * 60)
-
     consultar(
-        "Necesito un programa para cuando presiones un boton se cicle dos lamparas a 5 segundos. "
-        "Se enciende una, al pasar el tiempo se apaga y se enciende la otra",
+        "Necesito un programa para cuando presiones un boton se cicle dos lamparas a 5 segundos.",
         system_prompt
     )
