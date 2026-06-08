@@ -1,7 +1,7 @@
 # test_con_contexto.py  v10
 # Modelo generador : openai/gpt-oss-120b  (Groq)
-# Modelo vision    : meta-llama/llama-4-scout-17b-16e-instruct  (Groq)
-# Lector PDF       : pymupdf (sin Poppler, sin Anthropic API)
+# Modelo vision    : claude-opus-4-5      (Anthropic)
+# Lector PDF       : pymupdf (sin Poppler)
 # FIX              : verificacion de enclavamiento en mensaje de usuario
 
 import os
@@ -10,15 +10,18 @@ import sys
 import json
 import base64
 import datetime
+import io
 import fitz          # pymupdf — pip install pymupdf
+import anthropic
 from groq import Groq
 from dotenv import load_dotenv
 
 load_dotenv()
 
 MODELO        = "openai/gpt-oss-120b"
-MODELO_VISION = "meta-llama/llama-4-scout-17b-16e-instruct"
+MODELO_VISION = "claude-opus-4-5"
 groq_client   = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+vision_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 print(f"Modelo generador : {MODELO}")
 print(f"Modelo vision    : {MODELO_VISION}")
@@ -40,7 +43,7 @@ MARCAS (%M): bits internos    REGISTROS (%R): palabras 16 bits
 """
 
 # ─────────────────────────────────────────────────────────────────
-# LECTURA DE PDF CON GROQ VISION (pymupdf, sin Poppler)
+# LECTURA DE PDF CON ANTHROPIC VISION (pymupdf, sin Poppler)
 # ─────────────────────────────────────────────────────────────────
 PROMPT_VISION = """Eres un experto en PLCs Horner programados en Ladder con Cscape.
 Analiza esta imagen de un diagrama Ladder y extrae la logica exacta.
@@ -85,20 +88,23 @@ def pagina_a_base64(pdf_path: str, numero_pagina: int) -> str:
     return base64.standard_b64encode(png).decode("utf-8")
 
 def analizar_pagina_vision(pdf_path: str, numero_pagina: int) -> dict:
+    """Manda una pagina a Anthropic Vision y retorna el JSON con la logica."""
     b64  = pagina_a_base64(pdf_path, numero_pagina)
-    resp = groq_client.chat.completions.create(
+    resp = vision_client.messages.create(
         model=MODELO_VISION,
         max_tokens=2000,
         messages=[{
             "role": "user",
             "content": [
-                {"type": "image_url",
-                 "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                {"type": "image",
+                 "source": {"type": "base64",
+                            "media_type": "image/png",
+                            "data": b64}},
                 {"type": "text", "text": PROMPT_VISION}
             ]
         }]
     )
-    texto = resp.choices[0].message.content.strip()
+    texto = resp.content[0].text.strip()
     texto = re.sub(r"^```json\s*", "", texto)
     texto = re.sub(r"```$",        "", texto.strip())
     try:
@@ -461,7 +467,6 @@ def validar_enclavamiento(datos, pregunta):
     )
 
 def consultar(pregunta, system_prompt):
-    """Funcion original — para correr desde terminal."""
     print(f"\nConsulta: {pregunta}")
     if es_enclavamiento(pregunta):
         print("  [Enclavamiento detectado — verificacion activada]")
@@ -503,11 +508,11 @@ def consultar(pregunta, system_prompt):
 
 
 # ─────────────────────────────────────────────────────────────────
-# EJECUCION DIRECTA (python test_con_contexto.py)
+# EJECUCION DIRECTA
 # ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
 
-    print("\nCargando codigos/ con Groq Vision...")
+    print("\nCargando codigos/ con Anthropic Vision...")
     print("=" * 60)
     contexto = cargar_carpeta_vision("codigos")
 
@@ -520,7 +525,7 @@ if __name__ == "__main__":
     print("=" * 60)
 
     consultar(
-        "Necesito un programa para cuando presiones un boton se cicle dos lamparas, a 5 segundos "
+        "Necesito un programa para cuando presiones un boton se cicle dos lamparas a 5 segundos. "
         "Se enciende una, al pasar el tiempo se apaga y se enciende la otra",
         system_prompt
     )
