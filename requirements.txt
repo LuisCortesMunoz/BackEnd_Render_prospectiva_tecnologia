@@ -4,3 +4,4 @@ groq
 pymupdf
 python-dotenv
 pydantic
+python-multipart
