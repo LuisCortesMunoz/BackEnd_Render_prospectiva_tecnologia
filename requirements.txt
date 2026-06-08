@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+groq
+anthropic
+pymupdf
+python-dotenv
+pydantic
