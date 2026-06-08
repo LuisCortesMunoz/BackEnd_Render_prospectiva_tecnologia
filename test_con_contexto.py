@@ -76,17 +76,15 @@ Reglas:
 """
 
 def pagina_a_base64(pdf_path: str, numero_pagina: int) -> str:
-    """Convierte una pagina del PDF a PNG base64 con pymupdf."""
     doc  = fitz.open(pdf_path)
     page = doc[numero_pagina]
-    mat  = fitz.Matrix(2.0, 2.0)   # zoom x2 para mejor resolucion
+    mat  = fitz.Matrix(2.0, 2.0)
     pix  = page.get_pixmap(matrix=mat)
     png  = pix.tobytes("png")
     doc.close()
     return base64.standard_b64encode(png).decode("utf-8")
 
 def analizar_pagina_vision(pdf_path: str, numero_pagina: int) -> dict:
-    """Manda una pagina a Groq Vision y retorna el JSON con la logica."""
     b64  = pagina_a_base64(pdf_path, numero_pagina)
     resp = groq_client.chat.completions.create(
         model=MODELO_VISION,
@@ -106,11 +104,9 @@ def analizar_pagina_vision(pdf_path: str, numero_pagina: int) -> dict:
     try:
         return json.loads(texto)
     except json.JSONDecodeError:
-        return {"renglones": [], "descripcion_general": "error al parsear",
-                "raw": texto}
+        return {"renglones": [], "descripcion_general": "error al parsear", "raw": texto}
 
 def procesar_pdf_vision(ruta_pdf: str, descripcion_txt: str = "") -> str:
-    """Lee todas las paginas del PDF con Vision y retorna bloque de contexto."""
     nombre = os.path.splitext(os.path.basename(ruta_pdf))[0]
     doc    = fitz.open(ruta_pdf)
     total  = len(doc)
@@ -123,11 +119,10 @@ def procesar_pdf_vision(ruta_pdf: str, descripcion_txt: str = "") -> str:
 
     for i in range(total):
         if i == 0:
-            continue  # portada — omitir
+            continue
         print(f"    Pagina {i+1}: analizando...", end=" ", flush=True)
         datos = analizar_pagina_vision(ruta_pdf, i)
         n     = len(datos.get("renglones", []))
-
         if n == 0:
             print("vacia")
             continue
@@ -152,7 +147,6 @@ def procesar_pdf_vision(ruta_pdf: str, descripcion_txt: str = "") -> str:
 
 def cargar_carpeta_vision(carpeta: str = "codigos",
                           max_chars_por_programa: int = 4000) -> str:
-    """Carga todos los PDFs de la carpeta usando Vision y asocia sus .txt."""
     if not os.path.isdir(carpeta):
         print(f"AVISO: carpeta '{carpeta}/' no encontrada.")
         return ""
@@ -185,7 +179,6 @@ def cargar_carpeta_vision(carpeta: str = "codigos",
         except Exception as e:
             print(f"  ERR: {nombre_pdf} — {e}\n")
 
-    # TXT sin PDF asociado
     txts_solos = sorted([
         f for f in os.listdir(carpeta)
         if f.lower().endswith(".txt")
@@ -468,6 +461,7 @@ def validar_enclavamiento(datos, pregunta):
     )
 
 def consultar(pregunta, system_prompt):
+    """Funcion original — para correr desde terminal."""
     print(f"\nConsulta: {pregunta}")
     if es_enclavamiento(pregunta):
         print("  [Enclavamiento detectado — verificacion activada]")
@@ -509,7 +503,7 @@ def consultar(pregunta, system_prompt):
 
 
 # ─────────────────────────────────────────────────────────────────
-# EJECUCION
+# EJECUCION DIRECTA (python test_con_contexto.py)
 # ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
 
@@ -526,7 +520,7 @@ if __name__ == "__main__":
     print("=" * 60)
 
     consultar(
-        "Necesito un programa para cuando presiones un boton se cilce dos lampareas, a 5 segundos"
-        "Se enciende una, al pasar el tiempo se apaga y se enciede la otra",
+        "Necesito un programa para cuando presiones un boton se cicle dos lamparas, a 5 segundos "
+        "Se enciende una, al pasar el tiempo se apaga y se enciende la otra",
         system_prompt
     )
