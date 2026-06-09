@@ -27,10 +27,13 @@ from test_con_contexto import (
     validar_enclavamiento,
     a_schema,
     guardar_js,
+    schema_a_js_string,
     groq_client,
     MODELO,
     es_enclavamiento,
 )
+
+MAX_HISTORY = 5  # pares pregunta/respuesta que se mantienen en memoria
 
 # ─────────────────────────────────────────────────────────────────
 # Configuración STT
@@ -55,6 +58,7 @@ groq_client_stt = Groq(api_key=GROQ_API_KEY_STT) if GROQ_API_KEY_STT else None
 STATE = {
     "system_prompt": "",
     "contexto_chars": 0,
+    "history": [],  # lista de {role, content} — pares user/assistant acumulados
 }
 
 
@@ -111,7 +115,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -131,6 +135,8 @@ class LadderResponse(BaseModel):
     ramas_paralelas: int
     variables: int
     es_enclavamiento: bool
+    js_content: str       # contenido JS listo para importar en el frontend
+    historia_pares: int   # cuántos pares Q&A acumulados usa el modelo
 
 
 class STTResponse(BaseModel):
@@ -152,9 +158,8 @@ class VozLadderResponse(BaseModel):
 
 def consultar_retorna_schema(pregunta: str) -> tuple:
     system_prompt = STATE["system_prompt"]
+    history = STATE["history"]
 
-    # Regla extra para evitar que el modelo agregue entradas no pedidas,
-    # por ejemplo paro de emergencia I8 si el usuario no lo mencionó.
     pregunta_reforzada = f"""
 {pregunta}
 
@@ -166,13 +171,15 @@ REGLAS IMPORTANTES:
 
     mensaje_usuario = construir_mensaje_usuario(pregunta_reforzada)
 
-    log.info(f"Consultando modelo Ladder: {MODELO}")
+    # Construcción de mensajes: sistema + historial acumulado + pregunta actual
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(history)  # pares user/assistant de preguntas anteriores
+    messages.append({"role": "user", "content": mensaje_usuario})
+
+    log.info(f"Consultando modelo Ladder: {MODELO} | historial: {len(history)//2} pares")
 
     respuesta = groq_client.chat.completions.create(
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": mensaje_usuario},
-        ],
+        messages=messages,
         model=MODELO,
         temperature=1,
         max_tokens=2048,
@@ -199,16 +206,24 @@ REGLAS IMPORTANTES:
         log.info(f"Validación: {msg}")
 
     schema = a_schema(datos)
+    js_string = schema_a_js_string(schema, pregunta)
+
+    # Acumular historial: guardamos la pregunta original (corta) y el JSON generado
+    STATE["history"].append({"role": "user", "content": pregunta})
+    STATE["history"].append({"role": "assistant", "content": texto_raw})
+    # Mantener solo los últimos MAX_HISTORY pares
+    if len(STATE["history"]) > MAX_HISTORY * 2:
+        STATE["history"] = STATE["history"][-(MAX_HISTORY * 2):]
 
     try:
         guardar_js(datos, pregunta)
     except Exception as e:
         log.warning(f"No se pudo guardar .js local: {e}")
 
-    return datos, schema
+    return datos, schema, js_string
 
 
-def crear_ladder_response(prompt: str, schema: dict) -> LadderResponse:
+def crear_ladder_response(prompt: str, schema: dict, js_string: str) -> LadderResponse:
     rungs = schema.get("rungs", [])
     n_rungs = len(rungs)
     n_ramas = sum(len(r["network"]) - 1 for r in rungs if len(r.get("network", [])) > 1)
@@ -222,6 +237,8 @@ def crear_ladder_response(prompt: str, schema: dict) -> LadderResponse:
         ramas_paralelas=n_ramas,
         variables=n_vars,
         es_enclavamiento=es_enclavamiento(prompt),
+        js_content=js_string,
+        historia_pares=len(STATE["history"]) // 2,
     )
 
 
@@ -331,7 +348,10 @@ def root():
             "stt": "/transcribir",
             "voz_a_ladder": "/voz-a-ladder",
             "ladder": "/generar-ladder",
+            "historial_ver": "GET /historial",
+            "historial_limpiar": "DELETE /historial",
         },
+        "historia_pares": len(STATE["history"]) // 2,
     }
 
 
@@ -403,8 +423,8 @@ async def voz_a_ladder(
                 detail="La transcripción es demasiado larga, máximo 2000 caracteres.",
             )
 
-        datos, schema = consultar_retorna_schema(prompt)
-        ladder_response = crear_ladder_response(prompt, schema)
+        datos, schema, js_string = consultar_retorna_schema(prompt)
+        ladder_response = crear_ladder_response(prompt, schema, js_string)
 
         return VozLadderResponse(
             texto=prompt,
@@ -435,8 +455,8 @@ async def generar_ladder(req: PromptRequest):
         raise HTTPException(status_code=400, detail="Prompt demasiado largo, máximo 2000 caracteres.")
 
     try:
-        datos, schema = consultar_retorna_schema(req.prompt.strip())
-        return crear_ladder_response(req.prompt.strip(), schema)
+        datos, schema, js_string = consultar_retorna_schema(req.prompt.strip())
+        return crear_ladder_response(req.prompt.strip(), schema, js_string)
 
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -444,3 +464,29 @@ async def generar_ladder(req: PromptRequest):
     except Exception as e:
         log.error(f"Error generando Ladder: {e}")
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+
+# ─────────────────────────────────────────────────────────────────
+# Endpoints de historial
+# ─────────────────────────────────────────────────────────────────
+
+@app.get("/historial")
+def ver_historial():
+    """Muestra las preguntas acumuladas en el historial del modelo."""
+    preguntas = [
+        STATE["history"][i]["content"][:120]
+        for i in range(0, len(STATE["history"]), 2)
+    ]
+    return {
+        "pares_actuales": len(STATE["history"]) // 2,
+        "max_pares": MAX_HISTORY,
+        "preguntas": preguntas,
+    }
+
+
+@app.delete("/historial")
+def limpiar_historial():
+    """Resetea el historial de conversación del modelo."""
+    STATE["history"] = []
+    log.info("Historial limpiado.")
+    return {"status": "ok", "mensaje": "Historial limpiado."}

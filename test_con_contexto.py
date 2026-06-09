@@ -341,19 +341,29 @@ def a_schema(datos):
         "execution_state":{"mode":"run","rung_states":{},"forced_outputs":{}},
     }
 
+def schema_a_js_string(schema: dict, pregunta: str) -> str:
+    ramas = sum(len(r["network"])-1 for r in schema["rungs"] if len(r["network"])>1)
+    lineas = [
+        f"// Generado : {MODELO} | {datetime.datetime.now():%Y-%m-%d %H:%M:%S}",
+        f"// Consulta : {pregunta}",
+        f"// Rungs: {len(schema['rungs'])} | Ramas paralelas: {ramas} | Variables: {len(schema['symbol_table'])}",
+        "",
+        f"export const program = {json.dumps(schema, indent=2, ensure_ascii=False)};",
+        "",
+        "export default program;",
+    ]
+    return "\n".join(lineas)
+
 def guardar_js(datos, pregunta, carpeta="respuestas"):
     os.makedirs(carpeta, exist_ok=True)
     ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     slug = re.sub(r"[^\w\s-]","",datos.get("programa_nombre","prog")).strip().replace(" ","_")
     ruta = os.path.join(carpeta, f"{ts}_{slug}.js")
     schema = a_schema(datos)
-    ramas  = sum(len(r["network"])-1 for r in schema["rungs"] if len(r["network"])>1)
+    contenido = schema_a_js_string(schema, pregunta)
+    ramas = sum(len(r["network"])-1 for r in schema["rungs"] if len(r["network"])>1)
     with open(ruta,"w",encoding="utf-8") as f:
-        f.write(f"// Generado : {MODELO} | {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
-        f.write(f"// Consulta : {pregunta}\n")
-        f.write(f"// Rungs: {len(schema['rungs'])} | Ramas paralelas: {ramas} | Variables: {len(schema['symbol_table'])}\n\n")
-        f.write(f"export const program = {json.dumps(schema,indent=2,ensure_ascii=False)};\n\n")
-        f.write("export default program;\n")
+        f.write(contenido)
     print(f"\n  JS guardado : {ruta}")
     print(f"  Rungs       : {len(schema['rungs'])}")
     print(f"  Ramas par.  : {ramas}  {'OK' if ramas > 0 else 'ADVERTENCIA: sin ramas paralelas'}")
