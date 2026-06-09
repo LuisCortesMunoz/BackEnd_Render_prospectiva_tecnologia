@@ -33,7 +33,7 @@ from test_con_contexto import (
 )
 
 # ─────────────────────────────────────────────────────────────────
-# Configuracion STT
+# Configuración STT
 # ─────────────────────────────────────────────────────────────────
 
 # En Render crea esta variable exactamente así:
@@ -67,7 +67,7 @@ async def lifespan(app: FastAPI):
         contexto = cargar_carpeta_vision(carpeta)
 
         if not contexto:
-            log.warning("No se encontraron PDFs — contexto vacio.")
+            log.warning("No se encontraron PDFs — contexto vacío.")
             contexto = "(sin programas de referencia)"
 
         STATE["system_prompt"] = construir_system_prompt(contexto)
@@ -147,12 +147,24 @@ class VozLadderResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────
-# Funcion principal Ladder
+# Función principal Ladder
 # ─────────────────────────────────────────────────────────────────
 
 def consultar_retorna_schema(pregunta: str) -> tuple:
     system_prompt = STATE["system_prompt"]
-    mensaje_usuario = construir_mensaje_usuario(pregunta)
+
+    # Regla extra para evitar que el modelo agregue entradas no pedidas,
+    # por ejemplo paro de emergencia I8 si el usuario no lo mencionó.
+    pregunta_reforzada = f"""
+{pregunta}
+
+REGLAS IMPORTANTES:
+- Usa únicamente las entradas, salidas, marcas, temporizadores o contadores que el usuario pidió explícitamente.
+- No agregues paro de emergencia, sensores, salidas ni marcas extra si el usuario no los mencionó.
+- Si el usuario pide botón de inicio I1, botón de paro I2 y salida Q10, usa solo I1, I2, Q10 y una marca interna si es necesaria para enclavamiento.
+"""
+
+    mensaje_usuario = construir_mensaje_usuario(pregunta_reforzada)
 
     log.info(f"Consultando modelo Ladder: {MODELO}")
 
@@ -177,14 +189,14 @@ def consultar_retorna_schema(pregunta: str) -> tuple:
     try:
         datos = json.loads(texto_raw)
     except json.JSONDecodeError as e:
-        raise ValueError(f"JSON invalido del modelo: {e}\n{texto_raw[:300]}")
+        raise ValueError(f"JSON inválido del modelo: {e}\n{texto_raw[:300]}")
 
     ok, msg = validar_enclavamiento(datos, pregunta)
 
     if not ok:
         log.warning(f"Enclavamiento sin rama paralela: {msg}")
     else:
-        log.info(f"Validacion: {msg}")
+        log.info(f"Validación: {msg}")
 
     schema = a_schema(datos)
 
@@ -219,8 +231,8 @@ def crear_ladder_response(prompt: str, schema: dict) -> LadderResponse:
 
 def obtener_nombre_audio(content_type: Optional[str], filename: Optional[str]) -> str:
     """
-    Ayuda a darle extension correcta al archivo cuando el navegador
-    manda algo como 'blob' sin extension.
+    Ayuda a darle extensión correcta al archivo cuando el navegador
+    manda algo como 'blob' sin extensión.
     """
 
     if filename and "." in filename:
@@ -243,7 +255,7 @@ async def transcribir_uploadfile(archivo_audio: UploadFile) -> STTResponse:
     if groq_client_stt is None:
         raise HTTPException(
             status_code=500,
-            detail="No se encontro GROQ_API_KEY_stt en las variables de entorno de Render.",
+            detail="No se encontró GROQ_API_KEY_stt en las variables de entorno de Render.",
         )
 
     audio_bytes = await archivo_audio.read()
@@ -251,7 +263,7 @@ async def transcribir_uploadfile(archivo_audio: UploadFile) -> STTResponse:
     if not audio_bytes:
         raise HTTPException(
             status_code=400,
-            detail="El archivo de audio esta vacio.",
+            detail="El archivo de audio está vacío.",
         )
 
     max_bytes = MAX_AUDIO_MB * 1024 * 1024
@@ -259,7 +271,7 @@ async def transcribir_uploadfile(archivo_audio: UploadFile) -> STTResponse:
     if len(audio_bytes) > max_bytes:
         raise HTTPException(
             status_code=413,
-            detail=f"El audio supera el limite de {MAX_AUDIO_MB} MB.",
+            detail=f"El audio supera el límite de {MAX_AUDIO_MB} MB.",
         )
 
     nombre_archivo = obtener_nombre_audio(
@@ -296,7 +308,7 @@ def seleccionar_archivo_audio(audio: Optional[UploadFile], file: Optional[Upload
     if archivo_audio is None:
         raise HTTPException(
             status_code=400,
-            detail="No se recibio archivo de audio. Usa FormData con campo 'audio'.",
+            detail="No se recibió archivo de audio. Usa FormData con campo 'audio'.",
         )
 
     return archivo_audio
@@ -382,13 +394,13 @@ async def voz_a_ladder(
         if not prompt:
             raise HTTPException(
                 status_code=422,
-                detail="La transcripcion salio vacia. Intenta hablar mas claro o grabar de nuevo.",
+                detail="La transcripción salió vacía. Intenta hablar más claro o grabar de nuevo.",
             )
 
         if len(prompt) > 2000:
             raise HTTPException(
                 status_code=400,
-                detail="La transcripcion es demasiado larga, maximo 2000 caracteres.",
+                detail="La transcripción es demasiado larga, máximo 2000 caracteres.",
             )
 
         datos, schema = consultar_retorna_schema(prompt)
@@ -417,10 +429,10 @@ async def voz_a_ladder(
 @app.post("/generar-ladder", response_model=LadderResponse)
 async def generar_ladder(req: PromptRequest):
     if not req.prompt or not req.prompt.strip():
-        raise HTTPException(status_code=400, detail="El prompt no puede estar vacio.")
+        raise HTTPException(status_code=400, detail="El prompt no puede estar vacío.")
 
     if len(req.prompt) > 2000:
-        raise HTTPException(status_code=400, detail="Prompt demasiado largo, maximo 2000 caracteres.")
+        raise HTTPException(status_code=400, detail="Prompt demasiado largo, máximo 2000 caracteres.")
 
     try:
         datos, schema = consultar_retorna_schema(req.prompt.strip())
