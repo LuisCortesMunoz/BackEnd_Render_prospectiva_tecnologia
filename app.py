@@ -6,7 +6,7 @@
 
 import os, re, json, logging, datetime
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -388,6 +388,40 @@ def guardar_js(datos: dict, pregunta: str, carpeta: str = "respuestas"):
     log.info(f"JS guardado: {ruta} | Rungs: {len(schema['rungs'])} | Ramas: {ramas}")
     return ruta, schema
 
+# ─── Contexto conversacional (modo Diseñador) ────────────────────
+
+def denorm(addr: str) -> str:
+    """Direccion del editor (I0.1, Q0.10, M0.2, MW5) → formato del
+    modelo (%I1, %Q10, %M2, %R5). Si no coincide, se deja tal cual."""
+    s = str(addr or "").strip().upper()
+    m = re.match(r"^([IQM])0\.(\d+)$", s)
+    if m:
+        return f"%{m.group(1)}{m.group(2)}"
+    m = re.match(r"^MW(\d+)$", s)
+    if m:
+        return f"%R{m.group(1)}"
+    return addr or ""
+
+
+def describir_programa_editor(prog: dict) -> str:
+    """Convierte el JSON del editor (rungs/network/elements) a la misma
+    descripcion textual que usan los programas de referencia del system
+    prompt, para que el modelo lo lea en un formato que ya conoce y sin
+    gastar tokens en metadata, symbol_table ni execution_state."""
+    lineas = [f"Nombre: {prog.get('metadata', {}).get('name', 'Programa')}"]
+    for r in prog.get("rungs", []):
+        lineas.append(f"Renglon {r.get('id', '?')}: {r.get('comment', '')}")
+        for row in sorted(r.get("network", []), key=lambda x: x.get("row", 0)):
+            els = []
+            for el in row.get("elements", []):
+                txt = f"{el.get('type', '?')} {denorm(el.get('address', ''))}"
+                if el.get("params"):
+                    txt += f" {el['params']}"
+                els.append(txt)
+            par = "(paralela)" if row.get("row", 0) > 0 else ""
+            lineas.append(f"  fila {row.get('row', 0)}{par}: " + " | ".join(els))
+    return "\n".join(lineas)
+
 # ─── Helpers de prompt ────────────────────────────────────────────
 
 def es_enclavamiento(pregunta: str) -> bool:
@@ -467,8 +501,18 @@ app.add_middleware(
 
 # ─── Modelos Pydantic ─────────────────────────────────────────────
 
+class ContextoLadder(BaseModel):
+    """Contexto conversacional que manda el Copiloto (modo Diseñador):
+    el ultimo programa generado (esquema del editor) y los prompts previos,
+    para que instrucciones como "cambialo" o "agregale" tengan referencia."""
+    programa_anterior: Optional[dict] = None
+    historial: Optional[List[str]] = None
+
+
 class PromptRequest(BaseModel):
     prompt: str
+    # Opcional: clientes viejos que solo mandan {prompt} siguen funcionando.
+    contexto: Optional[ContextoLadder] = None
 
 
 class LadderResponse(BaseModel):
@@ -496,8 +540,23 @@ class VozLadderResponse(BaseModel):
 
 # ─── Logica principal Ladder ──────────────────────────────────────
 
-def consultar_retorna_schema(pregunta: str) -> tuple:
-    pregunta_reforzada = f"""{pregunta}
+def consultar_retorna_schema(pregunta: str, contexto: Optional[ContextoLadder] = None) -> tuple:
+    es_modificacion = bool(contexto and contexto.programa_anterior)
+
+    if es_modificacion:
+        # OJO: la regla de "usa unicamente lo pedido" no aplica aqui — el
+        # usuario pide un cambio puntual y el resto del programa debe sobrevivir.
+        pregunta_reforzada = f"""{pregunta}
+
+REGLAS IMPORTANTES:
+- La instruccion de arriba MODIFICA el PROGRAMA ACTUAL de esta conversacion.
+- Genera el programa COMPLETO actualizado: conserva todos los renglones y
+  elementos del programa actual, salvo lo que la instruccion pida cambiar,
+  quitar o agregar.
+- No agregues entradas, salidas ni marcas nuevas que no se pidan.
+"""
+    else:
+        pregunta_reforzada = f"""{pregunta}
 
 REGLAS IMPORTANTES:
 - Usa unicamente las entradas, salidas, marcas, temporizadores o contadores que el usuario pidio explicitamente.
@@ -505,12 +564,33 @@ REGLAS IMPORTANTES:
 """
     mensaje_usuario = construir_mensaje_usuario(pregunta_reforzada)
 
-    # Sistema + historial acumulado + pregunta nueva
     messages = [{"role": "system", "content": STATE["system_prompt"]}]
-    messages.extend(STATE["history"])
+    if es_modificacion:
+        # Contexto por peticion enviado por el cliente: es la fuente de
+        # verdad de SU conversacion (el historial global en RAM mezcla a
+        # todos los usuarios y se pierde cuando Render duerme).
+        previas = "\n".join(f"- {p}" for p in (contexto.historial or [])[-4:])
+        messages.append({"role": "user", "content": (
+            "CONTEXTO DEL MODO DISENADOR — conversacion previa con este usuario.\n"
+            f"Peticiones anteriores:\n{previas or '- (sin registro)'}\n\n"
+            "PROGRAMA ACTUAL (resultado de la peticion anterior):\n"
+            f"{describir_programa_editor(contexto.programa_anterior)}"
+        )})
+        messages.append({"role": "assistant", "content": (
+            "Entendido, ese es el programa actual. Aplicare la siguiente "
+            "instruccion como modificacion y devolvere el programa completo "
+            "actualizado en el esquema JSON indicado."
+        )})
+    else:
+        # Sin contexto del cliente: historial acumulado del servidor
+        # (comportamiento original, usado tambien por /voz-a-ladder).
+        messages.extend(STATE["history"])
     messages.append({"role": "user", "content": mensaje_usuario})
 
-    log.info(f"Modelo: {MODELO} | historial en RAM: {len(STATE['history'])//2} pares")
+    log.info(
+        f"Modelo: {MODELO} | historial en RAM: {len(STATE['history'])//2} pares"
+        f" | modificacion con contexto del cliente: {es_modificacion}"
+    )
 
     resp = groq_client.chat.completions.create(
         messages=messages,
@@ -693,7 +773,7 @@ async def generar_ladder(req: PromptRequest):
     if len(req.prompt) > 2000:
         raise HTTPException(400, "Prompt demasiado largo, maximo 2000 caracteres.")
     try:
-        datos, schema, js_string = consultar_retorna_schema(req.prompt.strip())
+        datos, schema, js_string = consultar_retorna_schema(req.prompt.strip(), req.contexto)
         return crear_ladder_response(req.prompt.strip(), schema, js_string)
     except ValueError as e:
         raise HTTPException(422, str(e))
