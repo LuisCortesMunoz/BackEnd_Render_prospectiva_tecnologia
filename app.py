@@ -3,6 +3,7 @@
 # STT       : Groq Whisper
 # Contexto  : context_json/contexto.json  (generado por preparar_contexto.py)
 # Historial : respuestas/historial.json   (persistente entre reinicios)
+# Memoria   : memoria/ejemplos.json       (feedback del usuario → mejores respuestas)
 
 import os, re, json, logging, datetime
 from contextlib import asynccontextmanager
@@ -36,11 +37,15 @@ groq_client_stt = Groq(api_key=GROQ_API_KEY_STT) if GROQ_API_KEY_STT else None
 
 CONTEXTO_JSON_PATH = os.environ.get("CONTEXTO_JSON", "context_json/contexto.json")
 HISTORIAL_PATH     = "respuestas/historial.json"
+MEMORIA_PATH       = os.environ.get("MEMORIA_JSON", "memoria/ejemplos.json")
 
 # Cuantos pares Q&A mantener en RAM (contexto activo del modelo)
 MAX_HISTORY   = 5
 # Cuantas entradas guardar en historial.json (memoria a largo plazo)
 MAX_HISTORIAL = 50
+# Maximo de ejemplos en memoria/ejemplos.json y cuantos se inyectan por peticion
+MAX_EJEMPLOS        = int(os.environ.get("MAX_EJEMPLOS", "100"))
+MAX_EJEMPLOS_PROMPT = 3
 
 # ─── Variables PLC ────────────────────────────────────────────────
 
@@ -200,6 +205,225 @@ def guardar_historial(pregunta: str, texto_raw: str):
             json.dump(datos, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log.warning(f"No se pudo guardar historial: {e}")
+
+# ─── Memoria de aprendizaje por feedback ─────────────────────────
+# Cada generacion se guarda como ejemplo "pending" en memoria/ejemplos.json.
+# Con POST /feedback el usuario lo marca accepted / corrected / rejected.
+# Solo los ejemplos accepted/corrected se inyectan como contexto en
+# peticiones futuras: el modelo mejora sin reentrenamiento.
+
+STOPWORDS_ES = {
+    "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "al",
+    "y", "o", "u", "que", "se", "en", "con", "por", "para", "cuando", "como",
+    "donde", "es", "su", "sus", "lo", "le", "les", "mi", "tu", "si", "no",
+    "me", "te", "ya", "hay", "este", "esta", "esto", "ese", "esa", "eso",
+    "crea", "crear", "genera", "generar", "haz", "hacer", "quiero",
+    "necesito", "favor", "pon", "poner", "programa", "ladder", "donde",
+}
+
+ACENTOS = str.maketrans("áéíóúüñ", "aeiouun")
+
+
+def _tokens(texto: str) -> set:
+    """Palabras significativas de un texto (sin acentos ni stopwords)."""
+    t = str(texto or "").lower().translate(ACENTOS)
+    return {p for p in re.findall(r"[a-z0-9%\.]+", t)
+            if len(p) > 2 and p not in STOPWORDS_ES}
+
+
+TAGS_KEYWORDS = {
+    "button":    ["boton", "pulsador", "button"],
+    "output":    ["salida", "lampara", "output", "luz", "foco", "led"],
+    "seal-in":   ["enclav", "seal", "retenc", "memoria", "latch",
+                  "arranque", "marcha", "mantenga"],
+    "stop":      ["paro", "stop", "detener", "apagar"],
+    "emergency": ["emergencia", "emergency"],
+    "timer":     ["timer", "temporiz", "retardo", "segundo", "delay"],
+    "counter":   ["contador", "counter", "pulso", "conteo", "contar", "cuenta"],
+    "compare":   ["compar", "mayor", "menor", "igual"],
+    "sequence":  ["secuencia", "ciclo", "intermitente", "alternar", "semaforo"],
+}
+
+
+def _tag_de_tipo(tipo: str):
+    t = str(tipo or "").strip().upper()
+    if t in ("TON", "TOF", "BLOCK_TON", "BLOCK_TOF"):
+        return "timer"
+    if t in ("CTU", "CTD", "BLOCK_CTU", "BLOCK_CTD"):
+        return "counter"
+    if t in ("OTL", "OTU", "COIL_S", "COIL_R"):
+        return "seal-in"
+    if t in ("CMP", "BLOCK_CMP"):
+        return "compare"
+    return None
+
+
+def extraer_tags(pregunta: str, datos: Optional[dict] = None) -> list:
+    """Tags automaticos: palabras clave del prompt + tipos usados en la logica."""
+    texto = str(pregunta or "").lower().translate(ACENTOS)
+    tags  = {t for t, kws in TAGS_KEYWORDS.items() if any(k in texto for k in kws)}
+    for r in (datos or {}).get("logica_ladder", []):
+        if len(r.get("filas", [])) > 1:
+            tags.add("seal-in")
+        for fila in r.get("filas", []):
+            for el in fila.get("elementos", []):
+                tag = _tag_de_tipo(el.get("tipo"))
+                if tag:
+                    tags.add(tag)
+    tags.add("Horner_XL4")
+    return sorted(tags)
+
+
+def cargar_memoria() -> list:
+    try:
+        if not os.path.exists(MEMORIA_PATH):
+            return []
+        with open(MEMORIA_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        log.warning(f"No se pudo cargar memoria de feedback: {e}")
+        return []
+
+
+def guardar_memoria(ejemplos: list):
+    try:
+        os.makedirs(os.path.dirname(MEMORIA_PATH), exist_ok=True)
+        with open(MEMORIA_PATH, "w", encoding="utf-8") as f:
+            json.dump(ejemplos, f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        log.warning(f"No se pudo guardar memoria de feedback: {e}")
+
+
+PRIORIDAD_STATUS = {"corrected": 3, "accepted": 2, "pending": 1, "rejected": 0}
+
+
+def _podar_memoria(ejemplos: list) -> list:
+    """Mantiene la memoria bajo MAX_EJEMPLOS. Salen primero los rejected y
+    pending mas viejos y menos usados; corrected/accepted son los ultimos."""
+    if len(ejemplos) <= MAX_EJEMPLOS:
+        return ejemplos
+    orden = sorted(ejemplos, key=lambda e: (
+        PRIORIDAD_STATUS.get(e.get("status"), 0),
+        e.get("uses", 0),
+        e.get("date", ""),
+    ))
+    quitar = {e.get("id") for e in orden[:len(ejemplos) - MAX_EJEMPLOS]}
+    return [e for e in ejemplos if e.get("id") not in quitar]
+
+
+def _compactar_datos_modelo(datos: dict) -> dict:
+    """Solo los campos del JSON del modelo que aportan al aprendizaje."""
+    return {
+        "programa_nombre":  datos.get("programa_nombre", ""),
+        "logica_ladder":    datos.get("logica_ladder", []),
+        "variables_usadas": datos.get("variables_usadas", {}),
+    }
+
+
+def agregar_ejemplo(pregunta: str, datos: dict) -> str:
+    """Guarda la interaccion como ejemplo 'pending' y devuelve su id."""
+    ejemplos    = cargar_memoria()
+    norm_prompt = " ".join(sorted(_tokens(pregunta)))
+
+    # Dedupe: una peticion identica que sigue 'pending' se reemplaza
+    ejemplos = [e for e in ejemplos
+                if not (e.get("status") == "pending"
+                        and " ".join(sorted(_tokens(e.get("user_prompt", "")))) == norm_prompt)]
+
+    nuevo_id = f"ej_{datetime.datetime.now():%Y%m%d_%H%M%S_%f}"
+    ejemplos.append({
+        "id":                    nuevo_id,
+        "date":                  datetime.datetime.now().isoformat(timespec="seconds"),
+        "user_prompt":           pregunta,
+        "model_response":        datos.get("explicacion_simple", ""),
+        "generated_ladder_json": _compactar_datos_modelo(datos),
+        "user_correction":       None,
+        "error_explanation":     None,
+        "final_ladder_json":     None,
+        "status":                "pending",
+        "tags":                  extraer_tags(pregunta, datos),
+        "uses":                  0,
+    })
+    guardar_memoria(_podar_memoria(ejemplos))
+    return nuevo_id
+
+
+def aplicar_feedback(ejemplo_id: str, status: str,
+                     user_correction: Optional[str] = None,
+                     error_explanation: Optional[str] = None,
+                     final_ladder_json: Optional[dict] = None,
+                     tags_extra: Optional[List[str]] = None) -> dict:
+    ejemplos = cargar_memoria()
+    for e in ejemplos:
+        if e.get("id") == ejemplo_id:
+            e["status"] = status
+            if user_correction:
+                e["user_correction"] = user_correction
+            if error_explanation:
+                e["error_explanation"] = error_explanation
+            if final_ladder_json:
+                e["final_ladder_json"] = final_ladder_json
+            if tags_extra:
+                e["tags"] = sorted(set(e.get("tags", [])) | set(tags_extra))
+            guardar_memoria(ejemplos)
+            return e
+    raise KeyError(ejemplo_id)
+
+
+def ejemplos_relevantes(pregunta: str, k: int = MAX_EJEMPLOS_PROMPT) -> list:
+    """Top-k ejemplos validados (accepted/corrected) mas parecidos a la
+    peticion actual, por coincidencia de tags y de palabras clave."""
+    ejemplos = cargar_memoria()
+    tokens_p = _tokens(pregunta)
+    tags_p   = set(extraer_tags(pregunta)) - {"Horner_XL4"}
+
+    candidatos = []
+    for e in ejemplos:
+        if e.get("status") not in ("accepted", "corrected"):
+            continue
+        tags_e = set(e.get("tags", [])) - {"Horner_XL4"}
+        score  = 3 * len(tags_p & tags_e) + len(tokens_p & _tokens(e.get("user_prompt", "")))
+        score += 2 if e.get("status") == "corrected" else 1
+        if score >= 3:   # exige al menos un tag o varias palabras en comun
+            candidatos.append((score, e))
+
+    candidatos.sort(key=lambda c: (-c[0], c[1].get("date", "")))
+    elegidos = [e for _, e in candidatos[:k]]
+
+    if elegidos:
+        ids = {e["id"] for e in elegidos}
+        for e in ejemplos:
+            if e.get("id") in ids:
+                e["uses"] = e.get("uses", 0) + 1
+        guardar_memoria(ejemplos)
+    return elegidos
+
+
+def _ladder_a_texto(e: dict) -> str:
+    """Representacion compacta de la solucion final de un ejemplo."""
+    final = e.get("final_ladder_json")
+    if isinstance(final, dict) and final.get("rungs"):
+        return describir_programa_editor(final)   # vino en esquema del editor
+    fuente = final if isinstance(final, dict) and final.get("logica_ladder") \
+        else e.get("generated_ladder_json") or {}
+    return json.dumps(_compactar_datos_modelo(fuente),
+                      ensure_ascii=False, separators=(",", ":"))
+
+
+def bloque_ejemplos_prompt(ejemplos: list) -> str:
+    partes = [
+        "EJEMPLOS VALIDADOS POR EL USUARIO (interacciones previas):",
+        "Imita estas soluciones cuando la peticion sea similar y evita los errores senalados.",
+    ]
+    for i, e in enumerate(ejemplos, 1):
+        partes.append(f"\n--- Ejemplo validado {i} [{e.get('status')}] ---")
+        partes.append(f"Peticion: {e.get('user_prompt', '')}")
+        if e.get("user_correction"):
+            partes.append(f"Correccion del usuario: {e['user_correction']}")
+        if e.get("error_explanation"):
+            partes.append(f"Error a evitar: {e['error_explanation']}")
+        partes.append(f"Solucion final: {_ladder_a_texto(e)[:1500]}")
+    return "\n".join(partes)
 
 # ─── Conversion JSON del modelo → schema del editor ──────────────
 
@@ -524,6 +748,7 @@ class LadderResponse(BaseModel):
     es_enclavamiento: bool
     js_content: str      # JS completo listo para importar en el frontend
     historia_pares: int  # pares Q&A que el modelo tiene como contexto
+    ejemplo_id: str = "" # id en la memoria de feedback (para POST /feedback)
 
 
 class STTResponse(BaseModel):
@@ -537,6 +762,17 @@ class VozLadderResponse(BaseModel):
     texto: str
     stt: STTResponse
     ladder: LadderResponse
+
+
+class FeedbackRequest(BaseModel):
+    """Evaluacion del usuario sobre un programa generado.
+    status: accepted (quedo bien) | corrected (lo arregle) | rejected (mal)."""
+    ejemplo_id: str
+    status: str
+    user_correction: Optional[str] = None     # ej: "usa %Q10 en vez de %Q1"
+    error_explanation: Optional[str] = None   # que estaba mal y por que
+    final_ladder_json: Optional[dict] = None  # programa correcto (esquema del editor o del modelo)
+    tags_extra: Optional[List[str]] = None
 
 # ─── Logica principal Ladder ──────────────────────────────────────
 
@@ -564,7 +800,14 @@ REGLAS IMPORTANTES:
 """
     mensaje_usuario = construir_mensaje_usuario(pregunta_reforzada)
 
-    messages = [{"role": "system", "content": STATE["system_prompt"]}]
+    # Memoria de feedback: ejemplos validados parecidos a esta peticion
+    ejemplos = ejemplos_relevantes(pregunta)
+    system_prompt = STATE["system_prompt"]
+    if ejemplos:
+        system_prompt += "\n\n" + bloque_ejemplos_prompt(ejemplos)
+        log.info(f"Memoria de feedback: {len(ejemplos)} ejemplo(s) inyectado(s)")
+
+    messages = [{"role": "system", "content": system_prompt}]
     if es_modificacion:
         # Contexto por peticion enviado por el cliente: es la fuente de
         # verdad de SU conversacion (el historial global en RAM mezcla a
@@ -631,10 +874,18 @@ REGLAS IMPORTANTES:
     except Exception as e:
         log.warning(f"No se pudo guardar .js local: {e}")
 
-    return datos, schema, js_string
+    # Registrar en la memoria de feedback (queda 'pending' hasta /feedback)
+    ejemplo_id = ""
+    try:
+        ejemplo_id = agregar_ejemplo(pregunta, datos)
+    except Exception as e:
+        log.warning(f"No se pudo guardar ejemplo en memoria: {e}")
+
+    return datos, schema, js_string, ejemplo_id
 
 
-def crear_ladder_response(prompt: str, schema: dict, js_string: str) -> LadderResponse:
+def crear_ladder_response(prompt: str, schema: dict, js_string: str,
+                          ejemplo_id: str = "") -> LadderResponse:
     rungs   = schema.get("rungs", [])
     n_ramas = sum(len(r["network"]) - 1 for r in rungs if len(r.get("network", [])) > 1)
     return LadderResponse(
@@ -646,6 +897,7 @@ def crear_ladder_response(prompt: str, schema: dict, js_string: str) -> LadderRe
         es_enclavamiento=es_enclavamiento(prompt),
         js_content=js_string,
         historia_pares=len(STATE["history"]) // 2,
+        ejemplo_id=ejemplo_id,
     )
 
 # ─── Utilidades STT ───────────────────────────────────────────────
@@ -705,6 +957,9 @@ def root():
             "stt":                "POST /transcribir",
             "voz_a_ladder":       "POST /voz-a-ladder",
             "ladder":             "POST /generar-ladder",
+            "feedback":           "POST /feedback",
+            "memoria_ver":        "GET  /memoria",
+            "memoria_borrar":     "DELETE /memoria/{ejemplo_id}",
             "historial_ver":      "GET  /historial",
             "historial_limpiar":  "DELETE /historial",
         },
@@ -720,6 +975,7 @@ def health():
         "modelo_stt":         MODELO_STT,
         "contexto_programas": STATE["contexto_programas"],
         "historia_pares":     len(STATE["history"]) // 2,
+        "ejemplos_memoria":   len(cargar_memoria()),
     }
 
 
@@ -751,10 +1007,10 @@ async def voz_a_ladder(
             raise HTTPException(422, "Transcripcion vacia. Habla mas claro o graba de nuevo.")
         if len(prompt) > 2000:
             raise HTTPException(400, "Transcripcion demasiado larga, maximo 2000 caracteres.")
-        datos, schema, js_string = consultar_retorna_schema(prompt)
+        datos, schema, js_string, ejemplo_id = consultar_retorna_schema(prompt)
         return VozLadderResponse(
             texto=prompt, stt=stt,
-            ladder=crear_ladder_response(prompt, schema, js_string),
+            ladder=crear_ladder_response(prompt, schema, js_string, ejemplo_id),
         )
     except HTTPException:
         raise
@@ -773,13 +1029,63 @@ async def generar_ladder(req: PromptRequest):
     if len(req.prompt) > 2000:
         raise HTTPException(400, "Prompt demasiado largo, maximo 2000 caracteres.")
     try:
-        datos, schema, js_string = consultar_retorna_schema(req.prompt.strip(), req.contexto)
-        return crear_ladder_response(req.prompt.strip(), schema, js_string)
+        datos, schema, js_string, ejemplo_id = consultar_retorna_schema(req.prompt.strip(), req.contexto)
+        return crear_ladder_response(req.prompt.strip(), schema, js_string, ejemplo_id)
     except ValueError as e:
         raise HTTPException(422, str(e))
     except Exception as e:
         log.error(f"Error generar-ladder: {e}")
         raise HTTPException(500, str(e))
+
+
+@app.post("/feedback")
+def registrar_feedback(req: FeedbackRequest):
+    """Marca un ejemplo de la memoria como accepted / corrected / rejected.
+    Los accepted/corrected se inyectan como contexto en futuras peticiones."""
+    if req.status not in ("accepted", "corrected", "rejected"):
+        raise HTTPException(400, "status debe ser: accepted, corrected o rejected.")
+    try:
+        e = aplicar_feedback(
+            req.ejemplo_id, req.status, req.user_correction,
+            req.error_explanation, req.final_ladder_json, req.tags_extra,
+        )
+    except KeyError:
+        raise HTTPException(404, f"No existe el ejemplo '{req.ejemplo_id}'.")
+    log.info(f"Feedback registrado: {req.ejemplo_id} -> {req.status}")
+    return {"status": "ok",
+            "ejemplo": {k: e.get(k) for k in ("id", "status", "tags", "date")}}
+
+
+@app.get("/memoria")
+def ver_memoria():
+    """Resumen de la memoria de aprendizaje por feedback."""
+    ejemplos   = cargar_memoria()
+    por_status = {}
+    for e in ejemplos:
+        s = e.get("status", "?")
+        por_status[s] = por_status.get(s, 0) + 1
+    return {
+        "total":         len(ejemplos),
+        "max_ejemplos":  MAX_EJEMPLOS,
+        "por_status":    por_status,
+        "ejemplos": [
+            {"id": e.get("id"), "status": e.get("status"),
+             "tags": e.get("tags", []), "uses": e.get("uses", 0),
+             "user_prompt": (e.get("user_prompt") or "")[:120]}
+            for e in ejemplos
+        ],
+    }
+
+
+@app.delete("/memoria/{ejemplo_id}")
+def borrar_ejemplo(ejemplo_id: str):
+    """Elimina un ejemplo concreto de la memoria de feedback."""
+    ejemplos  = cargar_memoria()
+    filtrados = [e for e in ejemplos if e.get("id") != ejemplo_id]
+    if len(filtrados) == len(ejemplos):
+        raise HTTPException(404, f"No existe el ejemplo '{ejemplo_id}'.")
+    guardar_memoria(filtrados)
+    return {"status": "ok", "mensaje": f"Ejemplo {ejemplo_id} eliminado."}
 
 
 @app.get("/historial")
