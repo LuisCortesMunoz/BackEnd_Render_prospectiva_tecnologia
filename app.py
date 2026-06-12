@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from groq import Groq
+from groq import Groq, APIStatusError
 
 load_dotenv()
 
@@ -23,8 +23,15 @@ log = logging.getLogger(__name__)
 
 # ─── Modelos y clientes Groq ─────────────────────────────────────
 
-MODELO        = "openai/gpt-oss-120b"
+MODELO        = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 MODELO_STT    = os.environ.get("GROQ_STT_MODEL",    "whisper-large-v3")
+
+# gpt-oss-120b es un modelo razonador: sus tokens de razonamiento interno
+# cuentan dentro de max_tokens. Con 1300 el razonamiento agotaba el
+# presupuesto y el JSON salia vacio -> Groq respondia 400 json_validate_failed
+# con failed_generation: ''. 4096 es el valor probado en plc-llm-assistant
+# (test_con_contexto.py v10) que funciona con este mismo modelo.
+MAX_COMPLETION_TOKENS = int(os.environ.get("MAX_COMPLETION_TOKENS", "4096"))
 IDIOMA_STT    = os.environ.get("GROQ_STT_LANGUAGE", "es")
 MAX_AUDIO_MB  = int(os.environ.get("MAX_AUDIO_MB",  "25"))
 
@@ -82,6 +89,9 @@ REGLAS DE RESPUESTA:
 - "fila 0" es la logica serie principal.
 - "fila 1, 2..." son ramas paralelas.
 - Tipos: XIC, XIO, OTE, OTL, OTU, TON, TOF, CTU, CTD, CMP, MOV, ADD.
+- TON/TOF llevan "parametros": {{"PT_ms": <milisegundos>}}.
+- CTU/CTD llevan "parametros": {{"PV": <cuentas>}}.
+- Usa el valor que pida el usuario (ej. 5 segundos -> PT_ms 5000).
 - Operandos con %: %I1, %Q10, %M1, %R1.
 - Paros NC (%I2, %I8) siempre van como XIO en fila 0."""
 
@@ -99,7 +109,11 @@ Responde con este esquema JSON exacto:
           "fila": 0,
           "descripcion": "string",
           "elementos": [
-            {"tipo": "XIC", "operando": "%I1", "descripcion": "string"}
+            {"tipo": "XIC", "operando": "%I1", "descripcion": "string"},
+            {"tipo": "TON", "operando": "%R1", "descripcion": "string",
+             "parametros": {"PT_ms": 5000}},
+            {"tipo": "CTU", "operando": "%R2", "descripcion": "string",
+             "parametros": {"PV": 10}}
           ]
         }
       ]
@@ -490,17 +504,28 @@ def modbus(addr: str) -> dict:
     return {"fn": "internal", "address": None}
 
 
-def mk_el(tipo_raw, operando, col, uid):
+def _num(v, default):
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def mk_el(tipo_raw, operando, col, uid, params=None):
     t = TIPO_MAP.get(str(tipo_raw).strip().upper(),
         TIPO_MAP.get(str(tipo_raw).strip(), "contact_no"))
     a = norm(operando)
+    p = params if isinstance(params, dict) else {}
     e = {"id": uid, "type": t, "address": a, "pos": {"col": col}}
     if t == "coil":    e["coil_type"] = "output"
     if t == "coil_s":  e["coil_type"] = "set"
     if t == "coil_r":  e["coil_type"] = "reset"
-    if t in ("block_ton", "block_tof"): e["params"] = {"preset_ms": 1000}
-    if t in ("block_ctu", "block_ctd"): e["params"] = {"preset": 10}
-    if t == "block_cmp": e["params"] = {"op": "EQ", "value": 0}
+    if t in ("block_ton", "block_tof"):
+        e["params"] = {"preset_ms": _num(p.get("PT_ms", p.get("preset_ms")), 1000)}
+    if t in ("block_ctu", "block_ctd"):
+        e["params"] = {"preset": _num(p.get("PV", p.get("preset")), 10)}
+    if t == "block_cmp":
+        e["params"] = {"op": p.get("op", "EQ"), "value": _num(p.get("value"), 0)}
     return e
 
 
@@ -515,7 +540,7 @@ def renglon_a_rung(renglon, idx, tid):
         for fila in renglon["filas"]:
             fn  = fila.get("fila", len(net))
             els = [mk_el(e.get("tipo", ""), e.get("operando", ""),
-                         c, f"{pfx}f{fn}c{c}")
+                         c, f"{pfx}f{fn}c{c}", e.get("parametros"))
                    for c, e in enumerate(fila.get("elementos", []))]
             net.append({"row": fn, "elements": els})
         if not net:
@@ -524,8 +549,9 @@ def renglon_a_rung(renglon, idx, tid):
 
     # Formato legado con "elementos" plano
     raw   = renglon.get("elementos", [])
-    todos = [{"tipo": str(e.get("tipo", "")).strip().upper(),
-               "op":  e.get("operando", "")} for e in raw]
+    todos = [{"tipo":   str(e.get("tipo", "")).strip().upper(),
+               "op":     e.get("operando", ""),
+               "params": e.get("parametros")} for e in raw]
 
     if not todos:
         return {"id": num, "enabled": True, "comment": desc,
@@ -548,12 +574,14 @@ def renglon_a_rung(renglon, idx, tid):
     f0, col = [], 0
     for i, e in enumerate(todos):
         if i not in paralelos:
-            f0.append(mk_el(e["tipo"], e["op"], col, f"{pfx}f0c{col}"))
+            f0.append(mk_el(e["tipo"], e["op"], col, f"{pfx}f0c{col}",
+                            e.get("params")))
             col += 1
     net = [{"row": 0, "elements": f0}]
 
     if paralelos:
-        f1 = [mk_el(todos[i]["tipo"], todos[i]["op"], c, f"{pfx}f1c{c}")
+        f1 = [mk_el(todos[i]["tipo"], todos[i]["op"], c, f"{pfx}f1c{c}",
+                    todos[i].get("params"))
               for c, i in enumerate(sorted(paralelos))]
         net.append({"row": 1, "elements": f1})
 
@@ -688,6 +716,115 @@ def validar_enclavamiento(datos: dict, pregunta: str) -> tuple:
         if len(r.get("filas", [])) > 1:
             return True, f"Renglon {r.get('renglon')} tiene rama paralela. OK."
     return False, "ADVERTENCIA: enclavamiento sin rama paralela."
+
+# ─── Llamada a Groq y validacion del JSON ────────────────────────
+
+def extraer_json_de_texto(texto: str) -> dict:
+    """Extrae el primer objeto JSON valido aunque el modelo agregue texto
+    extra o lo envuelva en bloques ```json ... ```."""
+    t = (texto or "").strip()
+    t = re.sub(r"^```(?:json)?\s*", "", t)
+    t = re.sub(r"```\s*$", "", t.strip())
+    try:
+        return json.loads(t)
+    except json.JSONDecodeError:
+        pass
+    ini, fin = t.find("{"), t.rfind("}")
+    if ini != -1 and fin > ini:
+        return json.loads(t[ini:fin + 1])
+    raise json.JSONDecodeError("no se encontro un objeto JSON", t, 0)
+
+
+def validar_estructura_datos(datos: dict) -> dict:
+    """Verifica que el JSON del modelo tenga la estructura minima esperada
+    antes de convertirlo al esquema del editor. Normaliza los campos
+    opcionales y descarta renglones malformados."""
+    if not isinstance(datos, dict):
+        raise ValueError("El modelo no devolvio un objeto JSON.")
+    logica = datos.get("logica_ladder")
+    if not isinstance(logica, list) or not logica:
+        raise ValueError(
+            "El modelo no devolvio renglones en 'logica_ladder'. "
+            "Vuelve a intentar o reformula la peticion."
+        )
+    renglones_ok = []
+    for r in logica:
+        if not isinstance(r, dict):
+            continue
+        filas = r.get("filas")
+        if isinstance(filas, list):
+            r["filas"] = [f for f in filas
+                          if isinstance(f, dict) and isinstance(f.get("elementos"), list)]
+            if r["filas"]:
+                renglones_ok.append(r)
+        elif isinstance(r.get("elementos"), list):
+            renglones_ok.append(r)   # formato legado, lo resuelve renglon_a_rung
+    if not renglones_ok:
+        raise ValueError(
+            "Ningun renglon del modelo tiene 'filas' o 'elementos' validos. "
+            "Vuelve a intentar la peticion."
+        )
+    datos["logica_ladder"] = renglones_ok
+    datos.setdefault("programa_nombre", "Programa")
+    datos.setdefault("explicacion_simple", "")
+    datos.setdefault("implementacion_cscape", [])
+    datos.setdefault("variables_usadas", {})
+    return datos
+
+
+def _crear_completion(messages: list, max_tokens: int, con_formato: bool = True):
+    kwargs = dict(messages=messages, model=MODELO,
+                  temperature=1, max_tokens=max_tokens)
+    if con_formato:
+        kwargs["response_format"] = {"type": "json_object"}
+    return groq_client.chat.completions.create(**kwargs)
+
+
+def llamar_modelo_json(messages: list) -> dict:
+    """Llama a Groq pidiendo JSON con dos reintentos automaticos:
+    - json_validate_failed (400): el JSON salio truncado/vacio con el modo
+      json_object; se reintenta SIN response_format y se extrae el JSON
+      del texto a mano.
+    - 413/429 (limite de tokens del plan gratuito): se reintenta con un
+      max_tokens reducido."""
+    try:
+        resp = _crear_completion(messages, MAX_COMPLETION_TOKENS)
+    except APIStatusError as e:
+        cuerpo = str(getattr(e, "body", "") or e)
+        if e.status_code == 400 and "json_validate_failed" in cuerpo:
+            log.warning("Groq devolvio json_validate_failed; "
+                        "reintentando sin response_format...")
+            try:
+                resp = _crear_completion(messages, MAX_COMPLETION_TOKENS,
+                                         con_formato=False)
+            except APIStatusError as e2:
+                raise ValueError(
+                    f"Groq rechazo la peticion tambien sin modo JSON: {e2}")
+        elif e.status_code in (413, 429):
+            log.warning(f"Groq {e.status_code} (limite de tokens); "
+                        "reintentando con max_tokens=2000...")
+            try:
+                resp = _crear_completion(messages, 2000)
+            except APIStatusError:
+                raise ValueError(
+                    "Groq rechazo la peticion por el limite de tokens por "
+                    "minuto del plan gratuito. Espera un minuto y vuelve a intentar."
+                )
+        else:
+            raise
+
+    texto_raw = resp.choices[0].message.content or ""
+    ti = resp.usage.prompt_tokens
+    ts = resp.usage.completion_tokens
+    log.info(f"Tokens — entrada: {ti}  salida: {ts}  total: {ti+ts}")
+
+    try:
+        return extraer_json_de_texto(texto_raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            "El modelo no devolvio un JSON valido. Vuelve a intentar. "
+            f"Detalle: {e} | Inicio de la respuesta: {texto_raw[:300]}"
+        )
 
 # ─── Estado global ────────────────────────────────────────────────
 
@@ -858,24 +995,7 @@ REGLAS IMPORTANTES:
         f" | modificacion con contexto del cliente: {es_modificacion}"
     )
 
-    resp = groq_client.chat.completions.create(
-        messages=messages,
-        model=MODELO,
-        temperature=1,
-        # Groq cuenta entrada + max_tokens contra el limite de 8000/min del
-        # plan gratuito; 1300 sobra para programas de hasta ~5 renglones.
-        max_tokens=1300,
-        response_format={"type": "json_object"},
-    )
-    texto_raw = resp.choices[0].message.content
-    ti = resp.usage.prompt_tokens
-    ts = resp.usage.completion_tokens
-    log.info(f"Tokens — entrada: {ti}  salida: {ts}  total: {ti+ts}")
-
-    try:
-        datos = json.loads(texto_raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"JSON invalido del modelo: {e}\n{texto_raw[:300]}")
+    datos = validar_estructura_datos(llamar_modelo_json(messages))
 
     ok, msg = validar_enclavamiento(datos, pregunta)
     if not ok:
