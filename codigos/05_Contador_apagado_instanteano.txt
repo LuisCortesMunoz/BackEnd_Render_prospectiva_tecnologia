@@ -1,0 +1,438 @@
+EXPLICACIÓN DETALLADA DEL PROGRAMA LADDER CON CONTADOR CTU Y TEMPORIZADOR TON
+PLC HORNER HE-XC1E5 XL4 – CSCAPE 10.2
+
+1. CONTEXTO GENERAL DEL PROGRAMA
+
+El programa mostrado corresponde a un diagrama ladder, también conocido como código en escalera. Este lenguaje se utiliza para programar PLC, es decir, programadores lógicos programables, empleados en sistemas de automatización para controlar entradas físicas, salidas físicas, marcas internas, temporizadores, contadores y secuencias lógicas.
+
+En este caso, el programa está realizado en Cscape 10.2, software utilizado para programar PLC de la marca Horner, específicamente de la serie HE-XC1E5 XL4.
+
+El ladder representa la lógica como si fuera un circuito eléctrico de control. La corriente lógica fluye de izquierda a derecha. Cuando las condiciones de una línea se cumplen, el flujo lógico puede avanzar hasta activar una bobina, una salida física, una marca interna o un bloque de función.
+
+Este programa combina dos conceptos que ya se explicaron anteriormente:
+
+- El contador CTU, que sirve para contar eventos o pulsaciones.
+- El temporizador TON, que sirve para activar una salida después de que transcurre un tiempo determinado.
+
+En este caso, el programa cuenta cuántas veces se presiona el botón de arranque I1. Cuando se llega a 15 pulsaciones, se activa la marca M1 y se enciende la lámpara verde Q10. Al mismo tiempo, la marca M1 activa un temporizador TON de 5 segundos. Cuando pasan esos 5 segundos, el temporizador activa la marca M2, la cual se utiliza para resetear el contador. Al resetearse el contador, se apaga M1, se apaga Q10 y el sistema queda listo para volver a iniciar el conteo desde cero.
+
+2. ASIGNACIÓN GENERAL DE ENTRADAS Y SALIDAS DEL PLC
+
+Para este PLC Horner HE-XC1E5 XL4 se consideran las siguientes entradas físicas del tablero:
+
+- I1: Botón normalmente abierto, utilizado como botón de arranque o pulsador de conteo.
+- I2: Botón normalmente cerrado, utilizado comúnmente como botón de paro.
+- I3: Entrada normalmente abierta asociada a un selector o botón auxiliar.
+- I4: Entrada normalmente abierta asociada a otra posición del selector.
+- I8: Botón de paro de emergencia normalmente cerrado.
+
+También se consideran las siguientes salidas físicas para las lámparas del tablero:
+
+- Q10: Lámpara verde.
+- Q11: Lámpara amarilla.
+- Q12: Lámpara roja.
+
+En este programa se utiliza la salida Q10, por lo tanto, la lámpara controlada directamente por la lógica principal es la lámpara verde.
+
+3. ELEMENTOS PRINCIPALES DEL PROGRAMA
+
+En la imagen del programa ladder se pueden identificar los siguientes elementos:
+
+- Contacto normalmente abierto %I0001.
+- Contador ascendente CTU asociado al registro %R00001.
+- Entrada de reset del contador conectada a %M00002.
+- Valor de preset PV igual a 15.
+- Bobina interna %M00001.
+- Contacto normalmente abierto %M00001.
+- Bobina de salida física %Q0010.
+- Temporizador TON asociado al registro %R00050.
+- Base de tiempo del temporizador de 0.1 segundos.
+- Valor de tiempo PT igual a 50.
+- Bobina interna %M00002.
+
+El programa tiene tres líneas principales:
+
+- Primera línea: cuenta las pulsaciones del botón I1 y activa M1 al llegar a 15.
+- Segunda línea: usa M1 para encender la lámpara verde Q10.
+- Tercera línea: usa M1 para iniciar un temporizador TON que, después de 5 segundos, activa M2 para resetear el contador.
+
+4. PRIMERA LÍNEA DEL PROGRAMA – CONTEO CON CTU
+
+La primera línea inicia con un contacto normalmente abierto %I0001.
+
+La entrada I1 corresponde a un botón físico normalmente abierto. Esto significa que, cuando el botón no está presionado, el contacto permanece abierto y no deja pasar corriente lógica. Cuando el operador presiona el botón, el contacto se cierra y permite que la señal llegue al contador.
+
+Después del contacto I1 se encuentra un bloque CTU.
+
+CTU significa Count Up, es decir, contador ascendente. Este bloque sirve para contar eventos. En este caso, el evento que se está contando es la cantidad de veces que el operador presiona el botón I1.
+
+El contador está asociado al registro %R00001. Los registros tipo %R en el PLC Horner se utilizan para almacenar información interna. En este caso, %R00001 guarda el valor acumulado del contador y su estado interno.
+
+5. FUNCIONAMIENTO DEL CONTADOR CTU
+
+El contador CTU aumenta su valor cada vez que recibe un pulso en su entrada de conteo.
+
+En este programa, cada vez que se presiona I1, el contador incrementa su valor en una unidad.
+
+El funcionamiento puede entenderse así:
+
+- Primera pulsación de I1: el contador aumenta a 1.
+- Segunda pulsación de I1: el contador aumenta a 2.
+- Tercera pulsación de I1: el contador aumenta a 3.
+- El proceso continúa de la misma forma.
+- Pulsación número 15: el contador llega al valor configurado y activa su salida.
+
+Mientras el contador tenga un valor menor a 15, su salida permanece desactivada. Por lo tanto, la marca M1 no se activa y la lámpara verde permanece apagada.
+
+Cuando el contador llega a 15, su salida se activa y deja pasar el flujo lógico hacia la bobina %M00001.
+
+6. PARÁMETRO PV = 15
+
+El parámetro PV significa Preset Value, es decir, valor preestablecido.
+
+En este programa, el valor PV está configurado en 15. Esto significa que el contador debe recibir 15 pulsos para activar su salida.
+
+El valor de PV define la cantidad de eventos que deben ocurrir antes de que el PLC active la siguiente parte de la lógica.
+
+En este caso, el evento es presionar el botón I1. Por lo tanto, el usuario debe presionar el botón 15 veces para activar la marca M1.
+
+7. ENTRADA R DEL CONTADOR – RESET CON M2
+
+El contador CTU tiene una entrada marcada como R. Esta entrada corresponde al reset del contador.
+
+En este programa, el reset del contador está conectado a la marca %M00002.
+
+Esto significa que cuando la marca M2 se activa, el contador se reinicia y su valor acumulado regresa a cero.
+
+Es importante distinguir entre dos conceptos:
+
+- %R00001 es el registro donde el contador guarda su información.
+- La entrada R del bloque CTU es la señal que reinicia el contador.
+
+Aunque ambos usan la letra R, no tienen la misma función. El registro %R00001 es memoria interna del contador, mientras que la entrada R es la condición de reinicio.
+
+En este programa, la marca M2 se genera mediante un temporizador TON. Por lo tanto, el contador no se resetea manualmente con un botón, sino automáticamente después de que se enciende la lámpara verde y pasan 5 segundos.
+
+8. BOBINA INTERNA %M00001
+
+A la derecha del contador se encuentra la bobina %M00001.
+
+La dirección %M00001 corresponde a una marca interna del PLC. Las marcas internas son memorias lógicas que se utilizan para guardar estados dentro del programa.
+
+En este caso, la marca M1 indica que el contador llegó a 15.
+
+Cuando el contador llega al valor PV = 15, activa su salida. Esa salida energiza la bobina %M00001. Al activarse M1, todos los contactos asociados a M1 en el programa cambian de estado.
+
+En este programa, M1 tiene dos funciones importantes:
+
+- Activar la lámpara verde Q10.
+- Activar el temporizador TON que iniciará el proceso de reset automático.
+
+9. SEGUNDA LÍNEA DEL PROGRAMA – ACTIVACIÓN DE LA LÁMPARA VERDE Q10
+
+La segunda línea del programa contiene un contacto normalmente abierto %M00001 y una bobina de salida %Q0010.
+
+El contacto %M00001 depende del estado de la marca interna M1.
+
+Cuando M1 está apagada, el contacto %M00001 permanece abierto y no permite que la corriente lógica llegue a la salida Q10.
+
+Cuando M1 se activa, el contacto %M00001 se cierra. Al cerrarse, permite el paso de corriente lógica hacia la bobina %Q0010.
+
+La salida %Q0010 corresponde físicamente a la lámpara verde del tablero. Por lo tanto, cuando Q10 se activa, la lámpara verde se enciende.
+
+En este programa, la lámpara verde no se enciende con la primera pulsación del botón. Se enciende únicamente cuando el contador llega a 15 pulsaciones.
+
+10. TERCERA LÍNEA DEL PROGRAMA – TEMPORIZADOR TON ACTIVADO POR M1
+
+La tercera línea del programa comienza con otro contacto normalmente abierto %M00001.
+
+Este contacto también depende de la marca interna M1. Cuando M1 se activa por el contador, este contacto se cierra y permite que la corriente lógica llegue al temporizador TON.
+
+Esto significa que el temporizador no empieza a contar desde el inicio del programa. El temporizador empieza a contar únicamente cuando el contador ya llegó a 15 y activó M1.
+
+Después del contacto M1 se encuentra un bloque TON asociado al registro %R00050.
+
+TON significa Timer On Delay, es decir, temporizador con retardo a la conexión. Este temporizador espera un tiempo configurado antes de activar su salida.
+
+11. REGISTRO %R00050 DEL TEMPORIZADOR
+
+El temporizador TON está asociado al registro %R00050.
+
+Los registros tipo %R son memorias internas del PLC. En este caso, %R00050 se utiliza para guardar la información interna del temporizador, como su valor acumulado de tiempo y su estado.
+
+Este registro no es una salida física ni una entrada física. Es una dirección de memoria que el PLC utiliza para que el temporizador pueda funcionar correctamente.
+
+12. BASE DE TIEMPO DEL TEMPORIZADOR
+
+Debajo del nombre TON aparece la base de tiempo del temporizador. En este programa se usa una base de tiempo de 0.1 segundos.
+
+La base de tiempo indica cuánto vale cada unidad escrita en el parámetro PT.
+
+Si la base de tiempo es 0.1 segundos, cada unidad de PT equivale a una décima de segundo.
+
+13. PARÁMETRO PT = 50
+
+El parámetro PT significa Preset Time, es decir, tiempo preestablecido.
+
+En este programa, PT está configurado con el valor 50.
+
+Como la base de tiempo es 0.1 segundos, el tiempo total del temporizador se calcula así:
+
+50 x 0.1 segundos = 5 segundos
+
+Por lo tanto, el temporizador TON espera 5 segundos después de que M1 se activa.
+
+Cuando esos 5 segundos se cumplen, el temporizador activa su salida y energiza la bobina %M00002.
+
+14. BOBINA INTERNA %M00002
+
+A la derecha del temporizador TON se encuentra la bobina %M00002.
+
+La marca M2 es una memoria interna del PLC, igual que M1, pero en este programa tiene una función diferente.
+
+M2 funciona como señal de reset automático del contador.
+
+Cuando el temporizador TON termina de contar los 5 segundos, activa la bobina %M00002. Al activarse M2, la señal llega a la entrada R del contador CTU, ubicada en la primera línea del programa.
+
+Esto provoca que el contador se reinicie y vuelva a cero.
+
+15. FUNCIONAMIENTO PASO A PASO DEL PROGRAMA
+
+El funcionamiento completo del programa se puede explicar de la siguiente manera:
+
+Paso 1: Estado inicial
+
+Al inicio, el contador está en cero. La marca M1 está apagada, la lámpara verde Q10 está apagada, el temporizador TON está apagado y la marca M2 también está apagada.
+
+El sistema está esperando que el operador empiece a presionar el botón I1.
+
+Paso 2: Primera pulsación del botón I1
+
+El operador presiona el botón I1. El contacto %I0001 se cierra y manda un pulso al contador CTU.
+
+El contador aumenta su valor de 0 a 1.
+
+Como el contador todavía no llega a 15, la salida del contador sigue apagada. M1 no se activa y Q10 permanece apagada.
+
+Paso 3: Pulsaciones intermedias
+
+Cada vez que el operador presiona y suelta el botón I1, el contador aumenta en una unidad.
+
+El contador va avanzando de la siguiente forma:
+
+- 1 pulsación: conteo = 1.
+- 2 pulsaciones: conteo = 2.
+- 3 pulsaciones: conteo = 3.
+- 4 pulsaciones: conteo = 4.
+- Y así sucesivamente hasta llegar a 15.
+
+Durante todo este tiempo, la lámpara verde sigue apagada porque el contador aún no ha llegado al valor PV.
+
+Paso 4: Pulsación número 15
+
+Cuando el operador presiona el botón I1 por décima quinta vez, el contador llega al valor PV = 15.
+
+En ese momento, el contador activa su salida lógica.
+
+Paso 5: Activación de M1
+
+Al activarse la salida del contador, se energiza la bobina interna %M00001.
+
+Esto significa que la marca M1 queda activa.
+
+M1 representa que el sistema ya alcanzó la cantidad de pulsaciones necesarias.
+
+Paso 6: Encendido de la lámpara verde Q10
+
+Cuando M1 se activa, el contacto %M00001 de la segunda línea se cierra.
+
+Al cerrarse este contacto, la corriente lógica llega a la salida %Q0010.
+
+La salida Q10 corresponde a la lámpara verde. Por lo tanto, la lámpara verde se enciende.
+
+Paso 7: Inicio del temporizador TON
+
+Al mismo tiempo que se enciende la lámpara verde, el contacto %M00001 de la tercera línea también se cierra.
+
+Esto permite que la señal llegue al temporizador TON.
+
+Como el temporizador es de tipo TON, empieza a contar el tiempo configurado. En este caso, empieza a contar 5 segundos.
+
+Paso 8: Espera de 5 segundos
+
+Durante los 5 segundos, M1 sigue activa, Q10 sigue encendida y el temporizador sigue contando.
+
+El sistema queda en un estado temporal donde la lámpara verde permanece encendida durante el tiempo configurado.
+
+Paso 9: Activación de M2
+
+Cuando el temporizador TON completa los 5 segundos, activa su salida.
+
+Esa salida energiza la bobina interna %M00002.
+
+La marca M2 se enciende y se convierte en la señal de reset del contador.
+
+Paso 10: Reset automático del contador
+
+Como la entrada R del contador está conectada a %M00002, al activarse M2 el contador se reinicia.
+
+El valor acumulado del contador regresa a cero.
+
+Paso 11: Apagado de M1
+
+Cuando el contador se reinicia, su salida deja de estar activa.
+
+Al apagarse la salida del contador, la bobina %M00001 se desenergiza.
+
+Esto apaga la marca M1.
+
+Paso 12: Apagado de la lámpara verde
+
+Al apagarse M1, el contacto %M00001 de la segunda línea se abre.
+
+Cuando ese contacto se abre, deja de llegar corriente lógica a %Q0010.
+
+Por lo tanto, la salida Q10 se apaga y la lámpara verde se desactiva.
+
+Paso 13: Reinicio del temporizador
+
+Al apagarse M1, el contacto %M00001 de la tercera línea también se abre.
+
+Esto desactiva la entrada del temporizador TON.
+
+Como el temporizador TON ya no recibe señal, se reinicia y su salida se apaga. Al apagarse la salida del temporizador, también se apaga la marca M2.
+
+Paso 14: Sistema listo para iniciar nuevamente
+
+Después de que M2 resetea el contador y el temporizador se reinicia, todo el sistema vuelve al estado inicial.
+
+El contador queda en cero, M1 está apagada, M2 está apagada y Q10 está apagada.
+
+El sistema queda listo para volver a contar otras 15 pulsaciones del botón I1.
+
+16. INTERPRETACIÓN DEL FLUJO DE CORRIENTE LÓGICO
+
+En la primera línea, la corriente lógica pasa por el contacto %I0001 cada vez que se presiona el botón I1. Esa señal entra al contador CTU y permite incrementar el conteo.
+
+Cuando el contador llega a 15, activa su salida y energiza M1.
+
+En la segunda línea, M1 cierra su contacto y permite activar Q10, que corresponde a la lámpara verde.
+
+En la tercera línea, M1 también cierra otro contacto que activa el temporizador TON. El temporizador cuenta 5 segundos y después activa M2.
+
+M2 regresa a la primera línea como señal de reset del contador. Al resetear el contador, se apaga M1, se apaga Q10 y se desactiva el temporizador.
+
+Por esta razón, el programa funciona como una secuencia automática:
+
+- Contar 15 pulsaciones.
+- Encender la lámpara verde.
+- Esperar 5 segundos.
+- Resetear el contador.
+- Apagar la lámpara.
+- Volver al inicio.
+
+17. FUNCIÓN GENERAL DEL SISTEMA
+
+La función general de este sistema es encender la lámpara verde después de contar 15 pulsaciones del botón I1 y apagarla automáticamente después de 5 segundos.
+
+Este programa combina conteo y temporización. Primero cuenta eventos mediante el CTU y después controla el tiempo mediante el TON.
+
+La secuencia no requiere que el operador presione un botón de reset. El propio programa genera el reset automáticamente usando la marca M2, activada por el temporizador.
+
+18. IMPORTANCIA DE LAS MARCAS M1 Y M2
+
+En este programa, las marcas internas son fundamentales.
+
+La marca M1 se utiliza para indicar que el contador ya llegó a 15. También sirve para activar dos acciones al mismo tiempo:
+
+- Encender la lámpara verde Q10.
+- Iniciar el temporizador TON.
+
+La marca M2 se utiliza como señal de reset automático. Su función es regresar el contador a cero después de que transcurren los 5 segundos.
+
+Esto demuestra que una bobina puede estar asociada a diferentes tipos de direcciones:
+
+- Entradas físicas, como I1.
+- Salidas físicas, como Q10.
+- Marcas internas, como M1 o M2.
+- Registros internos usados por bloques, como R1 o R50.
+
+Las marcas no necesariamente activan algo físico directamente. Muchas veces se usan como memoria interna para enlazar partes del programa y crear secuencias más completas.
+
+19. DIFERENCIA CON LOS PROGRAMAS ANTERIORES
+
+Este programa combina elementos de programas anteriores.
+
+En el programa del contador simple, se usaba un CTU para contar pulsaciones y activar una lámpara al llegar a un valor definido.
+
+En el programa del temporizador TON, se usaba un TON para esperar un tiempo antes de activar una salida.
+
+En este programa se combinan ambos conceptos:
+
+- El CTU cuenta 15 pulsaciones.
+- M1 se activa cuando el contador llega a 15.
+- Q10 se enciende con M1.
+- El TON inicia cuando M1 se activa.
+- Después de 5 segundos, el TON activa M2.
+- M2 resetea el contador.
+- Al resetear el contador, Q10 se apaga automáticamente.
+
+Por lo tanto, este programa es una secuencia automática de conteo, activación, espera y reinicio.
+
+20. APLICACIÓN EN AUTOMATIZACIÓN
+
+Este tipo de lógica puede utilizarse en muchos procesos industriales donde se necesita contar eventos y después activar una salida por un tiempo determinado.
+
+Algunos ejemplos de aplicación son:
+
+- Contar 15 piezas y encender una señal visual durante 5 segundos.
+- Contar 15 ciclos de una máquina y activar una lámpara de aviso.
+- Contar 15 pulsaciones de un operador para confirmar una acción.
+- Activar una señal de proceso completo después de cierto número de eventos.
+- Encender una lámpara de indicación durante un tiempo y luego reiniciar automáticamente el sistema.
+- Crear una secuencia donde se cuenten eventos y el sistema se reinicie sin intervención manual.
+
+En este caso, el ejemplo sirve para comprender cómo se puede usar un contador CTU junto con un temporizador TON para generar una lógica más completa dentro del PLC Horner.
+
+21. NOTA IMPORTANTE SOBRE EL RESET AUTOMÁTICO
+
+El reset del contador se realiza mediante M2, no mediante una entrada física directa.
+
+Esto significa que el propio programa decide cuándo reiniciar el contador. La condición para el reset es que el temporizador TON termine de contar los 5 segundos.
+
+Cuando M2 se activa, resetea el contador. Al resetear el contador, se apaga M1. Al apagarse M1, se desactiva el temporizador. Al desactivarse el temporizador, también se apaga M2.
+
+Por lo tanto, M2 funciona como una señal de reset temporal. Se activa solamente cuando el temporizador termina y después se apaga porque la lógica vuelve al estado inicial.
+
+22. RESUMEN DEL PROGRAMA
+
+Este programa ladder utiliza un contador CTU y un temporizador TON para crear una secuencia automática.
+
+El botón I1, representado por el contacto normalmente abierto %I0001, se utiliza como pulsador de conteo.
+
+Cada vez que se presiona I1, el contador CTU asociado al registro %R00001 incrementa su valor.
+
+El contador tiene un valor preestablecido PV = 15, por lo que al recibir 15 pulsaciones activa su salida.
+
+Cuando el contador llega a 15, energiza la marca interna %M00001.
+
+La marca M1 cumple dos funciones:
+
+- Activa la salida física %Q0010, que corresponde a la lámpara verde.
+- Activa el temporizador TON asociado al registro %R00050.
+
+El temporizador TON tiene una base de tiempo de 0.1 segundos y un PT de 50.
+
+El tiempo total configurado es:
+
+50 x 0.1 segundos = 5 segundos
+
+Después de 5 segundos, el temporizador activa la marca interna %M00002.
+
+La marca M2 está conectada a la entrada R del contador CTU, por lo que funciona como reset automático.
+
+Cuando M2 se activa, el contador se reinicia, M1 se apaga, Q10 se desactiva y la lámpara verde se apaga.
+
+Finalmente, el temporizador también se reinicia y M2 se apaga, dejando el sistema listo para volver a contar desde cero.
+
+En conclusión, este programa cuenta 15 pulsaciones del botón I1, enciende la lámpara verde Q10 durante 5 segundos y después reinicia automáticamente el sistema para comenzar un nuevo ciclo.

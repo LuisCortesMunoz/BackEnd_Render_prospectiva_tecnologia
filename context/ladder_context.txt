@@ -1,0 +1,17 @@
+PLC: Horner XL4 / XC1E5 programado con Cscape
+Lenguaje: Ladder Diagram
+
+Elementos disponibles:
+- %I1 a %I16: Entradas digitales (botones, sensores)
+- %Q1 a %Q16: Salidas digitales (lámparas, bobinas, relés)
+- %R1 a %R2048: Registros internos (palabras de 16 bits)
+- OTE: Output Energize (bobina normal)
+- OTL: Output Latch (bobina enclavamiento)
+- OTU: Output Unlatch (desenclavamiento)
+- XIC: Examine If Closed (contacto normalmente abierto)
+- XIO: Examine If Open (contacto normalmente cerrado)
+- TON: Temporizador On-Delay
+- CTU: Contador ascendente
+
+Comunicación: El PLC tiene IP fija, por ejemplo 192.168.1.100
+Protocolo: Modbus TCP, puerto 502

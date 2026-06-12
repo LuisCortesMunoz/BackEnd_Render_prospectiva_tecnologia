@@ -1,0 +1,83 @@
+EXPLICACIÓN DETALLADA DEL PROGRAMA LADDER EN CSCAPE 10.2 PARA PLC HORNER XL4
+
+Esta imagen muestra un programa en lenguaje Ladder, también conocido como código en escalera. Este tipo de programación se utiliza principalmente para programar PLC, es decir, Controladores Lógicos Programables, los cuales son muy comunes en sistemas de automatización industrial. El objetivo de un programa Ladder es representar de forma gráfica la lógica de control de una máquina, proceso o sistema, usando una estructura parecida a un diagrama eléctrico de control.
+
+En este caso, el programa mostrado está desarrollado en Cscape 10.2, que es el software utilizado para programar PLC de la marca Horner. Específicamente, el equipo que se está utilizando corresponde a la serie HE-XC1E5 XL4. Este PLC permite trabajar con entradas físicas, salidas físicas, marcas internas, registros y otros elementos lógicos que pueden ser usados para controlar lámparas, botones, selectores, sensores, motores u otros actuadores.
+
+Dentro del lenguaje Ladder, el programa se organiza en líneas horizontales llamadas renglones o redes. Cada renglón representa una condición lógica. La lectura del programa normalmente se realiza de izquierda a derecha y de arriba hacia abajo. Del lado izquierdo se encuentra la línea de alimentación lógica y del lado derecho se colocan las bobinas o salidas que se activan cuando se cumplen las condiciones del renglón.
+
+Es importante aclarar que en Ladder se utilizan principalmente dos tipos de elementos visuales: contactos y bobinas. Los contactos se colocan normalmente del lado izquierdo o en la parte central de la línea, y sirven como condiciones. Las bobinas se colocan normalmente del lado derecho, y representan la acción que se activa cuando la lógica del renglón es verdadera.
+
+En la imagen, los elementos como %I0001, %I0002 y %M0001 que aparecen como contactos representan condiciones de entrada o de memoria. En cambio, los elementos que aparecen encerrados con el símbolo de bobina, representado como paréntesis, por ejemplo %M0001 y %Q0010, representan bobinas o salidas lógicas que se activan cuando se cumple la condición del renglón.
+
+Un contacto puede ser normalmente abierto o normalmente cerrado. Un contacto normalmente abierto, también llamado NO o NA, permite el paso de la lógica cuando su variable está activa o en valor 1. Por otro lado, un contacto normalmente cerrado, también llamado NC, permite el paso de la lógica mientras su variable está inactiva o en valor 0, y se abre cuando la variable se activa. En términos simples, un contacto NO necesita activarse para dejar pasar la señal lógica, mientras que un contacto NC deja pasar la señal hasta que ocurre una activación que lo interrumpe.
+
+Aunque se suele hablar de “paso de corriente” para explicar Ladder de forma sencilla, en realidad dentro del PLC no está circulando corriente eléctrica real por el diagrama como en un circuito físico. Lo que circula es una condición lógica. Sin embargo, la comparación con el paso de corriente ayuda a entender que, si todos los contactos necesarios están cerrados, la lógica llega hasta la bobina y la activa.
+
+En el tablero físico del PLC se tienen diferentes dispositivos conectados a entradas digitales. En este caso, se menciona que el PLC cuenta con un botón normalmente abierto conectado a la entrada I1, un botón normalmente cerrado conectado a la entrada I2, un selector conectado a las entradas I3 e I4, las cuales son normalmente abiertas, y un botón de paro de emergencia conectado a la entrada I8, el cual también es normalmente cerrado.
+
+La entrada I1 se utiliza como botón de arranque. Al ser un botón normalmente abierto, cuando no se presiona no permite el paso de la señal física. Cuando el operador lo presiona, la entrada del PLC detecta un valor lógico de 1. Esa señal se usa en el programa para iniciar el sistema.
+
+La entrada I2 se utiliza como botón de paro. Al ser un botón normalmente cerrado físicamente, en condiciones normales permite que la señal llegue al PLC. Esto significa que, mientras el botón de paro no está presionado, la entrada puede permanecer activa. Cuando el operador presiona el botón de paro, el contacto físico se abre, la señal se interrumpe y el PLC detecta que la condición de paro cambió. Esto permite detener o desenclavar el sistema.
+
+La entrada I8 funciona como paro de emergencia. También es normalmente cerrada, lo cual es una práctica común en sistemas de seguridad. Esto se hace para que, si el cable se rompe, se desconecta el dispositivo o se presiona el paro de emergencia, el sistema detecte una interrupción y pueda detenerse. Aunque en la imagen no se está usando I8, es importante considerarla dentro de la lógica de seguridad del sistema.
+
+El programa mostrado tiene como objetivo principal realizar un enclavamiento para encender una lámpara. Un enclavamiento es una técnica muy utilizada en automatización. Sirve para que una salida o una marca interna permanezca activada después de presionar momentáneamente un botón de arranque. Es decir, no es necesario mantener presionado el botón de arranque todo el tiempo; basta con presionarlo una vez para que el sistema quede activado. El sistema permanece así hasta que se presiona el botón de paro.
+
+En la primera línea del programa se construye la lógica de enclavamiento. Al inicio de la línea aparece la entrada %I0002, que está asociada al botón de paro. Esta condición se coloca al principio porque el paro debe tener prioridad sobre el arranque. Si el botón de paro está en su condición normal, permite que la lógica continúe. Pero si se presiona el botón de paro, la lógica se interrumpe y la bobina de memoria se desactiva.
+
+Después del contacto asociado al paro, aparece el contacto %I0001, que corresponde al botón de arranque. Cuando el operador presiona el botón de arranque, esta entrada se activa y permite que la lógica avance hacia la bobina %M0001. La marca %M0001 es una memoria interna del PLC. No es una salida física, sino un bit interno que el programa puede usar para recordar que el sistema fue activado.
+
+Cuando la condición de la primera línea se cumple, la bobina %M0001 se energiza. Esto significa que la marca interna M1 cambia a valor lógico 1. Una vez que M1 está activa, todos los contactos del programa que estén asociados a %M0001 también cambian de estado de acuerdo con su tipo de contacto.
+
+En esa misma primera línea se observa un contacto %M0001 colocado en paralelo con el botón de arranque %I0001. Esta es la parte principal del enclavamiento. El contacto M1 en paralelo funciona como un camino alternativo para que la lógica siga pasando aunque el operador suelte el botón de arranque.
+
+El funcionamiento es el siguiente: primero, el operador presiona el botón de arranque I1. Esto permite que la lógica llegue a la bobina M1 y la active. Una vez activada la bobina M1, el contacto M1 que está en paralelo se cierra. Entonces, aunque el botón de arranque I1 se suelte y vuelva a abrirse, la lógica sigue pasando por el contacto M1. De esta forma, el sistema queda enclavado.
+
+Este tipo de circuito también se conoce como circuito de auto-retención o sello. Se le llama así porque la propia marca que se activa mantiene cerrado un contacto que conserva la activación del sistema. En otras palabras, M1 se mantiene activa a sí misma mientras el botón de paro no sea presionado.
+
+La bobina %M0001 ubicada al lado derecho de la primera línea no representa una salida física conectada a un foco o lámpara. Representa una marca interna del PLC. Esta marca se usa como memoria para indicar que el sistema está encendido o habilitado. En la práctica, M1 funciona como una variable auxiliar que después puede utilizarse en otras líneas del programa.
+
+La segunda línea del programa utiliza el contacto %M0001 para controlar una salida física. En esta línea, cuando la marca M1 está activa, su contacto asociado se cierra y permite que la lógica llegue hasta la bobina %Q0010. La dirección %Q0010 corresponde a una salida física del PLC. En este caso, esa salida está asociada a una lámpara.
+
+Por lo tanto, cuando M1 está activa, la salida Q10 se energiza y la lámpara se enciende. Esto significa que la lámpara no depende directamente de que el botón de arranque se mantenga presionado, sino de que la marca interna M1 permanezca activa. Esto es útil porque permite separar la lógica de control de la salida física.
+
+El ciclo completo de funcionamiento puede explicarse paso a paso de la siguiente manera:
+
+1. Al inicio, el sistema está apagado. La marca M1 está en 0 y la salida Q10 también está en 0, por lo tanto, la lámpara está apagada.
+
+2. El botón de paro I2 se encuentra en su estado normal. Como es un botón normalmente cerrado físicamente, permite que la condición de paro no interrumpa el sistema.
+
+3. El operador presiona el botón de arranque I1. Al presionarlo, la entrada I1 cambia de estado y permite que la lógica de la primera línea llegue hasta la bobina M1.
+
+4. La bobina M1 se activa. Esto significa que la marca interna M1 cambia a valor lógico 1.
+
+5. Al activarse M1, el contacto M1 que está en paralelo con el botón de arranque se cierra. Esto crea el enclavamiento.
+
+6. El operador puede soltar el botón de arranque I1. Aunque I1 deje de estar activo, la lógica sigue pasando por el contacto M1 en paralelo.
+
+7. Como M1 sigue activa, en la segunda línea el contacto M1 también permanece cerrado.
+
+8. Al cerrarse el contacto M1 de la segunda línea, la bobina de salida Q10 se activa.
+
+9. Al activarse Q10, la lámpara conectada a esa salida se enciende.
+
+10. La lámpara permanecerá encendida mientras M1 siga activa y mientras el botón de paro no sea presionado.
+
+11. Cuando el operador presiona el botón de paro I2, la condición de la primera línea se interrumpe.
+
+12. Al interrumpirse la primera línea, la bobina M1 se desactiva.
+
+13. Al desactivarse M1, el contacto M1 del enclavamiento se abre y se pierde la auto-retención.
+
+14. También se abre el contacto M1 de la segunda línea.
+
+15. Como consecuencia, la bobina Q10 se desactiva y la lámpara se apaga.
+
+16. El sistema queda reiniciado y listo para volver a activarse cuando se presione nuevamente el botón de arranque I1.
+
+La ventaja de este programa es que permite controlar una lámpara de forma segura y práctica usando un botón de arranque y un botón de paro. El botón de arranque solamente necesita presionarse por un momento, porque el enclavamiento se encarga de mantener activada la marca M1. El botón de paro, en cambio, tiene prioridad para romper el enclavamiento y apagar la lámpara.
+
+Este tipo de lógica es muy utilizada en la industria para controlar motores, bandas transportadoras, bombas, lámparas piloto y otros sistemas que deben mantenerse encendidos después de una orden de arranque. También es una base fundamental para comprender circuitos de control más avanzados, ya que el principio de enclavamiento aparece en muchas aplicaciones reales de automatización.
+
+En conclusión, el programa Ladder mostrado realiza un enclavamiento básico. La entrada I1 funciona como botón de arranque, la entrada I2 funciona como botón de paro, la marca M1 funciona como memoria interna de activación y la salida Q10 controla la lámpara. Cuando se presiona el botón de arranque, M1 se activa y se mantiene activada gracias al contacto M1 en paralelo. Mientras M1 está activa, la lámpara conectada a Q10 permanece encendida. Cuando se presiona el botón de paro, M1 se desactiva, se rompe el enclavamiento y la lámpara se apaga.

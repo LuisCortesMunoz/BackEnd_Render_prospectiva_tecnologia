@@ -1,0 +1,315 @@
+EXPLICACIÓN DETALLADA DEL PROGRAMA LADDER CON TEMPORIZADOR TOF
+PLC HORNER HE-XC1E5 XL4 – CSCAPE 10.2
+
+1. CONTEXTO GENERAL DEL PROGRAMA
+
+El programa mostrado corresponde a un diagrama ladder, también conocido como código en escalera. Este tipo de programación se utiliza en programadores lógicos programables, o PLC, para controlar procesos de automatización industrial mediante entradas físicas, salidas físicas, marcas internas, temporizadores, contadores y otros bloques de función.
+
+En este caso, el programa está desarrollado en el software Cscape 10.2, utilizado para programar PLC de la marca Horner, específicamente de la serie HE-XC1E5 XL4.
+
+El lenguaje ladder se interpreta como un circuito eléctrico de control. La corriente lógica fluye de izquierda a derecha. Cuando las condiciones colocadas en una línea se cumplen, la corriente puede avanzar hasta activar una bobina, una salida física, una marca interna o un bloque lógico.
+
+En este programa se utiliza un temporizador tipo TOF, una marca interna M1 y una salida física Q11. La finalidad del programa es activar una lámpara amarilla mediante un temporizador de retardo a la desconexión. La salida se activa cuando se presiona el botón de arranque I1 y permanece activa durante un tiempo determinado antes de apagarse.
+
+2. ASIGNACIÓN GENERAL DE ENTRADAS Y SALIDAS DEL PLC
+
+Para este PLC Horner HE-XC1E5 XL4 se consideran las siguientes entradas físicas del tablero:
+
+- I1: Botón normalmente abierto, utilizado como botón de arranque.
+- I2: Botón normalmente cerrado, utilizado comúnmente como botón de paro.
+- I3: Entrada normalmente abierta asociada a un selector o botón auxiliar.
+- I4: Entrada normalmente abierta asociada a otra posición del selector.
+- I8: Botón de paro de emergencia normalmente cerrado.
+
+También se consideran las siguientes salidas físicas para las lámparas del tablero:
+
+- Q10: Lámpara verde.
+- Q11: Lámpara amarilla.
+- Q12: Lámpara roja.
+
+En este programa se utiliza específicamente la salida Q11, por lo tanto, la lámpara controlada es la lámpara amarilla.
+
+3. ELEMENTOS PRINCIPALES DEL PROGRAMA
+
+En la imagen del programa ladder se pueden identificar los siguientes elementos principales:
+
+- Contacto normalmente abierto %I0001.
+- Temporizador TOF asociado al registro %R0001.
+- Base de tiempo configurada en 0.1 segundos.
+- Valor de tiempo PT configurado en 50.
+- Bobina interna %M00001.
+- Contacto normalmente abierto %M00001.
+- Bobina de salida física %Q0011.
+
+Cada elemento cumple una función dentro de la secuencia del programa.
+
+4. ¿QUÉ ES UN TEMPORIZADOR EN LADDER?
+
+Un temporizador es un bloque de función que permite controlar acciones dependiendo del tiempo.
+
+En automatización, los temporizadores se utilizan cuando se necesita que una acción:
+
+- Se active después de cierto tiempo.
+- Permanezca activa durante cierto tiempo.
+- Se apague después de un retardo.
+- Genere una pausa entre etapas de un proceso.
+- Evite que una salida cambie inmediatamente.
+- Controle secuencias automáticas con tiempos definidos.
+
+Por ejemplo, un temporizador puede servir para encender una lámpara durante 5 segundos, mantener un motor funcionando antes de apagarse, activar una alarma después de cierto retardo o controlar el tiempo entre dos movimientos de una máquina.
+
+En este programa, el temporizador se usa para controlar el tiempo durante el cual permanece activa la marca M1 y, por consecuencia, la lámpara amarilla conectada a Q11.
+
+5. BLOQUE TOF – TIMER OFF DELAY
+
+El bloque utilizado en este programa es un temporizador tipo TOF.
+
+TOF significa Timer Off Delay, que en español puede interpretarse como temporizador con retardo a la desconexión.
+
+Este tipo de temporizador funciona de la siguiente manera:
+
+- Cuando la entrada del temporizador se activa, la salida del temporizador se activa de forma inmediata.
+- Mientras la entrada siga activa, la salida también permanece activa.
+- Cuando la entrada deja de estar activa, el temporizador empieza a contar el tiempo configurado.
+- Durante ese tiempo de retardo, la salida todavía permanece activada.
+- Cuando termina el tiempo configurado, la salida del temporizador se apaga.
+
+Por esta razón se le llama temporizador de apagado retardado, porque no apaga la salida inmediatamente cuando desaparece la señal de entrada, sino que espera el tiempo programado antes de apagarla.
+
+6. DIFERENCIA IMPORTANTE ENTRE TOF Y OTROS TEMPORIZADORES
+
+Es importante aclarar que un TOF no funciona igual que un TON.
+
+Un temporizador TON, o Timer On Delay, retrasa el encendido. Es decir, primero espera el tiempo configurado y después activa la salida.
+
+En cambio, un temporizador TOF activa la salida inmediatamente y retrasa el apagado. Es decir, cuando recibe la señal de entrada, deja pasar el flujo lógico al instante. Después, cuando la señal de entrada se desactiva, mantiene la salida encendida durante el tiempo configurado y finalmente la apaga.
+
+En este programa se usa un TOF, por lo tanto, la lámpara amarilla se puede activar inmediatamente cuando se presiona el botón I1 y se apaga después del retardo configurado.
+
+7. CONTACTO %I0001 – BOTÓN DE ARRANQUE
+
+El primer elemento en la línea del programa es un contacto normalmente abierto asociado a la entrada física %I0001.
+
+La entrada I1 corresponde a un botón físico normalmente abierto. Esto significa que, en estado normal, cuando el botón no está presionado, el contacto se encuentra abierto y no permite el paso de corriente lógica.
+
+Cuando el operador presiona el botón I1, el contacto %I0001 se cierra. Al cerrarse, permite que la corriente lógica llegue al bloque temporizador TOF.
+
+En este programa, I1 actúa como la señal de activación del temporizador. Cuando I1 se activa, el temporizador permite que su salida se active inmediatamente.
+
+8. REGISTRO %R0001 DEL TEMPORIZADOR
+
+El temporizador TOF está asociado al registro %R0001.
+
+En los PLC Horner, los registros tipo %R se utilizan para almacenar valores internos del programa. En el caso de un temporizador, el registro sirve para guardar la información relacionada con el tiempo, el estado interno del bloque y el valor acumulado de temporización.
+
+En este programa, %R0001 no es una salida física, sino una memoria interna utilizada por el bloque TOF para controlar el tiempo. El PLC utiliza ese registro para llevar el seguimiento del temporizador.
+
+Es importante no confundir el registro %R0001 con una entrada o una salida física. El registro R1 pertenece a la memoria interna del PLC.
+
+9. BASE DE TIEMPO DEL TEMPORIZADOR
+
+Debajo del nombre TOF aparece la base de tiempo del temporizador. En este caso, la base de tiempo indicada es 0.1 segundos.
+
+La base de tiempo define cuánto vale cada unidad escrita en el parámetro PT.
+
+En otras palabras, si la base de tiempo es 0.1 segundos, cada unidad de PT equivale a 0.1 segundos.
+
+Algunos temporizadores pueden trabajar con diferentes bases de tiempo, por ejemplo:
+
+- 0.01 segundos.
+- 0.1 segundos.
+- 1 segundo.
+
+En este programa se utiliza una base de tiempo de 0.1 segundos.
+
+10. PARÁMETRO PT = 50
+
+El parámetro PT significa Preset Time, es decir, tiempo preestablecido.
+
+En este programa, PT está configurado con el valor 50.
+
+Como la base de tiempo del temporizador es de 0.1 segundos, el tiempo real se calcula multiplicando:
+
+PT x base de tiempo
+
+Sustituyendo los valores del programa:
+
+50 x 0.1 segundos = 5 segundos
+
+Por lo tanto, el temporizador está configurado para trabajar con un tiempo de 5 segundos.
+
+Esto significa que, después de desactivarse la señal de entrada del TOF, la salida del temporizador permanecerá activa durante 5 segundos antes de apagarse.
+
+11. BOBINA INTERNA %M00001
+
+A la derecha del temporizador se encuentra la bobina %M00001.
+
+La dirección %M00001 corresponde a una marca interna del PLC. Las marcas internas son memorias lógicas que se utilizan dentro del programa para guardar estados o para enlazar una línea de ladder con otra.
+
+En este programa, la marca M1 funciona como señal intermedia entre el temporizador y la salida física Q11.
+
+Cuando el temporizador TOF está activo, permite el paso de corriente lógica hacia la bobina %M00001. Al energizarse esta bobina, la marca M1 cambia a estado activo.
+
+Una vez que M1 está activa, todos los contactos asociados a M1 dentro del programa cambian de estado. En este caso, el contacto %M00001 de la segunda línea se cierra para activar la lámpara amarilla.
+
+12. SEGUNDA LÍNEA DEL PROGRAMA – ACTIVACIÓN DE Q11
+
+La segunda línea del programa contiene un contacto normalmente abierto %M00001 y una bobina de salida %Q0011.
+
+El contacto %M00001 depende del estado de la marca interna M1.
+
+Cuando M1 está apagada, el contacto %M00001 permanece abierto y no permite que la corriente lógica llegue a la salida Q11.
+
+Cuando M1 se activa por acción del temporizador, el contacto %M00001 se cierra. Al cerrarse este contacto, la corriente lógica puede avanzar hasta la bobina %Q0011.
+
+La salida %Q0011 corresponde físicamente a la lámpara amarilla del tablero. Por lo tanto, cuando Q11 se activa, la lámpara amarilla se enciende.
+
+13. FUNCIONAMIENTO PASO A PASO DEL PROGRAMA
+
+El funcionamiento completo del programa se puede explicar de la siguiente manera:
+
+Paso 1: Estado inicial
+
+Al inicio, el botón I1 no está presionado. El contacto %I0001 está abierto, el temporizador TOF no está activando su salida, la marca %M00001 está apagada y la salida %Q0011 también está apagada.
+
+Por lo tanto, la lámpara amarilla conectada a Q11 permanece apagada.
+
+Paso 2: Presionar el botón I1
+
+Cuando el operador presiona el botón físico conectado a I1, el contacto %I0001 se cierra.
+
+Al cerrarse este contacto, la corriente lógica llega al bloque TOF.
+
+Paso 3: Activación inmediata del TOF
+
+Como el temporizador es tipo TOF, su salida se activa inmediatamente cuando recibe la señal de entrada.
+
+Esto significa que no espera los 5 segundos para encender. La activación ocurre en el momento en que I1 manda la señal al temporizador.
+
+Paso 4: Activación de la marca M1
+
+La salida activa del temporizador permite energizar la bobina %M00001.
+
+Al activarse la bobina M1, la marca interna queda encendida dentro del programa.
+
+Paso 5: Cierre del contacto M1 en la segunda línea
+
+Cuando la marca M1 se activa, el contacto normalmente abierto %M00001 ubicado en la segunda línea se cierra.
+
+Esto permite que la corriente lógica fluya hacia la salida física Q11.
+
+Paso 6: Encendido de la lámpara amarilla
+
+Al cerrarse el contacto M1, se energiza la bobina %Q0011.
+
+La salida Q11 está conectada físicamente a la lámpara amarilla. Por lo tanto, cuando Q11 se activa, la lámpara amarilla se enciende.
+
+Paso 7: Soltar o desactivar el botón I1
+
+Cuando el operador deja de presionar el botón I1, el contacto %I0001 vuelve a abrirse.
+
+En un temporizador TOF, este momento es importante, porque el conteo del tiempo de apagado comienza cuando desaparece la señal de entrada.
+
+Paso 8: Inicio del conteo de 5 segundos
+
+Después de que I1 se desactiva, el temporizador empieza a contar el tiempo configurado.
+
+Como la base de tiempo es 0.1 segundos y PT es 50, el tiempo total es de 5 segundos.
+
+Durante esos 5 segundos, la salida del temporizador sigue activa. Por lo tanto, M1 permanece encendida y Q11 también permanece activa.
+
+Paso 9: Final del tiempo
+
+Cuando transcurren los 5 segundos configurados, el temporizador TOF desactiva su salida.
+
+En ese momento se apaga la marca %M00001.
+
+Paso 10: Apagado de la lámpara amarilla
+
+Al apagarse la marca M1, el contacto %M00001 de la segunda línea se abre.
+
+Cuando este contacto se abre, la corriente lógica deja de llegar a la bobina %Q0011.
+
+Como resultado, la salida Q11 se apaga y la lámpara amarilla se desactiva.
+
+Paso 11: Sistema listo para reiniciar
+
+Después de que el temporizador termina su ciclo y la lámpara se apaga, el sistema queda listo para recibir nuevamente una señal desde el botón I1.
+
+Cuando se vuelva a presionar I1, el proceso se repetirá.
+
+14. INTERPRETACIÓN DEL FLUJO DE CORRIENTE LÓGICO
+
+En la primera línea del ladder, la corriente lógica inicia del lado izquierdo. Si el contacto %I0001 se cierra, la corriente llega al temporizador TOF.
+
+El temporizador, al recibir la señal, activa su salida de manera inmediata. Esa salida energiza la bobina interna %M00001.
+
+En la segunda línea, el contacto %M00001 depende de la marca M1. Cuando M1 está activa, el contacto se cierra y deja pasar la corriente lógica hacia la salida %Q0011.
+
+La salida %Q0011 activa físicamente la lámpara amarilla del tablero.
+
+Cuando la señal de I1 desaparece, el TOF no apaga inmediatamente la marca M1. Primero espera el tiempo configurado de 5 segundos. Después de ese tiempo, desactiva M1 y se apaga la lámpara amarilla.
+
+15. FUNCIÓN GENERAL DEL SISTEMA
+
+La función general del sistema es encender la lámpara amarilla mediante un temporizador de retardo a la desconexión.
+
+Cuando se presiona el botón I1, la lámpara amarilla se enciende de forma inmediata. Después, cuando la señal de I1 se desactiva, el temporizador mantiene la lámpara encendida durante 5 segundos. Al terminar ese tiempo, la lámpara se apaga.
+
+En este programa no se está realizando un conteo de pulsaciones como en el programa anterior con CTU. En este caso, el bloque principal no es un contador, sino un temporizador. La diferencia es que el contador trabaja con número de eventos, mientras que el temporizador trabaja con tiempo.
+
+16. DIFERENCIA ENTRE EL PROGRAMA DEL CONTADOR Y ESTE PROGRAMA
+
+El programa anterior utilizaba un contador CTU. Ese programa necesitaba contar cuatro pulsaciones del botón I1 para activar la lámpara verde Q10.
+
+Este programa utiliza un temporizador TOF. En lugar de contar pulsaciones, controla cuánto tiempo permanece activa una salida.
+
+La comparación puede resumirse así:
+
+- El contador CTU cuenta eventos.
+- El temporizador TOF controla tiempo.
+- El contador activa su salida al llegar a un número de pulsos.
+- El temporizador TOF activa su salida inmediatamente y retrasa el apagado.
+- El contador anterior activaba Q10, que corresponde a la lámpara verde.
+- Este temporizador activa Q11, que corresponde a la lámpara amarilla.
+
+17. APLICACIÓN EN AUTOMATIZACIÓN
+
+Este tipo de temporizador se utiliza en automatización cuando se necesita que una salida no se apague inmediatamente después de perder la señal de entrada.
+
+Algunos ejemplos de aplicación son:
+
+- Mantener encendida una lámpara de advertencia durante unos segundos.
+- Mantener funcionando un ventilador después de apagar una máquina.
+- Evitar apagados bruscos en un proceso.
+- Mantener una señal activa durante un tiempo de seguridad.
+- Crear retardos de apagado en sistemas de señalización.
+- Mantener activa una alarma visual después de que desaparece la condición que la activó.
+
+En este caso, el ejemplo se aplica al encendido temporizado de la lámpara amarilla Q11.
+
+18. NOTA IMPORTANTE SOBRE EL COMPORTAMIENTO DEL TOF
+
+Como este bloque es un TOF, el retardo corresponde al apagado, no al encendido.
+
+Esto significa que la lámpara amarilla se enciende inmediatamente cuando se activa I1. El tiempo de 5 segundos se utiliza para retrasar el apagado una vez que I1 deja de estar activa.
+
+Si el botón I1 se mantiene presionado, la salida del temporizador seguirá activa. El conteo de los 5 segundos inicia cuando la entrada se desactiva, es decir, cuando el botón se suelta o cuando la señal deja de llegar al temporizador.
+
+19. RESUMEN DEL PROGRAMA
+
+Este programa ladder utiliza un temporizador TOF asociado al registro %R0001. El temporizador tiene una base de tiempo de 0.1 segundos y un valor PT de 50.
+
+El tiempo total configurado se calcula de la siguiente manera:
+
+50 x 0.1 segundos = 5 segundos
+
+El botón físico I1, representado por el contacto normalmente abierto %I0001, activa el temporizador. Al activarse la entrada, el TOF permite el paso de corriente lógica de forma inmediata y energiza la marca interna %M00001.
+
+La marca M1 cierra su contacto en la segunda línea del programa, permitiendo activar la salida física %Q0011.
+
+La salida Q11 corresponde a la lámpara amarilla, por lo tanto, la lámpara amarilla se enciende cuando M1 se activa.
+
+Cuando la señal de I1 desaparece, el temporizador TOF mantiene la salida activa durante 5 segundos. Al terminar ese tiempo, el temporizador desactiva M1, se abre el contacto M1 de la segunda línea y se apaga la salida Q11.
+
+En conclusión, este programa implementa un sistema de encendido de lámpara amarilla con retardo de apagado. La lámpara se activa inmediatamente al recibir la señal del botón I1 y se apaga después de 5 segundos cuando la señal deja de estar presente.

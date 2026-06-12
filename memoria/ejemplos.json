@@ -1,0 +1,172 @@
+[
+ {
+  "id": "ej_20260612_010805_681056",
+  "date": "2026-06-12T01:08:05",
+  "user_prompt": "Crea un enclavamiento: el boton de arranque enciende la lampara verde y el boton de paro la apaga",
+  "model_response": "Al pulsar I1 la lámpara verde Q10 se enciende y permanece encendida; al pulsar I2 (paro NC) se abre y la lámpara se apaga.",
+  "generated_ladder_json": {
+   "programa_nombre": "Enclavamiento_Start_Stop",
+   "logica_ladder": [
+    {
+     "renglon": 1,
+     "descripcion": "Arranque con enclavamiento y auto-retención",
+     "filas": [
+      {
+       "fila": 0,
+       "descripcion": "logica serie principal",
+       "elementos": [
+        {
+         "tipo": "XIC",
+         "operando": "%I1",
+         "descripcion": "boton arranque"
+        },
+        {
+         "tipo": "XIO",
+         "operando": "%I2",
+         "descripcion": "boton paro NC"
+        },
+        {
+         "tipo": "OTE",
+         "operando": "%Q10",
+         "descripcion": "lampara verde"
+        }
+       ]
+      },
+      {
+       "fila": 1,
+       "descripcion": "auto-retencion (con bobina duplicada, ERROR)",
+       "elementos": [
+        {
+         "tipo": "XIC",
+         "operando": "%Q10",
+         "descripcion": "contacto de memoria"
+        },
+        {
+         "tipo": "OTE",
+         "operando": "%Q10",
+         "descripcion": "bobina duplicada"
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "variables_usadas": {
+    "entradas": [
+     "%I1",
+     "%I2"
+    ],
+    "salidas": [
+     "%Q10"
+    ],
+    "marcas": [],
+    "registros": []
+   }
+  },
+  "user_correction": "En la rama paralela de auto-retencion va SOLO el contacto NA con el operando de la bobina. La bobina OTE va unicamente al final de la fila 0, NUNCA duplicada en la rama paralela.",
+  "error_explanation": "El modelo duplico la bobina OTE %Q10 dentro de la fila paralela 1; la fila 1 debe tener solo el contacto XIC %Q10.",
+  "final_ladder_json": {
+   "programa_nombre": "Enclavamiento_Start_Stop",
+   "logica_ladder": [
+    {
+     "renglon": 1,
+     "descripcion": "Arranque con enclavamiento y auto-retencion",
+     "filas": [
+      {
+       "fila": 0,
+       "descripcion": "logica serie principal",
+       "elementos": [
+        {
+         "tipo": "XIC",
+         "operando": "%I1",
+         "descripcion": "boton arranque"
+        },
+        {
+         "tipo": "XIO",
+         "operando": "%I2",
+         "descripcion": "boton paro NC"
+        },
+        {
+         "tipo": "OTE",
+         "operando": "%Q10",
+         "descripcion": "lampara verde"
+        }
+       ]
+      },
+      {
+       "fila": 1,
+       "descripcion": "auto-retencion",
+       "elementos": [
+        {
+         "tipo": "XIC",
+         "operando": "%Q10",
+         "descripcion": "contacto de memoria, solo el contacto"
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "variables_usadas": {
+    "entradas": [
+     "%I1",
+     "%I2"
+    ],
+    "salidas": [
+     "%Q10"
+    ],
+    "marcas": [],
+    "registros": []
+   }
+  },
+  "status": "corrected",
+  "tags": [
+   "Horner_XL4",
+   "button",
+   "output",
+   "seal-in",
+   "stop"
+  ],
+  "uses": 1
+ },
+ {
+  "id": "ej_20260612_011309_322352",
+  "date": "2026-06-12T01:13:09",
+  "user_prompt": "Haz un enclavamiento para la lampara roja: arranca con el boton de arranque y se apaga con el boton de paro",
+  "model_response": "Arranque y paro de la lampara roja con auto-retencion.",
+  "generated_ladder_json": {
+   "programa_nombre": "Enclavamiento_Lampara_Roja",
+   "logica_ladder": [
+    {
+     "renglon": 1,
+     "descripcion": "Arranque y paro de la lampara roja con auto-retencion",
+     "filas": [
+      {
+       "fila": 0,
+       "descripcion": "logica serie principal",
+       "elementos": [
+        {"tipo": "XIC", "operando": "%I1", "descripcion": "boton arranque"},
+        {"tipo": "XIO", "operando": "%I2", "descripcion": "boton paro NC"},
+        {"tipo": "OTE", "operando": "%Q12", "descripcion": "lampara roja"}
+       ]
+      },
+      {
+       "fila": 1,
+       "descripcion": "auto-retencion, solo el contacto",
+       "elementos": [
+        {"tipo": "XIC", "operando": "%Q12", "descripcion": "contacto de memoria"}
+       ]
+      }
+     ]
+    }
+   ],
+   "variables_usadas": {"entradas": ["%I1", "%I2"], "salidas": ["%Q12"], "marcas": [], "registros": []}
+  },
+  "user_correction": null,
+  "error_explanation": null,
+  "final_ladder_json": null,
+  "status": "accepted",
+  "tags": ["Horner_XL4", "button", "output", "seal-in", "stop"],
+  "uses": 0
+ }
+]
