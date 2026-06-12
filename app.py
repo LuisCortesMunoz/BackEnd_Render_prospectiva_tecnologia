@@ -41,8 +41,10 @@ CONTEXTO_JSON_PATH = os.environ.get("CONTEXTO_JSON", "context_json/contexto.json
 HISTORIAL_PATH     = "respuestas/historial.json"
 MEMORIA_PATH       = os.environ.get("MEMORIA_JSON", "memoria/ejemplos.json")
 
-# Cuantos pares Q&A mantener en RAM (contexto activo del modelo)
-MAX_HISTORY   = 5
+# Cuantos pares Q&A mantener en RAM (contexto activo del modelo).
+# Limitado a 2: el plan gratuito de Groq permite 8000 tokens/minuto y el
+# historial con JSONs completos desbordaba ese limite (error 413).
+MAX_HISTORY   = 2
 # Cuantas entradas guardar en historial.json (memoria a largo plazo)
 MAX_HISTORIAL = 50
 # Maximo de ejemplos en memoria/ejemplos.json y cuantos se inyectan por peticion
@@ -186,6 +188,25 @@ def cargar_historial(max_pares: int = MAX_HISTORY) -> list:
     except Exception as e:
         log.warning(f"No se pudo cargar historial: {e}")
         return []
+
+
+def resumen_para_historial(datos: dict) -> str:
+    """Version compacta de la respuesta del modelo para el historial.
+    El JSON completo pesa 1000-1500 tokens por respuesta y desbordaba el
+    limite de 8000 tokens/minuto de Groq; este resumen pesa ~10x menos y
+    conserva lo necesario para dar continuidad a la conversacion."""
+    lineas = [f"Programa: {datos.get('programa_nombre', '')}"]
+    for r in datos.get("logica_ladder", []):
+        filas = []
+        for fila in r.get("filas", []):
+            els = " ".join(f"{e.get('tipo', '')} {e.get('operando', '')}"
+                           for e in fila.get("elementos", []))
+            filas.append(f"fila{fila.get('fila', 0)}: {els}")
+        lineas.append(f"Renglon {r.get('renglon', '?')}: " + " | ".join(filas))
+    exp = datos.get("explicacion_simple", "")
+    if exp:
+        lineas.append(exp[:200])
+    return "\n".join(lineas)
 
 
 def guardar_historial(pregunta: str, texto_raw: str):
@@ -841,7 +862,9 @@ REGLAS IMPORTANTES:
         messages=messages,
         model=MODELO,
         temperature=1,
-        max_tokens=2048,
+        # Groq cuenta entrada + max_tokens contra el limite de 8000/min del
+        # plan gratuito; 1300 sobra para programas de hasta ~5 renglones.
+        max_tokens=1300,
         response_format={"type": "json_object"},
     )
     texto_raw = resp.choices[0].message.content
@@ -863,14 +886,17 @@ REGLAS IMPORTANTES:
     schema    = a_schema(datos)
     js_string = schema_a_js_string(schema, pregunta)
 
-    # Actualizar historial en RAM
+    # Actualizar historial en RAM (resumen compacto, no el JSON completo,
+    # para no desbordar el limite de tokens/minuto de Groq)
+    resumen = resumen_para_historial(datos)
     STATE["history"].append({"role": "user",     "content": pregunta})
-    STATE["history"].append({"role": "assistant", "content": texto_raw})
+    STATE["history"].append({"role": "assistant", "content": resumen})
     if len(STATE["history"]) > MAX_HISTORY * 2:
         STATE["history"] = STATE["history"][-(MAX_HISTORY * 2):]
 
-    # Persistir en disco
-    guardar_historial(pregunta, texto_raw)
+    # Persistir en disco (mismo resumen; el JSON completo ya queda en
+    # respuestas/*.js y en la memoria de feedback)
+    guardar_historial(pregunta, resumen)
     try:
         guardar_js(datos, pregunta)
     except Exception as e:
