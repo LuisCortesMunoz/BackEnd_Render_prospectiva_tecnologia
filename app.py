@@ -5,11 +5,12 @@
 # Historial : respuestas/historial.json   (persistente entre reinicios)
 # Memoria   : memoria/ejemplos.json       (feedback del usuario → mejores respuestas)
 
-import os, re, json, logging, datetime
+import os, re, json, logging, datetime, threading
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -29,6 +30,7 @@ MAX_AUDIO_MB  = int(os.environ.get("MAX_AUDIO_MB",  "25"))
 
 GROQ_API_KEY     = os.environ.get("GROQ_API_KEY")
 GROQ_API_KEY_STT = os.environ.get("GROQ_API_KEY_stt")
+ADMIN_TOKEN      = os.environ.get("ADMIN_TOKEN", "")
 
 groq_client     = Groq(api_key=GROQ_API_KEY)
 groq_client_stt = Groq(api_key=GROQ_API_KEY_STT) if GROQ_API_KEY_STT else None
@@ -962,6 +964,9 @@ def root():
             "memoria_borrar":     "DELETE /memoria/{ejemplo_id}",
             "historial_ver":      "GET  /historial",
             "historial_limpiar":  "DELETE /historial",
+            "admin_generar_ctx":  "GET  /admin/generar-contexto?token=...",
+            "admin_ctx_estado":   "GET  /admin/contexto-estado?token=...",
+            "admin_ctx_json":     "GET  /admin/contexto-json?token=...",
         },
     }
 
@@ -1086,6 +1091,91 @@ def borrar_ejemplo(ejemplo_id: str):
         raise HTTPException(404, f"No existe el ejemplo '{ejemplo_id}'.")
     guardar_memoria(filtrados)
     return {"status": "ok", "mensaje": f"Ejemplo {ejemplo_id} eliminado."}
+
+
+# ─── Admin: generar contexto EN Render (usa la GROQ_API_KEY de Render) ──
+# Flujo: 1) GET /admin/generar-contexto?token=...  (inicia, tarda minutos)
+#        2) GET /admin/contexto-estado?token=...   (ver progreso)
+#        3) GET /admin/contexto-json?token=...     (descargar y subir a git,
+#           porque el disco de Render se borra en cada deploy)
+
+ESTADO_GENERACION = {"estado": "inactivo", "detalle": [], "error": ""}
+
+
+def _verificar_admin(token: str):
+    if not ADMIN_TOKEN:
+        raise HTTPException(403, (
+            "Endpoint deshabilitado: define la variable de entorno ADMIN_TOKEN "
+            "en Render (Environment) con una contraseña que tu elijas."
+        ))
+    if token != ADMIN_TOKEN:
+        raise HTTPException(401, "Token incorrecto. Usa ?token=TU_ADMIN_TOKEN")
+
+
+def _generar_contexto_en_servidor():
+    try:
+        import preparar_contexto
+        datos = preparar_contexto.generar_datos(
+            "codigos",
+            progreso=lambda m: ESTADO_GENERACION["detalle"].append(str(m)),
+        )
+        os.makedirs(os.path.dirname(CONTEXTO_JSON_PATH), exist_ok=True)
+        with open(CONTEXTO_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(datos, f, indent=2, ensure_ascii=False)
+
+        # Aplicar de inmediato sin reiniciar el servidor
+        STATE["system_prompt"]      = construir_system_prompt(datos)
+        STATE["contexto_chars"]     = len(STATE["system_prompt"])
+        STATE["contexto_programas"] = len(datos.get("programas", []))
+
+        ESTADO_GENERACION["estado"] = "completado"
+        ESTADO_GENERACION["detalle"].append(
+            f"LISTO: {datos['total_programas']} programas, "
+            f"{datos['total_renglones']} renglones. Descarga el JSON en "
+            "/admin/contexto-json y subelo a git para que sobreviva los deploys."
+        )
+        log.info("Contexto generado en servidor y aplicado en caliente.")
+    except Exception as e:
+        ESTADO_GENERACION["estado"] = "error"
+        ESTADO_GENERACION["error"]  = str(e)
+        log.error(f"Error generando contexto en servidor: {e}")
+
+
+@app.get("/admin/generar-contexto")
+def admin_generar_contexto(token: str = ""):
+    """Procesa los PDF de codigos/ con Groq Vision usando la clave de Render."""
+    _verificar_admin(token)
+    if ESTADO_GENERACION["estado"] == "procesando":
+        return {"status": "ya_en_curso", "detalle": ESTADO_GENERACION["detalle"][-3:]}
+    ESTADO_GENERACION.update({"estado": "procesando", "detalle": [], "error": ""})
+    threading.Thread(target=_generar_contexto_en_servidor, daemon=True).start()
+    return {
+        "status":  "iniciado",
+        "mensaje": "Procesando PDFs con Vision (tarda unos minutos). "
+                   "Consulta el avance en /admin/contexto-estado?token=...",
+    }
+
+
+@app.get("/admin/contexto-estado")
+def admin_contexto_estado(token: str = ""):
+    _verificar_admin(token)
+    return {
+        "estado":          ESTADO_GENERACION["estado"],
+        "error":           ESTADO_GENERACION["error"],
+        "progreso":        ESTADO_GENERACION["detalle"][-10:],
+        "archivo_existe":  os.path.exists(CONTEXTO_JSON_PATH),
+        "programas_activos": STATE["contexto_programas"],
+    }
+
+
+@app.get("/admin/contexto-json")
+def admin_contexto_json(token: str = ""):
+    """Descarga el contexto.json generado (para subirlo a git)."""
+    _verificar_admin(token)
+    if not os.path.exists(CONTEXTO_JSON_PATH):
+        raise HTTPException(404, "Aun no existe contexto.json. Genera primero con /admin/generar-contexto")
+    return FileResponse(CONTEXTO_JSON_PATH, media_type="application/json",
+                        filename="contexto.json")
 
 
 @app.get("/historial")

@@ -20,7 +20,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 MODELO_VISION = "meta-llama/llama-4-scout-17b-16e-instruct"
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
+# Cliente perezoso: permite importar este modulo (desde app.py en Render)
+# sin que truene si la clave aun no esta cargada en ese momento.
+_client = None
+
+
+def get_client() -> Groq:
+    global _client
+    if _client is None:
+        _client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+    return _client
 
 PROMPT_VISION = """Eres un experto en PLCs Horner programados en Ladder con Cscape.
 Analiza esta imagen y extrae la logica exacta. Responde SOLO con JSON valido:
@@ -54,7 +64,7 @@ def pagina_a_base64(pdf_path: str, num: int) -> str:
 
 def analizar_pagina(pdf_path: str, num: int) -> dict:
     b64 = pagina_a_base64(pdf_path, num)
-    resp = client.chat.completions.create(
+    resp = get_client().chat.completions.create(
         model=MODELO_VISION,
         max_tokens=2000,
         messages=[{"role": "user", "content": [
@@ -71,7 +81,7 @@ def analizar_pagina(pdf_path: str, num: int) -> dict:
         return {"renglones": [], "descripcion_general": "error al parsear"}
 
 
-def procesar_pdf(ruta_pdf: str, descripcion: str = "") -> dict:
+def procesar_pdf(ruta_pdf: str, descripcion: str = "", progreso=print) -> dict:
     nombre = os.path.splitext(os.path.basename(ruta_pdf))[0]
     doc    = fitz.open(ruta_pdf)
     total  = len(doc)
@@ -81,13 +91,12 @@ def procesar_pdf(ruta_pdf: str, descripcion: str = "") -> dict:
     descripcion_general = ""
 
     for i in range(1, total):  # omitir pagina 0 (portada)
-        print(f"    Pagina {i+1}...", end=" ", flush=True)
         datos = analizar_pagina(ruta_pdf, i)
         rens  = datos.get("renglones", [])
         if not rens:
-            print("vacia")
+            progreso(f"    Pagina {i+1}: vacia")
             continue
-        print(f"{len(rens)} renglon(es)")
+        progreso(f"    Pagina {i+1}: {len(rens)} renglon(es)")
         if not descripcion_general:
             descripcion_general = datos.get("descripcion_general", "")
         renglones_total.extend(rens)
@@ -100,18 +109,17 @@ def procesar_pdf(ruta_pdf: str, descripcion: str = "") -> dict:
     }
 
 
-def preparar(carpeta: str = "codigos", salida: str = "context_json/contexto.json"):
+def generar_datos(carpeta: str = "codigos", progreso=print) -> dict:
+    """Procesa los PDF/TXT de la carpeta y devuelve el dict del contexto.
+    Usable desde la CLI (preparar) o desde app.py en Render (/admin)."""
     if not os.path.isdir(carpeta):
-        print(f"ERROR: carpeta '{carpeta}/' no encontrada.")
-        sys.exit(1)
+        raise FileNotFoundError(f"Carpeta '{carpeta}/' no encontrada.")
 
     pdfs = sorted(f for f in os.listdir(carpeta) if f.lower().endswith(".pdf"))
     if not pdfs:
-        print(f"No hay PDFs en '{carpeta}/'")
-        sys.exit(1)
+        raise FileNotFoundError(f"No hay PDFs en '{carpeta}/'")
 
-    print(f"Encontrados {len(pdfs)} PDF(s) en '{carpeta}/'")
-    print("=" * 60)
+    progreso(f"Encontrados {len(pdfs)} PDF(s) en '{carpeta}/'")
 
     programas = []
 
@@ -124,13 +132,13 @@ def preparar(carpeta: str = "codigos", salida: str = "context_json/contexto.json
         if os.path.exists(ruta_txt):
             with open(ruta_txt, encoding="utf-8", errors="ignore") as f:
                 desc = f.read()[:1200]
-            print(f"\nPDF : {nombre_pdf}   TXT: {base}.txt")
+            progreso(f"PDF: {nombre_pdf} (con TXT)")
         else:
-            print(f"\nPDF : {nombre_pdf}   (sin TXT)")
+            progreso(f"PDF: {nombre_pdf} (sin TXT)")
 
-        prog = procesar_pdf(ruta_pdf, desc)
+        prog = procesar_pdf(ruta_pdf, desc, progreso)
         programas.append(prog)
-        print(f"  -> {len(prog['renglones'])} renglones totales")
+        progreso(f"  -> {len(prog['renglones'])} renglones totales")
 
     # TXTs sin PDF asociado
     pdfs_set   = set(pdfs)
@@ -150,15 +158,23 @@ def preparar(carpeta: str = "codigos", salida: str = "context_json/contexto.json
             "descripcion_general": "",
             "renglones":           [],
         })
-        print(f"\nTXT solo: {nombre_txt}")
+        progreso(f"TXT solo: {nombre_txt}")
 
-    datos = {
+    return {
         "version":          "1.0",
         "generado":         datetime.datetime.now().isoformat(),
         "total_programas":  len(programas),
         "total_renglones":  sum(len(p["renglones"]) for p in programas),
         "programas":        programas,
     }
+
+
+def preparar(carpeta: str = "codigos", salida: str = "context_json/contexto.json"):
+    try:
+        datos = generar_datos(carpeta)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
 
     os.makedirs(os.path.dirname(salida), exist_ok=True)
     with open(salida, "w", encoding="utf-8") as f:
