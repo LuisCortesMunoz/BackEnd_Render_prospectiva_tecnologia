@@ -967,6 +967,7 @@ def root():
             "admin_generar_ctx":  "GET  /admin/generar-contexto?token=...",
             "admin_ctx_estado":   "GET  /admin/contexto-estado?token=...",
             "admin_ctx_json":     "GET  /admin/contexto-json?token=...",
+            "admin_memoria_json": "GET  /admin/memoria-json?token=...",
         },
     }
 
@@ -1176,6 +1177,17 @@ def admin_contexto_json(token: str = ""):
         raise HTTPException(404, "Aun no existe contexto.json. Genera primero con /admin/generar-contexto")
     return FileResponse(CONTEXTO_JSON_PATH, media_type="application/json",
                         filename="contexto.json")
+
+
+@app.get("/admin/memoria-json")
+def admin_memoria_json(token: str = ""):
+    """Descarga la memoria de feedback completa (para subirla a git antes
+    de que un deploy o el sueño de Render borren el disco)."""
+    _verificar_admin(token)
+    if not os.path.exists(MEMORIA_PATH):
+        raise HTTPException(404, "Aun no existe la memoria de feedback en este servidor.")
+    return FileResponse(MEMORIA_PATH, media_type="application/json",
+                        filename="ejemplos.json")
 
 
 @app.get("/historial")
