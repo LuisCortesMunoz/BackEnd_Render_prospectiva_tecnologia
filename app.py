@@ -139,6 +139,207 @@ Un enclavamiento real SIEMPRE necesita una rama paralela de auto-retencion.
   fila 1: [XIC bobina]   <- contacto de memoria, IGUAL operando que la bobina
 """
 
+# ─── Contrato "JSON logico simple" (engine-config dual) ───────────
+# Este es el flujo NUEVO: /generar-logica. La IA NO genera geometria ladder
+# ni registros; solo describe la configuracion del motor logico de funcion
+# fija del PLC (maletin), que luego ejecuta el codigo Python (clase XL4) y
+# que el frontend dibuja con su compilador determinista.
+
+ENGINE_INPUTS  = {"NINGUNA", "I1", "I2", "I3", "I4", "I7"}
+ENGINE_OUTPUTS = {"Q10", "Q11", "Q12", "VERDE", "AMARILLA", "ROJA"}
+ENGINE_MODES   = {"off", "directo", "enclavado", "combinacional"}
+TIMER_TYPES    = {"on_delay", "pulse"}
+COUNTER_TYPES  = {"up", "up_held"}
+
+SYSTEM_PROMPT_LOGICA = """Eres el motor de interpretacion de un PLC Horner XL4 de un maletin de laboratorio.
+Traduces una instruccion en lenguaje natural a un JSON de CONFIGURACION (no generas geometria ladder ni codigo).
+
+HARDWARE FIJO (no inventes nada fuera de esto):
+- Salidas (lamparas): Q10 (verde), Q11 (amarilla), Q12 (roja). Solo estas 3.
+- Entradas (botones): I1, I2, I3, I4, I7. Solo estas 5. NINGUNA = sin entrada.
+  Tipo fisico (no lo decides tu): I1,I3,I4 = NA ; I2,I7 = NC.
+- No existen %M, %R, %Q, I5, I6, I8 ni expresiones booleanas arbitrarias.
+
+CADA salida tiene UNA logica base (elige una):
+  - "off"            -> apagada.
+  - "directo"        -> source (entrada), enable opcional. La salida sigue a source.
+  - "enclavado"      -> start (arranque), stop opcional (paro), enable opcional. Auto-retencion.
+  - "combinacional"  -> a, b (dos entradas), op "OR"|"AND", latched opcional, stop opcional.
+                        En "AND" NO se permite enable (el 2do operando ocupa ese lugar).
+Solo se pueden combinar 2 entradas como maximo por salida.
+
+CAPAS OPCIONALES por salida (independientes):
+  - timer:   {"type":"on_delay"|"pulse","preset_s":N}  (segundos enteros; on_delay 0..32767, pulse 1..32767)
+  - counter: {"type":"up"|"up_held","preset":N,"reset_input":"I4"|null}  (up 0..32767, up_held 1..32767)
+
+GLOBAL:
+  - system.enable (bool, normalmente true) y system.global_stop (entrada de paro general o null).
+
+REGLAS DE RESPUESTA:
+- Responde SOLO con JSON valido, sin texto extra ni ```.
+- Usa unicamente las entradas/salidas que el usuario menciona. No agregues paros ni entradas extra.
+- Mapea colores: verde->Q10, amarilla->Q11, roja->Q12.
+- Cada salida incluye un campo "expr" legible (gramatica: * AND, + OR, ! NOT, operandos I1.. y la propia salida para sello) y un "comment" breve. Estos son solo para mostrar; la verdad es la config.
+
+ESQUEMA EXACTO:
+{
+  "name": "string",
+  "device_profile": "maletin_basico",
+  "reset_before": true,
+  "system": { "enable": true, "global_stop": null },
+  "outputs": [
+    {
+      "output": "Q11",
+      "logic": { "mode": "combinacional", "a": "I1", "b": "I3", "op": "OR" },
+      "timer": { "type": "pulse", "preset_s": 5 },
+      "counter": null,
+      "expr": "I1 + I3",
+      "comment": "I1 o I3 encienden la amarilla 5 s"
+    }
+  ]
+}"""
+
+
+def _expr_de_logica(lg: dict, salida: str) -> str:
+    """Deriva un 'expr' legible a partir de la logica del motor (para el
+    frontend). El motor sigue siendo la fuente de verdad."""
+    mode = str(lg.get("mode", "off")).lower()
+    if mode == "off":
+        return "0"
+    if mode == "directo":
+        e = str(lg.get("source") or "")
+        if lg.get("enable"):
+            e = f"{e} * {lg['enable']}"
+        return e or "0"
+    if mode == "enclavado":
+        start = str(lg.get("start") or "")
+        e = f"({start} + {salida})"
+        if lg.get("stop"):
+            e += f" * !{lg['stop']}"
+        if lg.get("enable"):
+            e += f" * {lg['enable']}"
+        return e
+    if mode == "combinacional":
+        a, b = str(lg.get("a") or ""), str(lg.get("b") or "")
+        op = "+" if str(lg.get("op", "OR")).upper() == "OR" else "*"
+        base = f"{a} {op} {b}"
+        if lg.get("latched"):
+            base = f"({base} + {salida})"
+        if lg.get("stop"):
+            base = f"({base}) * !{lg['stop']}"
+        return base
+    return "0"
+
+
+def _entrada_valida(nombre) -> bool:
+    return nombre is None or str(nombre).upper() in ENGINE_INPUTS
+
+
+def validar_logica_config(cfg: dict) -> list:
+    """Valida el JSON dual contra el hardware fijo del maletin. Devuelve la
+    lista de errores (vacia = ok). Espejo del validador de Python (XL4)."""
+    errores = []
+    if not isinstance(cfg, dict):
+        return ["El JSON raiz no es un objeto."]
+    outputs = cfg.get("outputs")
+    if not isinstance(outputs, list) or not outputs:
+        return ["Falta 'outputs' o esta vacio: debe haber al menos una salida."]
+
+    vistos = set()
+    for i, o in enumerate(outputs):
+        tag = f"salida {i+1}"
+        if not isinstance(o, dict):
+            errores.append(f"{tag}: no es un objeto."); continue
+        sal = str(o.get("output", "")).upper()
+        tag = f"salida {i+1} ({sal})"
+        if sal not in ENGINE_OUTPUTS:
+            errores.append(f"{tag}: salida invalida. Usa Q10, Q11 o Q12.")
+        else:
+            canon = "Q10" if sal in ("Q10", "VERDE") else "Q11" if sal in ("Q11", "AMARILLA") else "Q12"
+            if canon in vistos:
+                errores.append(f"{tag}: salida repetida.")
+            vistos.add(canon)
+
+        lg = o.get("logic") or {"mode": "off"}
+        mode = str(lg.get("mode", "off")).lower()
+        if mode not in ENGINE_MODES:
+            errores.append(f"{tag}: mode '{mode}' invalido.")
+        if mode == "directo":
+            if not lg.get("source"):
+                errores.append(f"{tag}: 'directo' requiere 'source'.")
+            for c in ("source", "enable"):
+                if not _entrada_valida(lg.get(c)):
+                    errores.append(f"{tag}: '{c}'='{lg.get(c)}' no es entrada valida.")
+        elif mode == "enclavado":
+            if not lg.get("start"):
+                errores.append(f"{tag}: 'enclavado' requiere 'start'.")
+            for c in ("start", "stop", "enable"):
+                if not _entrada_valida(lg.get(c)):
+                    errores.append(f"{tag}: '{c}'='{lg.get(c)}' no es entrada valida.")
+        elif mode == "combinacional":
+            if not lg.get("a") or not lg.get("b"):
+                errores.append(f"{tag}: 'combinacional' requiere 'a' y 'b'.")
+            for c in ("a", "b", "stop"):
+                if not _entrada_valida(lg.get(c)):
+                    errores.append(f"{tag}: '{c}'='{lg.get(c)}' no es entrada valida.")
+            if str(lg.get("op", "OR")).upper() not in ("OR", "AND"):
+                errores.append(f"{tag}: 'op' debe ser OR o AND.")
+            if str(lg.get("op", "OR")).upper() == "AND" and lg.get("enable"):
+                errores.append(f"{tag}: en AND no se permite 'enable'.")
+
+        tm = o.get("timer")
+        if tm:
+            if str(tm.get("type")).lower() not in TIMER_TYPES:
+                errores.append(f"{tag}: timer.type debe ser on_delay o pulse.")
+            else:
+                low = 0 if str(tm["type"]).lower() == "on_delay" else 1
+                try:
+                    v = int(tm.get("preset_s"))
+                    if v < low or v > 32767:
+                        errores.append(f"{tag}: timer.preset_s {v} fuera de [{low},32767].")
+                except (TypeError, ValueError):
+                    errores.append(f"{tag}: timer.preset_s no es entero.")
+        ct = o.get("counter")
+        if ct:
+            if str(ct.get("type")).lower() not in COUNTER_TYPES:
+                errores.append(f"{tag}: counter.type debe ser up o up_held.")
+            else:
+                low = 0 if str(ct["type"]).lower() == "up" else 1
+                try:
+                    v = int(ct.get("preset"))
+                    if v < low or v > 32767:
+                        errores.append(f"{tag}: counter.preset {v} fuera de [{low},32767].")
+                except (TypeError, ValueError):
+                    errores.append(f"{tag}: counter.preset no es entero.")
+                if not _entrada_valida(ct.get("reset_input")):
+                    errores.append(f"{tag}: counter.reset_input invalido.")
+
+    sysc = cfg.get("system") or {}
+    if not _entrada_valida(sysc.get("global_stop")):
+        errores.append(f"system.global_stop='{sysc.get('global_stop')}' invalido.")
+    return errores
+
+
+def normalizar_logica_config(cfg: dict) -> dict:
+    """Completa campos por defecto y garantiza 'expr'/'comment' por salida
+    para que el JSON dual viaje completo al frontend."""
+    cfg.setdefault("name", "Programa maletin")
+    cfg.setdefault("device_profile", "maletin_basico")
+    cfg.setdefault("reset_before", True)
+    sysc = cfg.setdefault("system", {})
+    sysc.setdefault("enable", True)
+    sysc.setdefault("global_stop", None)
+    for o in cfg.get("outputs", []):
+        o["output"] = str(o.get("output", "")).upper()
+        lg = o.setdefault("logic", {"mode": "off"})
+        lg["mode"] = str(lg.get("mode", "off")).lower()
+        o.setdefault("timer", None)
+        o.setdefault("counter", None)
+        if not o.get("expr"):
+            o["expr"] = _expr_de_logica(lg, o["output"])
+        o.setdefault("comment", "")
+    return cfg
+
 # ─── Carga de contexto JSON ──────────────────────────────────────
 
 def cargar_contexto_json(ruta: str = CONTEXTO_JSON_PATH) -> dict:
@@ -934,6 +1135,22 @@ class FeedbackRequest(BaseModel):
     final_ladder_json: Optional[dict] = None  # programa correcto (esquema del editor o del modelo)
     tags_extra: Optional[List[str]] = None
 
+
+class LogicaRequest(BaseModel):
+    """Peticion del flujo NUEVO (arquitectura unica del frontend).
+    Devuelve el JSON dual engine-config que consume Python (XL4) y dibuja
+    el frontend. El front manda {texto, device_profile, contexto}."""
+    texto: str
+    device_profile: Optional[str] = None
+    contexto: Optional[ContextoLadder] = None
+
+
+class LogicaResponse(BaseModel):
+    logic: dict          # JSON dual engine-config (fuente de verdad para Python)
+    name: str
+    outputs: int
+    warnings: List[str] = []
+
 # ─── Logica principal Ladder ──────────────────────────────────────
 
 def consultar_retorna_schema(pregunta: str, contexto: Optional[ContextoLadder] = None) -> tuple:
@@ -1105,6 +1322,7 @@ def root():
             "stt":                "POST /transcribir",
             "voz_a_ladder":       "POST /voz-a-ladder",
             "ladder":             "POST /generar-ladder",
+            "logica":             "POST /generar-logica",
             "feedback":           "POST /feedback",
             "memoria_ver":        "GET  /memoria",
             "memoria_borrar":     "DELETE /memoria/{ejemplo_id}",
@@ -1188,6 +1406,78 @@ async def generar_ladder(req: PromptRequest):
     except Exception as e:
         log.error(f"Error generar-ladder: {e}")
         raise HTTPException(500, str(e))
+
+
+@app.post("/generar-logica", response_model=LogicaResponse)
+async def generar_logica(req: LogicaRequest):
+    """Flujo NUEVO (ver CONTRACT del frontend): la IA interpreta la intencion
+    y devuelve el JSON dual engine-config del maletin. NO genera geometria ni
+    registros: eso lo hacen el front (dibujo) y Python (XL4 -> PLC)."""
+    texto = (req.texto or "").strip()
+    if not texto:
+        raise HTTPException(400, "El campo 'texto' no puede estar vacio.")
+    if len(texto) > 2000:
+        raise HTTPException(400, "Texto demasiado largo, maximo 2000 caracteres.")
+
+    # Memoria de feedback validada parecida a esta peticion (reutiliza la del
+    # flujo viejo; solo aporta ejemplos como contexto, no rompe el contrato).
+    ejemplos = ejemplos_relevantes(texto)
+    system_prompt = SYSTEM_PROMPT_LOGICA
+    if ejemplos:
+        system_prompt += "\n\n" + bloque_ejemplos_prompt(ejemplos)
+
+    messages = [{"role": "system", "content": system_prompt}]
+    if req.contexto:
+        previas = "\n".join(f"- {p}" for p in (req.contexto.historial or [])[-4:])
+        # En modificaciones, el programa anterior trae su engine_config en la
+        # metadata: se lo damos al modelo para que "agregue/cambie" sobre el.
+        prev_cfg = None
+        if req.contexto.programa_anterior:
+            prev_cfg = (req.contexto.programa_anterior.get("metadata", {})
+                        .get("engine_config"))
+        if previas or prev_cfg:
+            partes = []
+            if previas:
+                partes.append(f"Peticiones anteriores del usuario:\n{previas}")
+            if prev_cfg:
+                partes.append("PROGRAMA ACTUAL (modifica este JSON, conserva lo no pedido):\n"
+                              + json.dumps(prev_cfg, ensure_ascii=False))
+            messages.append({"role": "user", "content": "\n\n".join(partes)})
+            messages.append({"role": "assistant", "content":
+                             "Entendido. Aplicare la siguiente instruccion sobre ese "
+                             "programa y devolvere el JSON completo actualizado."})
+    messages.append({"role": "user", "content":
+                     f"{texto}\n\nResponde SOLO con el JSON del esquema indicado."})
+
+    try:
+        cfg = llamar_modelo_json(messages)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        log.error(f"Error generar-logica (modelo): {e}")
+        raise HTTPException(500, str(e))
+
+    errores = validar_logica_config(cfg)
+    if errores:
+        log.warning(f"JSON logico invalido: {errores}")
+        raise HTTPException(422, "El JSON generado no es valido:\n- " + "\n- ".join(errores))
+
+    cfg = normalizar_logica_config(cfg)
+    warnings = list(cfg.get("system", {}).get("warnings", []) or [])
+
+    # Persistencia ligera: queda en historial y en la memoria de feedback
+    try:
+        guardar_historial(texto, json.dumps(cfg, ensure_ascii=False)[:1500])
+    except Exception as e:
+        log.warning(f"No se pudo guardar historial (logica): {e}")
+
+    log.info(f"/generar-logica OK — {len(cfg.get('outputs', []))} salida(s)")
+    return LogicaResponse(
+        logic=cfg,
+        name=cfg.get("name", "Programa maletin"),
+        outputs=len(cfg.get("outputs", [])),
+        warnings=warnings,
+    )
 
 
 @app.post("/feedback")
