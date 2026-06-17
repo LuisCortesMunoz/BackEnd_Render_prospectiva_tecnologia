@@ -1099,7 +1099,8 @@ ALLOWED_ORIGINS = os.environ.get(
     "ALLOWED_ORIGINS",
     "http://localhost:3000,http://localhost:5173,"
     "http://127.0.0.1:5500,http://127.0.0.1:5173,"
-    "https://sebas30073007.github.io"
+    "https://sebas30073007.github.io,"
+    "https://luiscortesmunoz.github.io"
 ).split(",")
 ALLOWED_ORIGINS = [o.strip() for o in ALLOWED_ORIGINS if o.strip()]
 
@@ -1177,6 +1178,18 @@ class LogicaResponse(BaseModel):
     name: str
     outputs: int
     warnings: List[str] = []
+
+
+class AplicarPLCRequest(BaseModel):
+    """Envia un programa al PLC fisico por Modbus TCP (boton 'Cargar' del editor).
+    Manda 'logic' (engine_config) o un 'program' completo (se extrae de
+    metadata.engine_config). 'ip'/'port' opcionales sobreescriben el PLC por
+    defecto del modulo plc_maestro. dry_run=true valida e imprime sin escribir."""
+    logic: Optional[dict] = None
+    program: Optional[dict] = None
+    ip: Optional[str] = None
+    port: Optional[int] = None
+    dry_run: bool = False
 
 # ─── Logica principal Ladder ──────────────────────────────────────
 
@@ -1350,6 +1363,7 @@ def root():
             "voz_a_ladder":       "POST /voz-a-ladder",
             "ladder":             "POST /generar-ladder",
             "logica":             "POST /generar-logica",
+            "aplicar_plc":        "POST /aplicar-plc",
             "feedback":           "POST /feedback",
             "memoria_ver":        "GET  /memoria",
             "memoria_borrar":     "DELETE /memoria/{ejemplo_id}",
@@ -1517,6 +1531,67 @@ async def generar_logica(req: LogicaRequest):
         outputs=len(cfg.get("outputs", [])),
         warnings=warnings,
     )
+
+
+@app.post("/aplicar-plc")
+def aplicar_plc(req: AplicarPLCRequest):
+    """Envia el programa al PLC fisico por Modbus TCP (boton 'Cargar' del editor).
+    Usa la clase XL4 de plc_maestro SIN modificar sus reglas.
+
+    IMPORTANTE: el PLC esta en una LAN privada (p. ej. 192.168.3.12). Este
+    endpoint SOLO alcanza el PLC si el backend corre LOCALMENTE en esa red; en
+    Render (internet) devolvera error de conexion. dry_run=true valida y
+    devuelve el plan sin tocar el PLC (sirve en cualquier lado)."""
+    # 1) Obtener el engine_config (directo o desde program.metadata)
+    cfg = req.logic
+    if cfg is None and isinstance(req.program, dict):
+        cfg = (req.program.get("metadata", {}) or {}).get("engine_config")
+    if not isinstance(cfg, dict):
+        raise HTTPException(400, "Falta el engine_config. Manda 'logic' o un 'program' "
+                                 "que tenga metadata.engine_config (generado por la IA).")
+
+    # 2) Import perezoso: solo quien use el PLC necesita pymodbus instalado
+    try:
+        import plc_maestro
+    except Exception as e:
+        raise HTTPException(500, f"No se pudo cargar plc_maestro (¿falta pymodbus?): {e}")
+
+    # 3) Validar con las MISMAS reglas del motor antes de tocar el PLC
+    errores = plc_maestro.validar_config(cfg)
+    if errores:
+        raise HTTPException(422, "El programa no es valido para el PLC:\n- " + "\n- ".join(errores))
+
+    plan = plc_maestro.plan_config(cfg)
+    plan_legible = [
+        f"plc.{m}(" + ", ".join([repr(a) for a in args]
+                                + [f"{k}={v!r}" for k, v in kw.items()]) + ")"
+        for m, args, kw in plan
+    ]
+
+    # 4) Dry-run: no toca el PLC (validacion/preview en cualquier entorno)
+    if req.dry_run:
+        return {"status": "dry-run", "enviado": False,
+                "salidas": len(cfg.get("outputs", [])), "plan": plan_legible}
+
+    # 5) Conectar y escribir al PLC real (Modbus TCP)
+    ip   = req.ip   or plc_maestro.PLC_IP
+    port = req.port or plc_maestro.PLC_PORT
+    plc  = plc_maestro.XL4(ip=ip, port=port)
+    try:
+        plc.connect()
+    except Exception as e:
+        raise HTTPException(503, f"No se pudo conectar al PLC {ip}:{port}. "
+                                 f"¿Esta el backend en la misma red del PLC y encendido? Detalle: {e}")
+    try:
+        plc_maestro.aplicar_config(plc, cfg, dry_run=False)
+    except Exception as e:
+        raise HTTPException(500, f"Error escribiendo al PLC: {e}")
+    finally:
+        plc.close()
+
+    log.info(f"/aplicar-plc OK — {len(cfg.get('outputs', []))} salida(s) -> {ip}:{port}")
+    return {"status": "ok", "enviado": True, "plc": f"{ip}:{port}",
+            "salidas": len(cfg.get("outputs", [])), "plan": plan_legible}
 
 
 @app.post("/feedback")
