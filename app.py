@@ -162,11 +162,23 @@ HARDWARE FIJO (no inventes nada fuera de esto):
 
 CADA salida tiene UNA logica base (elige una):
   - "off"            -> apagada.
-  - "directo"        -> source (entrada), enable opcional. La salida sigue a source.
-  - "enclavado"      -> start (arranque), stop opcional (paro), enable opcional. Auto-retencion.
+  - "directo"        -> source (entrada), enable opcional. La salida sigue a source
+                        SOLO mientras la entrada este activa (al soltar, se apaga).
+  - "enclavado"      -> start (arranque), stop opcional (paro), enable opcional.
+                        AUTO-RETENCION: la salida se queda ENCENDIDA al soltar el
+                        arranque, y solo se apaga con el paro (stop).
   - "combinacional"  -> a, b (dos entradas), op "OR"|"AND", latched opcional, stop opcional.
+                        Usa latched:true cuando la combinacion debe QUEDARSE encendida.
                         En "AND" NO se permite enable (el 2do operando ocupa ese lugar).
 Solo se pueden combinar 2 entradas como maximo por salida.
+
+CUANDO USAR "enclavado" (MUY IMPORTANTE):
+Si el usuario usa palabras como enclavar, enclavamiento, se queda/quede encendida,
+se mantiene/mantenga, permanece, sigue prendida, retencion, sello, latch, o describe
+un arranque-paro (un boton enciende y OTRO apaga), entonces DEBES usar mode "enclavado"
+(no "directo"). "directo" es solo para "mientras presione". Si hay dos entradas que
+encienden y debe quedar enclavado, usa "combinacional" con latched:true.
+El paro va en "stop" (no inventes paro si el usuario no lo menciona).
 
 CAPAS OPCIONALES por salida (independientes):
   - timer:   {"type":"on_delay"|"pulse","preset_s":N}  (segundos enteros; on_delay 0..32767, pulse 1..32767)
@@ -189,6 +201,14 @@ ESQUEMA EXACTO:
   "system": { "enable": true, "global_stop": null },
   "outputs": [
     {
+      "output": "Q10",
+      "logic": { "mode": "enclavado", "start": "I1", "stop": "I2" },
+      "timer": null,
+      "counter": null,
+      "expr": "(I1 + Q10) * !I2",
+      "comment": "I1 enciende y enclava la verde; I2 la apaga"
+    },
+    {
       "output": "Q11",
       "logic": { "mode": "combinacional", "a": "I1", "b": "I3", "op": "OR" },
       "timer": { "type": "pulse", "preset_s": 5 },
@@ -197,7 +217,14 @@ ESQUEMA EXACTO:
       "comment": "I1 o I3 encienden la amarilla 5 s"
     }
   ]
-}"""
+}
+
+EJEMPLO de enclavamiento (peticion -> JSON):
+Peticion: "El boton verde enciende la lampara verde y se queda prendida; el rojo la apaga."
+JSON: {"name":"Enclavamiento verde","device_profile":"maletin_basico","reset_before":true,
+ "system":{"enable":true,"global_stop":null},
+ "outputs":[{"output":"Q10","logic":{"mode":"enclavado","start":"I1","stop":"I2"},
+ "timer":null,"counter":null,"expr":"(I1 + Q10) * !I2","comment":"enclavamiento verde"}]}"""
 
 
 def _expr_de_logica(lg: dict, salida: str) -> str:
@@ -1419,14 +1446,11 @@ async def generar_logica(req: LogicaRequest):
     if len(texto) > 2000:
         raise HTTPException(400, "Texto demasiado largo, maximo 2000 caracteres.")
 
-    # Memoria de feedback validada parecida a esta peticion (reutiliza la del
-    # flujo viejo; solo aporta ejemplos como contexto, no rompe el contrato).
-    ejemplos = ejemplos_relevantes(texto)
-    system_prompt = SYSTEM_PROMPT_LOGICA
-    if ejemplos:
-        system_prompt += "\n\n" + bloque_ejemplos_prompt(ejemplos)
-
-    messages = [{"role": "system", "content": system_prompt}]
+    # OJO: aqui NO se inyecta la memoria de feedback (memoria/ejemplos.json):
+    # esos ejemplos estan en el esquema VIEJO (logica_ladder/filas/XIC/OTE) y
+    # contaminan el contrato engine-config (el modelo intenta imitarlos y rompe
+    # el enclavamiento). El contexto va solo en SYSTEM_PROMPT_LOGICA.
+    messages = [{"role": "system", "content": SYSTEM_PROMPT_LOGICA}]
     if req.contexto:
         previas = "\n".join(f"- {p}" for p in (req.contexto.historial or [])[-4:])
         # En modificaciones, el programa anterior trae su engine_config en la
@@ -1464,6 +1488,21 @@ async def generar_logica(req: LogicaRequest):
 
     cfg = normalizar_logica_config(cfg)
     warnings = list(cfg.get("system", {}).get("warnings", []) or [])
+
+    # Red de seguridad: si la peticion suena a enclavamiento pero ninguna salida
+    # quedo enclavada, avisar (no auto-corregimos: podria equivocarse de salida).
+    if es_enclavamiento(texto):
+        tiene_latch = any(
+            (o.get("logic", {}).get("mode") == "enclavado")
+            or (o.get("logic", {}).get("mode") == "combinacional"
+                and o.get("logic", {}).get("latched"))
+            for o in cfg.get("outputs", [])
+        )
+        if not tiene_latch:
+            warnings.append(
+                "La peticion parece pedir enclavamiento, pero ninguna salida quedo "
+                "en modo 'enclavado'. Revisa el programa o reformula la peticion."
+            )
 
     # Persistencia ligera: queda en historial y en la memoria de feedback
     try:
