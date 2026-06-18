@@ -6,6 +6,8 @@
 # Memoria   : memoria/ejemplos.json       (feedback del usuario → mejores respuestas)
 
 import os, re, json, logging, datetime, threading
+import socket, ipaddress
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
@@ -1398,6 +1400,10 @@ def root():
             "ladder":             "POST /generar-ladder",
             "logica":             "POST /generar-logica",
             "aplicar_plc":        "POST /aplicar-plc",
+            "plc_escanear":       "GET  /plc/escanear",
+            "plc_probar":         "GET  /plc/probar?ip=...",
+            "plc_config_ver":     "GET  /plc/config",
+            "plc_config_set":     "POST /plc/config",
             "feedback":           "POST /feedback",
             "memoria_ver":        "GET  /memoria",
             "memoria_borrar":     "DELETE /memoria/{ejemplo_id}",
@@ -1597,6 +1603,148 @@ async def generar_logica(req: LogicaRequest):
     )
 
 
+# ─── Deteccion / configuracion de la IP del PLC ──────────────────
+# El PLC vive en una LAN privada (Modbus TCP, puerto 502). Estos helpers
+# y endpoints SOLO sirven si el backend corre LOCALMENTE en esa red (no en
+# Render). Permiten al frontend descubrir la IP del PLC conectado en vez de
+# pedirsela al usuario de memoria.
+
+# Override en runtime de la IP/puerto por defecto del PLC (se fija con
+# POST /plc/config; si es None se usa el valor de plc_maestro.PLC_IP).
+PLC_STATE = {"ip": None, "port": None}
+
+
+def plc_default_ip() -> str:
+    if PLC_STATE["ip"]:
+        return PLC_STATE["ip"]
+    try:
+        import plc_maestro
+        return plc_maestro.PLC_IP
+    except Exception:
+        return "192.168.3.12"
+
+
+def plc_default_port() -> int:
+    if PLC_STATE["port"]:
+        return PLC_STATE["port"]
+    try:
+        import plc_maestro
+        return plc_maestro.PLC_PORT
+    except Exception:
+        return 502
+
+
+def _ips_locales() -> set:
+    """IPv4 locales del host (para deducir la subred /24 del PLC)."""
+    ips = set()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ips.add(info[4][0])
+    except Exception:
+        pass
+    # IP de salida real (no envia nada; solo elige la interfaz de ruta)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ips.add(s.getsockname()[0])
+        s.close()
+    except Exception:
+        pass
+    return {ip for ip in ips if not ip.startswith("127.")}
+
+
+def _puerto_abierto(ip: str, port: int = 502, timeout: float = 0.3) -> bool:
+    """True si hay un servicio TCP escuchando en ip:port (Modbus = 502)."""
+    try:
+        with socket.create_connection((ip, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def _subredes_a_escanear(ip_base: str = "") -> list:
+    """Subredes /24 candidatas: la del parametro, las de cada NIC local y la
+    del PLC por defecto (por si el host tiene varias interfaces)."""
+    bases = set()
+    if ip_base:
+        bases.add(".".join(ip_base.split(".")[:3]) + ".0")
+    for ip in _ips_locales():
+        bases.add(".".join(ip.split(".")[:3]) + ".0")
+    bases.add(".".join(plc_default_ip().split(".")[:3]) + ".0")
+    return sorted(bases)
+
+
+@app.get("/plc/config")
+def plc_config_ver():
+    """IP/puerto del PLC que usara /aplicar-plc por defecto."""
+    return {"ip": plc_default_ip(), "port": plc_default_port(),
+            "override": dict(PLC_STATE)}
+
+
+class PLCConfigRequest(BaseModel):
+    ip: Optional[str] = None
+    port: Optional[int] = None
+
+
+@app.post("/plc/config")
+def plc_config_set(req: PLCConfigRequest):
+    """Fija la IP/puerto por defecto del PLC en este backend (en memoria)."""
+    if req.ip is not None:
+        PLC_STATE["ip"] = req.ip.strip() or None
+    if req.port is not None:
+        PLC_STATE["port"] = int(req.port) or None
+    log.info(f"PLC por defecto -> {plc_default_ip()}:{plc_default_port()}")
+    return {"status": "ok", "ip": plc_default_ip(), "port": plc_default_port()}
+
+
+@app.get("/plc/probar")
+def plc_probar(ip: str, port: int = 502, timeout_ms: int = 800):
+    """Prueba rapida de conectividad a un PLC concreto (TCP a ip:port)."""
+    alcanzable = _puerto_abierto(ip, port, max(0.1, timeout_ms / 1000))
+    return {"status": "ok" if alcanzable else "sin_respuesta",
+            "ip": ip, "port": port, "alcanzable": alcanzable}
+
+
+@app.get("/plc/escanear")
+def plc_escanear(ip_base: str = "", port: int = 502, timeout_ms: int = 300):
+    """Escanea la(s) subred(es) /24 locales buscando dispositivos Modbus TCP
+    (puerto 502). Devuelve las IPs que responden para que el frontend deje
+    elegir el PLC. SOLO funciona si el backend corre en la LAN del PLC."""
+    subredes = _subredes_a_escanear(ip_base)
+    candidatos = []
+    for base in subredes:
+        try:
+            red = ipaddress.ip_network(base + "/24", strict=False)
+        except ValueError:
+            continue
+        candidatos.extend(str(h) for h in red.hosts())
+    candidatos = list(dict.fromkeys(candidatos))   # dedupe conservando orden
+
+    timeout = max(0.05, timeout_ms / 1000)
+    encontrados = []
+    with ThreadPoolExecutor(max_workers=128) as ex:
+        abiertos = ex.map(lambda x: _puerto_abierto(x, port, timeout), candidatos)
+        for ip, ok in zip(candidatos, abiertos):
+            if ok:
+                encontrados.append(ip)
+
+    # El PLC por defecto primero si respondio (comodo para el usuario)
+    por_defecto = plc_default_ip()
+    encontrados.sort(key=lambda ip: (ip != por_defecto,
+                                     tuple(int(o) for o in ip.split("."))))
+
+    log.info(f"/plc/escanear — subredes {subredes} -> {len(encontrados)} PLC(s): {encontrados}")
+    return {
+        "status":       "ok",
+        "puerto":       port,
+        "subredes":     subredes,
+        "ips_locales":  sorted(_ips_locales()),
+        "encontrados":  encontrados,
+        "default":      por_defecto,
+        "total_revisadas": len(candidatos),
+    }
+
+
 @app.post("/aplicar-plc")
 def aplicar_plc(req: AplicarPLCRequest):
     """Envia el programa al PLC fisico por Modbus TCP (boton 'Cargar' del editor).
@@ -1638,8 +1786,10 @@ def aplicar_plc(req: AplicarPLCRequest):
                 "salidas": len(cfg.get("outputs", [])), "plan": plan_legible}
 
     # 5) Conectar y escribir al PLC real (Modbus TCP)
-    ip   = req.ip   or plc_maestro.PLC_IP
-    port = req.port or plc_maestro.PLC_PORT
+    #    Prioridad: lo que mande el front (req.ip) > override del backend
+    #    (POST /plc/config) > valor por defecto de plc_maestro.
+    ip   = req.ip   or plc_default_ip()
+    port = req.port or plc_default_port()
     plc  = plc_maestro.XL4(ip=ip, port=port)
     try:
         plc.connect()
