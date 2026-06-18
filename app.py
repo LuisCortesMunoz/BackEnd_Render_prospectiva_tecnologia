@@ -613,6 +613,29 @@ def agregar_ejemplo(pregunta: str, datos: dict) -> str:
     return nuevo_id
 
 
+def agregar_ejemplo_logica(texto: str, cfg: dict) -> str:
+    """Guarda el engine_config como ejemplo de feedback (formato nuevo).
+    No usa el esquema viejo (logica_ladder) para no contaminar el prompt de
+    /generar-logica si en el futuro se inyectan estos ejemplos."""
+    ejemplos    = cargar_memoria()
+    norm_prompt = " ".join(sorted(_tokens(texto)))
+    ejemplos = [e for e in ejemplos
+                if not (e.get("status") == "pending"
+                        and " ".join(sorted(_tokens(e.get("user_prompt", "")))) == norm_prompt)]
+    nuevo_id = f"lej_{datetime.datetime.now():%Y%m%d_%H%M%S_%f}"
+    ejemplos.append({
+        "id":          nuevo_id,
+        "date":        datetime.datetime.now().isoformat(timespec="seconds"),
+        "user_prompt": texto,
+        "datos":       {"engine_config": cfg},
+        "status":      "pending",
+        "tags":        extraer_tags(texto),
+        "uses":        0,
+    })
+    guardar_memoria(_podar_memoria(ejemplos))
+    return nuevo_id
+
+
 def aplicar_feedback(ejemplo_id: str, status: str,
                      user_correction: Optional[str] = None,
                      error_explanation: Optional[str] = None,
@@ -932,6 +955,16 @@ def es_enclavamiento(pregunta: str) -> bool:
     return any(w in p for w in PALABRAS_ENCLAVAMIENTO)
 
 
+def _tiene_latch(cfg: dict) -> bool:
+    """True si al menos una salida del engine-config tiene enclavamiento real."""
+    return any(
+        (o.get("logic", {}).get("mode") == "enclavado")
+        or (o.get("logic", {}).get("mode") == "combinacional"
+            and o.get("logic", {}).get("latched"))
+        for o in cfg.get("outputs", [])
+    )
+
+
 def construir_mensaje_usuario(pregunta: str) -> str:
     verificacion = VERIFICACION_ENCLAVAMIENTO if es_enclavamiento(pregunta) else ""
     return f"{pregunta}{verificacion}{ESQUEMA}"
@@ -1178,6 +1211,7 @@ class LogicaResponse(BaseModel):
     name: str
     outputs: int
     warnings: List[str] = []
+    ejemplo_id: str = ""  # id en memoria de feedback (para POST /feedback)
 
 
 class AplicarPLCRequest(BaseModel):
@@ -1503,26 +1537,55 @@ async def generar_logica(req: LogicaRequest):
     cfg = normalizar_logica_config(cfg)
     warnings = list(cfg.get("system", {}).get("warnings", []) or [])
 
-    # Red de seguridad: si la peticion suena a enclavamiento pero ninguna salida
-    # quedo enclavada, avisar (no auto-corregimos: podria equivocarse de salida).
-    if es_enclavamiento(texto):
-        tiene_latch = any(
-            (o.get("logic", {}).get("mode") == "enclavado")
-            or (o.get("logic", {}).get("mode") == "combinacional"
-                and o.get("logic", {}).get("latched"))
-            for o in cfg.get("outputs", [])
-        )
-        if not tiene_latch:
+    # Red de seguridad + reintento: si la peticion pide enclavamiento pero el
+    # modelo no lo genero, reintentar UNA vez antes de emitir el aviso.
+    if es_enclavamiento(texto) and not _tiene_latch(cfg):
+        log.warning("Enclavamiento sin latch en 1ª respuesta — reintentando...")
+        retry_msgs = list(messages)
+        retry_msgs.append({
+            "role": "assistant",
+            "content": json.dumps(cfg, ensure_ascii=False),
+        })
+        retry_msgs.append({
+            "role": "user",
+            "content": (
+                "El JSON anterior es INCORRECTO: la peticion pide enclavamiento "
+                "pero ninguna salida usa mode 'enclavado'. "
+                "Corrige SOLO eso: usa mode 'enclavado' con 'start' (arranque) y "
+                "'stop' (paro) correctos. "
+                "Devuelve el JSON completo corregido, sin texto extra."
+            ),
+        })
+        try:
+            cfg2 = llamar_modelo_json(retry_msgs)
+            errs2 = validar_logica_config(cfg2)
+            if not errs2 and _tiene_latch(cfg2):
+                cfg = normalizar_logica_config(cfg2)
+                warnings = list(cfg.get("system", {}).get("warnings", []) or [])
+                log.info("Retry de enclavamiento exitoso.")
+            else:
+                warnings.append(
+                    "La peticion parece pedir enclavamiento, pero ninguna salida quedo "
+                    "en modo 'enclavado'. Reformula mencionando 'arranque y paro'."
+                )
+        except Exception as e_retry:
+            log.warning(f"Retry enclavamiento fallo: {e_retry}")
             warnings.append(
                 "La peticion parece pedir enclavamiento, pero ninguna salida quedo "
-                "en modo 'enclavado'. Revisa el programa o reformula la peticion."
+                "en modo 'enclavado'. Reformula mencionando 'arranque y paro'."
             )
 
-    # Persistencia ligera: queda en historial y en la memoria de feedback
+    # Persistencia: historial + memoria de feedback
     try:
         guardar_historial(texto, json.dumps(cfg, ensure_ascii=False)[:1500])
     except Exception as e:
         log.warning(f"No se pudo guardar historial (logica): {e}")
+
+    ejemplo_id = ""
+    try:
+        ejemplo_id = agregar_ejemplo_logica(texto, cfg)
+    except Exception as e:
+        log.warning(f"No se pudo guardar ejemplo logica: {e}")
 
     log.info(f"/generar-logica OK — {len(cfg.get('outputs', []))} salida(s)")
     return LogicaResponse(
@@ -1530,6 +1593,7 @@ async def generar_logica(req: LogicaRequest):
         name=cfg.get("name", "Programa maletin"),
         outputs=len(cfg.get("outputs", [])),
         warnings=warnings,
+        ejemplo_id=ejemplo_id,
     )
 
 
