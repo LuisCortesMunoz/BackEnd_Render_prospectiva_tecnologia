@@ -64,7 +64,7 @@ MAX_EJEMPLOS_PROMPT = 3
 
 VARIABLES_PLC = """
 PLC     : Horner XL4 / XC1E5 | Software: Cscape 10.2 | 24VDC
-Red     : IP 192.168.1.100 | Puerto Modbus TCP 502
+Red     : IP 192.168.3.12 | Puerto Modbus TCP 502
 
 ENTRADAS (%I):
   %I1: Boton NA arranque    %I2: Boton NC paro
