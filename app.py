@@ -6,7 +6,7 @@
 # Memoria   : memoria/ejemplos.json       (feedback del usuario → mejores respuestas)
 
 import os, re, json, logging, datetime, threading
-import socket, ipaddress
+import socket, ipaddress, subprocess, platform
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import List, Optional
@@ -1662,6 +1662,31 @@ def _puerto_abierto(ip: str, port: int = 502, timeout: float = 0.3) -> bool:
         return False
 
 
+def _ping(ip: str, timeout_ms: int = 1000) -> bool:
+    """Ping ICMP a una IP (host vivo). Util cuando el PLC esta conectado
+    directo a la PC: responde al ping aunque el puerto Modbus aun no escuche.
+    Multiplataforma (Windows usa -n/-w ms; Unix usa -c/-W s)."""
+    es_windows = platform.system().lower().startswith("win")
+    if es_windows:
+        cmd = ["ping", "-n", "1", "-w", str(int(timeout_ms)), ip]
+    else:
+        secs = max(1, (int(timeout_ms) + 999) // 1000)   # -W en segundos
+        cmd = ["ping", "-c", "1", "-W", str(secs), ip]
+    try:
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             timeout=max(2.0, timeout_ms / 1000 + 2))
+    except Exception:
+        return False
+    if res.returncode != 0:
+        return False
+    # En Windows el "host inaccesible" a veces sale con returncode 0; exige TTL
+    # para confirmar que hubo respuesta real del dispositivo.
+    salida = (res.stdout or b"").decode("utf-8", "ignore").lower()
+    if es_windows and "ttl=" not in salida:
+        return False
+    return True
+
+
 def _subredes_a_escanear(ip_base: str = "") -> list:
     """Subredes /24 candidatas: la del parametro, las de cada NIC local y la
     del PLC por defecto (por si el host tiene varias interfaces)."""
@@ -1698,11 +1723,18 @@ def plc_config_set(req: PLCConfigRequest):
 
 
 @app.get("/plc/probar")
-def plc_probar(ip: str, port: int = 502, timeout_ms: int = 800):
-    """Prueba rapida de conectividad a un PLC concreto (TCP a ip:port)."""
-    alcanzable = _puerto_abierto(ip, port, max(0.1, timeout_ms / 1000))
+def plc_probar(ip: str, port: int = 502, timeout_ms: int = 1000):
+    """Prueba de comunicacion con un PLC concreto:
+      - ping ICMP  -> el dispositivo esta vivo y en la red (host alcanzable).
+      - TCP 502    -> el servidor Modbus del PLC esta escuchando (listo para
+                      recibir las reglas).
+    'alcanzable' = responde al ping o tiene el puerto abierto."""
+    ping_ok = _ping(ip, timeout_ms)
+    tcp_ok  = _puerto_abierto(ip, port, max(0.1, timeout_ms / 1000))
+    alcanzable = ping_ok or tcp_ok
     return {"status": "ok" if alcanzable else "sin_respuesta",
-            "ip": ip, "port": port, "alcanzable": alcanzable}
+            "ip": ip, "port": port,
+            "ping": ping_ok, "tcp": tcp_ok, "alcanzable": alcanzable}
 
 
 @app.get("/plc/escanear")
