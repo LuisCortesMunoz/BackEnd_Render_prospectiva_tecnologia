@@ -190,9 +190,24 @@ un arranque-paro (un boton enciende y OTRO apaga), entonces DEBES usar mode "enc
 encienden y debe quedar enclavado, usa "combinacional" con latched:true.
 El paro va en "stop" (no inventes paro si el usuario no lo menciona).
 
+EXCEPCION IMPORTANTE (contadores): si el "se enclava / se queda encendida / se mantiene"
+ocurre AL LLEGAR A UN CONTEO (ej. "cuenta 5 pulsos de I1 y enciende la verde", "al pulsar
+I1 cinco veces se enclava la lampara"), NO uses base "enclavado". Usa logica base "directo"
+con source = la entrada que se cuenta, MAS counter {"type":"up_held","preset":N}. El
+enclavamiento lo hace el contador (up_held), no la logica base. Si pusieras "enclavado",
+la salida se encenderia desde el PRIMER pulso en vez de al llegar al conteo.
+
 CAPAS OPCIONALES por salida (independientes):
   - timer:   {"type":"on_delay"|"pulse","preset_s":N}  (segundos enteros; on_delay 0..32767, pulse 1..32767)
   - counter: {"type":"up"|"up_held","preset":N,"reset_input":"I4"|null}  (up 0..32767, up_held 1..32767)
+    El contador cuenta los PULSOS de la entrada de la logica base (el "source" si la base
+    es "directo", el "start" si es "enclavado"). Esa entrada base es la que se cuenta, por
+    eso una salida con counter SIEMPRE necesita una logica base con una entrada: NUNCA "off"
+    (con "off" no hay nada que contar y la salida jamas prende).
+      - "up"      -> la salida prende SOLO mientras la entrada base siga activa Y conteo >= preset.
+      - "up_held" -> la salida se ENCIENDE y SE QUEDA encendida al llegar el conteo al preset,
+                     aunque sueltes la entrada; solo se apaga con el reset_input.
+    reset_input = entrada fisica que regresa el conteo a cero (opcional).
 
 GLOBAL:
   - system.enable (bool, normalmente true) y system.global_stop (entrada de paro general o null).
@@ -234,7 +249,17 @@ Peticion: "El boton verde enciende la lampara verde y se queda prendida; el rojo
 JSON: {"name":"Enclavamiento verde","device_profile":"maletin_basico","reset_before":true,
  "system":{"enable":true,"global_stop":null},
  "outputs":[{"output":"Q10","logic":{"mode":"enclavado","start":"I1","stop":"I2"},
- "timer":null,"counter":null,"expr":"(I1 + Q10) * !I2","comment":"enclavamiento verde"}]}"""
+ "timer":null,"counter":null,"expr":"(I1 + Q10) * !I2","comment":"enclavamiento verde"}]}
+
+EJEMPLO de contador (peticion -> JSON):
+Peticion: "Cuenta los pulsos de I1; al llegar a 5 la lampara verde se enciende y se queda enclavada."
+JSON: {"name":"Contador 5 verde","device_profile":"maletin_basico","reset_before":true,
+ "system":{"enable":true,"global_stop":null},
+ "outputs":[{"output":"Q10","logic":{"mode":"directo","source":"I1"},
+ "timer":null,"counter":{"type":"up_held","preset":5,"reset_input":null},
+ "expr":"I1","comment":"cuenta 5 pulsos de I1 y enclava la verde"}]}
+Nota: la base es "directo" con source I1 (la entrada que se cuenta) y el enclavamiento lo da
+"up_held". NO se usa logica "enclavado" aqui."""
 
 
 def _expr_de_logica(lg: dict, salida: str) -> str:
