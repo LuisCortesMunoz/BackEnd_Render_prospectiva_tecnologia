@@ -67,6 +67,10 @@ MAX_HISTORIAL = 50
 # Maximo de ejemplos en memoria/ejemplos.json y cuantos se inyectan por peticion
 MAX_EJEMPLOS        = int(os.environ.get("MAX_EJEMPLOS", "100"))
 MAX_EJEMPLOS_PROMPT = 3
+# Auto-revision en /generar-logica: cuantas veces el agente vuelve a generar
+# corrigiendo sus PROPIOS errores de validacion antes de rendirse. Cada intento
+# extra es otra llamada a Groq, por eso se mantiene bajo (3).
+MAX_AUTOREVISIONES  = int(os.environ.get("MAX_AUTOREVISIONES", "3"))
 
 # ─── Variables PLC ────────────────────────────────────────────────
 
@@ -1567,18 +1571,50 @@ async def generar_logica(req: LogicaRequest):
     messages.append({"role": "user", "content":
                      f"{texto}\n\nResponde SOLO con el JSON del esquema indicado."})
 
-    try:
-        cfg = llamar_modelo_json(messages)
-    except ValueError as e:
-        raise HTTPException(422, str(e))
-    except Exception as e:
-        log.error(f"Error generar-logica (modelo): {e}")
-        raise HTTPException(500, str(e))
+    # Auto-revision iterativa: el agente genera, se valida a si mismo y, si el
+    # JSON sale invalido, se le devuelven SUS errores para que se corrija, hasta
+    # MAX_AUTOREVISIONES intentos. Solo se rinde (422) si tras todos los intentos
+    # sigue invalido. A la primera buena, sale sin gastar llamadas de mas.
+    cfg = None
+    errores = []
+    intentos = max(1, MAX_AUTOREVISIONES)
+    msgs_iter = list(messages)
+    for intento in range(1, intentos + 1):
+        try:
+            candidato = llamar_modelo_json(msgs_iter)
+        except ValueError as e:
+            # JSON ilegible (no parseable). Reintenta si quedan vueltas.
+            if intento < intentos:
+                log.warning(f"Auto-revision {intento}/{intentos}: JSON ilegible, reintentando — {e}")
+                continue
+            raise HTTPException(422, str(e))
+        except Exception as e:
+            log.error(f"Error generar-logica (modelo): {e}")
+            raise HTTPException(500, str(e))
 
-    errores = validar_logica_config(cfg)
-    if errores:
-        log.warning(f"JSON logico invalido: {errores}")
-        raise HTTPException(422, "El JSON generado no es valido:\n- " + "\n- ".join(errores))
+        errores = validar_logica_config(candidato)
+        if not errores:
+            cfg = candidato
+            if intento > 1:
+                log.info(f"Auto-revision exitosa en el intento {intento}/{intentos}.")
+            break
+
+        log.warning(f"Auto-revision {intento}/{intentos}: JSON invalido — {errores}")
+        if intento < intentos:
+            # Realimenta los errores concretos para que el modelo se corrija.
+            msgs_iter = list(messages)
+            msgs_iter.append({"role": "assistant",
+                              "content": json.dumps(candidato, ensure_ascii=False)})
+            msgs_iter.append({"role": "user", "content": (
+                "El JSON anterior es INVALIDO por estos motivos:\n- "
+                + "\n- ".join(errores)
+                + "\nCorrige SOLO esos errores y devuelve el JSON COMPLETO del "
+                  "esquema indicado, sin texto extra.")})
+
+    if cfg is None:
+        raise HTTPException(
+            422, "El JSON generado no es valido tras varios intentos:\n- "
+            + "\n- ".join(errores))
 
     cfg = normalizar_logica_config(cfg)
     warnings = list(cfg.get("system", {}).get("warnings", []) or [])
