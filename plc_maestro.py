@@ -488,6 +488,16 @@ class XL4:
                 self.reset_timer(s)
                 self.reset_contador(s)
 
+        # El reset de timer/contador es un COMANDO MOMENTANEO: se pone en 1 para
+        # que el PLC borre el acumulado, pero DEBE volver a 0. Si se queda en 1,
+        # el contador queda retenido en reset y NUNCA cuenta (acumulado siempre 0).
+        # Se libera aqui, despues de que el lazo de arriba ya dio tiempo de sobra
+        # al PLC para ver el pulso de reset en sus escaneos.
+        if borrar_acumulados:
+            for s in ("Q10", "Q11", "Q12"):
+                self._w(ADDR_RESET_TIMER[s], 0)
+                self._w(ADDR_RESET_COUNTER[s], 0)
+
         self._w(ADDR_GENSTOP, 0)
 
         print("Configuracion reiniciada.")
