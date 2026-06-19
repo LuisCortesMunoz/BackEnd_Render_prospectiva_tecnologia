@@ -41,8 +41,16 @@ GROQ_API_KEY     = os.environ.get("GROQ_API_KEY")
 GROQ_API_KEY_STT = os.environ.get("GROQ_API_KEY_stt")
 ADMIN_TOKEN      = os.environ.get("ADMIN_TOKEN", "")
 
-groq_client     = Groq(api_key=GROQ_API_KEY)
+# El puente local al PLC (Modbus) no necesita Groq. Si la llave no esta
+# presente (p. ej. corriendo en la red del PLC, con las llaves solo en
+# Render), el servidor debe arrancar igual: la generacion se hace en Render
+# y aqui solo se usan los endpoints /plc/*. Por eso NO se crea el cliente sin
+# llave (Groq() lanzaria al iniciar y tumbaria el puente).
+groq_client     = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 groq_client_stt = Groq(api_key=GROQ_API_KEY_STT) if GROQ_API_KEY_STT else None
+if groq_client is None:
+    log.warning("GROQ_API_KEY no configurada: la generacion (Groq/STT) estara "
+                "deshabilitada. Los endpoints del puente al PLC (/plc/*) si funcionan.")
 
 # ─── Rutas de archivos ────────────────────────────────────────────
 
@@ -1036,6 +1044,13 @@ def validar_estructura_datos(datos: dict) -> dict:
 
 
 def _crear_completion(messages: list, max_tokens: int, con_formato: bool = True):
+    if groq_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Generacion deshabilitada: este servidor no tiene GROQ_API_KEY. "
+                   "Usa el backend de Render para generar; este puente local solo "
+                   "habla con el PLC.",
+        )
     kwargs = dict(messages=messages, model=MODELO,
                   temperature=1, max_tokens=max_tokens)
     if con_formato:
