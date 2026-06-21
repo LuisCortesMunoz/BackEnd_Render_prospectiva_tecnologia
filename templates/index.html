@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LadderVoice Copilot IA</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body class="index-body">
+
+  <!-- NAVBAR -->
+  <nav class="navbar">
+    <span class="navbar__logo">LAVO</span>
+    <div class="navbar__spacer"></div>
+    <button class="navbar__icon-btn" title="Ayuda">
+      <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><circle cx="12" cy="17" r=".5" fill="currentColor"/>
+      </svg>
+    </button>
+    <button class="navbar__icon-btn" title="Tema" id="themeToggle">
+      <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+      </svg>
+    </button>
+    <div class="navbar__status">
+      <span class="navbar__status-dot" id="statusDot"></span>
+      <span id="statusText">Conectado</span>
+      <span class="navbar__status-ip" id="statusIp">192.168.1.10:502</span>
+      <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
+    </div>
+  </nav>
+
+  <!-- MAIN CONTENT -->
+  <main class="index-center">
+    <div class="index-card">
+      <!-- Badge -->
+      <span class="index-badge">
+        <svg width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>
+        </svg>
+        Automatización Industrial · PLC
+      </span>
+
+      <!-- Title -->
+      <h1 class="index-title">LadderVoice Copilot <span>IA</span></h1>
+
+      <!-- Subtitle -->
+      <p class="index-subtitle">
+        Asistente inteligente para generar, explicar y depurar<br/>
+        lógica Ladder mediante voz e inteligencia artificial.
+      </p>
+
+      <!-- Input box -->
+      <div class="index-input-box">
+        <textarea
+          class="index-textarea"
+          id="mainInput"
+          placeholder="Pregunta un concepto de Ladder o PLCs..."
+          rows="3"
+        ></textarea>
+        <div class="index-input-actions">
+          <button class="index-pill-btn">
+            <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          </button>
+          <button class="index-pill-btn">
+            <svg width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            Media
+            <svg width="11" height="11" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <button class="index-pill-btn">
+            <svg width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M22 10v6M2 10l10-5 10 5-10 5z"/><path d="M6 12v5c3 3 9 3 12 0v-5"/></svg>
+            Aprendizaje
+            <svg width="11" height="11" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <span class="index-input-spacer"></span>
+          <button class="index-mic-btn" id="micBtn" title="Grabar voz">
+            <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
+            </svg>
+          </button>
+          <button class="index-send-btn" id="sendBtn" title="Enviar">
+            <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Quick pills (fuera del card) -->
+    <div class="index-quick-pills">
+      <button class="index-quick-pill" onclick="setPrompt('Genera lógica ladder')">
+        <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        Genera lógica ladder
+      </button>
+      <button class="index-quick-pill" onclick="setPrompt('Explica un concepto de Ladder')">
+        <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        Explica un concepto
+      </button>
+      <button class="index-quick-pill" onclick="setPrompt('Depura este código Ladder')">
+        <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M12 22c5.52 0 10-4.48 10-10S17.52 2 12 2 2 6.48 2 12s4.48 10 10 10z"/><path d="M8 12l2 2 4-4"/></svg>
+        Depura código
+      </button>
+      <button class="index-quick-pill" onclick="setPrompt('Escribe o edita lógica Ladder')">
+        <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+        Escribe o edita
+      </button>
+    </div>
+
+    <!-- Disclaimer -->
+    <p class="index-disclaimer">
+      <svg width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+      </svg>
+      El copiloto puede cometer errores. Verifica la información importante.
+    </p>
+  </main>
+
+  <script>
+    function setPrompt(text) {
+      document.getElementById('mainInput').value = text;
+      document.getElementById('mainInput').focus();
+    }
+
+    document.getElementById('sendBtn').addEventListener('click', async () => {
+      const prompt = document.getElementById('mainInput').value.trim();
+      if (!prompt) return;
+      window.location.href = '/ladder?prompt=' + encodeURIComponent(prompt);
+    });
+
+    document.getElementById('mainInput').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        document.getElementById('sendBtn').click();
+      }
+    });
+
+    // Status check
+    async function checkStatus() {
+      try {
+        const r = await fetch('/health');
+        const dot = document.getElementById('statusDot');
+        const txt = document.getElementById('statusText');
+        if (r.ok) {
+          dot.style.background = 'var(--green)';
+          txt.textContent = 'Conectado';
+        } else {
+          dot.style.background = 'var(--red)';
+          txt.textContent = 'Error';
+        }
+      } catch {
+        document.getElementById('statusDot').style.background = 'var(--red)';
+        document.getElementById('statusText').textContent = 'Desconectado';
+      }
+    }
+    checkStatus();
+  </script>
+</body>
+</html>

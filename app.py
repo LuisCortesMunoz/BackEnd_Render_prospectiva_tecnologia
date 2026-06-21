@@ -12,8 +12,9 @@ from contextlib import asynccontextmanager
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from groq import Groq, APIStatusError
@@ -1191,6 +1192,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 # ─── Modelos Pydantic ─────────────────────────────────────────────
 
 class ContextoLadder(BaseModel):
@@ -1427,8 +1430,18 @@ def _seleccionar_audio(audio: Optional[UploadFile], file: Optional[UploadFile]) 
 
 # ─── Endpoints ────────────────────────────────────────────────────
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 def root():
+    with open("templates/index.html", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
+
+@app.get("/ladder", response_class=HTMLResponse)
+def ladder_editor():
+    with open("templates/ladder.html", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
+
+@app.get("/api")
+def api_info():
     return {
         "service":            "LadderVoice Backend",
         "version":            "2.0.0",
@@ -1437,27 +1450,6 @@ def root():
         "contexto_chars":     STATE["contexto_chars"],
         "historia_pares":     len(STATE["history"]) // 2,
         "docs":               "/docs",
-        "endpoints": {
-            "health":             "/health",
-            "stt":                "POST /transcribir",
-            "voz_a_ladder":       "POST /voz-a-ladder",
-            "ladder":             "POST /generar-ladder",
-            "logica":             "POST /generar-logica",
-            "aplicar_plc":        "POST /aplicar-plc",
-            "plc_escanear":       "GET  /plc/escanear",
-            "plc_probar":         "GET  /plc/probar?ip=...",
-            "plc_config_ver":     "GET  /plc/config",
-            "plc_config_set":     "POST /plc/config",
-            "feedback":           "POST /feedback",
-            "memoria_ver":        "GET  /memoria",
-            "memoria_borrar":     "DELETE /memoria/{ejemplo_id}",
-            "historial_ver":      "GET  /historial",
-            "historial_limpiar":  "DELETE /historial",
-            "admin_generar_ctx":  "GET  /admin/generar-contexto?token=...",
-            "admin_ctx_estado":   "GET  /admin/contexto-estado?token=...",
-            "admin_ctx_json":     "GET  /admin/contexto-json?token=...",
-            "admin_memoria_json": "GET  /admin/memoria-json?token=...",
-        },
     }
 
 
