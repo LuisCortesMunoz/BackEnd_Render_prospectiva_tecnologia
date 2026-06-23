@@ -165,6 +165,9 @@ ENGINE_OUTPUTS = {"Q10", "Q11", "Q12", "VERDE", "AMARILLA", "ROJA"}
 ENGINE_MODES   = {"off", "directo", "enclavado", "combinacional"}
 TIMER_TYPES    = {"on_delay", "pulse"}
 COUNTER_TYPES  = {"up", "up_held"}
+# Secuenciador de pasos (capa opcional para semaforos / secuencias temporizadas)
+SEQ_MODES      = {"once", "loop"}
+SEQ_MAX_STEPS  = 8
 
 SYSTEM_PROMPT_LOGICA = """Eres el motor de interpretacion de un PLC Horner XL4 de un maletin de laboratorio.
 Traduces una instruccion en lenguaje natural a un JSON de CONFIGURACION (no generas geometria ladder ni codigo).
@@ -217,6 +220,36 @@ CAPAS OPCIONALES por salida (independientes):
 GLOBAL:
   - system.enable (bool, normalmente true) y system.global_stop (entrada de paro general o null).
 
+SECUENCIAS TEMPORIZADAS (semaforo / pasos uno tras otro) — MUY IMPORTANTE:
+La logica por salida de arriba NO puede encadenar etapas (una salida no puede
+disparar a otra, y solo tiene UN temporizador). Para peticiones donde las salidas
+se encienden EN ORDEN, una tras otra, con transiciones por TIEMPO automaticas
+(ej. semaforo: verde 5 s, luego amarilla 5 s, luego roja 5 s), NO uses timers por
+salida: usa el bloque de nivel superior "sequence" y deja "outputs": [].
+
+Reconoce una secuencia cuando el usuario diga: secuencia, semaforo, "uno tras otro",
+"luego/despues se enciende otra", "primero ... despues ... despues ...", etapas con
+tiempos, "nunca al mismo tiempo", "se ejecuta una sola vez al presionar".
+
+Esquema de "sequence":
+  {
+    "start": "I1",          // entrada que ARRANCA la secuencia (obligatoria)
+    "mode": "once",         // "once" = una vez por pulsacion ; "loop" = ciclico/se repite
+    "reset": null,          // entrada que aborta/reinicia (opcional, normalmente null)
+    "steps": [              // 1..8 pasos EN ORDEN; cada paso dura sus segundos y avanza solo
+      {"outputs": ["Q10"], "duration_s": 5},
+      {"outputs": ["Q11"], "duration_s": 5},
+      {"outputs": ["Q12"], "duration_s": 5}
+    ]
+  }
+Reglas de la secuencia:
+- "outputs" de cada paso = salidas ENCENDIDAS durante ese paso (normalmente una sola,
+  para que "nunca al mismo tiempo"). duration_s = segundos enteros (1..32767).
+- Al terminar el ultimo paso: con "once" todo se apaga (y vuelve a correr en la
+  siguiente pulsacion); con "loop" regresa al paso 1.
+- Cuando uses "sequence", el arreglo "outputs" del nivel superior va VACIO: [].
+- Mapea colores igual: verde->Q10, amarilla->Q11, roja->Q12.
+
 REGLAS DE RESPUESTA:
 - Responde SOLO con JSON valido, sin texto extra ni ```.
 - Usa unicamente las entradas/salidas que el usuario menciona. No agregues paros ni entradas extra.
@@ -264,7 +297,20 @@ JSON: {"name":"Contador 5 verde","device_profile":"maletin_basico","reset_before
  "timer":null,"counter":{"type":"up_held","preset":5,"reset_input":null},
  "expr":"I1","comment":"cuenta 5 pulsos de I1 y enclava la verde"}]}
 Nota: la base es "directo" con source I1 (la entrada que se cuenta) y el enclavamiento lo da
-"up_held". NO se usa logica "enclavado" aqui."""
+"up_held". NO se usa logica "enclavado" aqui.
+
+EJEMPLO de secuencia / semaforo (peticion -> JSON):
+Peticion: "Al presionar I1 enciende la verde 5 s, luego la amarilla 5 s, luego la roja 5 s,
+una sola vez y nunca al mismo tiempo."
+JSON: {"name":"Semaforo I1","device_profile":"maletin_basico","reset_before":true,
+ "system":{"enable":true,"global_stop":null},
+ "sequence":{"start":"I1","mode":"once","reset":null,
+   "steps":[{"outputs":["Q10"],"duration_s":5},
+            {"outputs":["Q11"],"duration_s":5},
+            {"outputs":["Q12"],"duration_s":5}]},
+ "outputs":[]}
+Nota: se usa "sequence" (no timers por salida) y "outputs" va vacio. Cada paso enciende UNA
+salida por su duracion y avanza solo; "once" = se ejecuta una vez por cada pulsacion de I1."""
 
 
 def _expr_de_logica(lg: dict, salida: str) -> str:
@@ -309,8 +355,12 @@ def validar_logica_config(cfg: dict) -> list:
     if not isinstance(cfg, dict):
         return ["El JSON raiz no es un objeto."]
     outputs = cfg.get("outputs")
-    if not isinstance(outputs, list) or not outputs:
-        return ["Falta 'outputs' o esta vacio: debe haber al menos una salida."]
+    seq = cfg.get("sequence")
+    if not isinstance(outputs, list):
+        outputs = []
+    # Una config valida necesita al menos salidas O una secuencia.
+    if not outputs and not seq:
+        return ["Falta 'outputs' o esta vacio: debe haber al menos una salida (o una 'sequence')."]
 
     vistos = set()
     for i, o in enumerate(outputs):
@@ -381,9 +431,50 @@ def validar_logica_config(cfg: dict) -> list:
                 if not _entrada_valida(ct.get("reset_input")):
                     errores.append(f"{tag}: counter.reset_input invalido.")
 
+    if seq is not None:
+        errores.extend(_validar_secuencia_cfg(seq))
+
     sysc = cfg.get("system") or {}
     if not _entrada_valida(sysc.get("global_stop")):
         errores.append(f"system.global_stop='{sysc.get('global_stop')}' invalido.")
+    return errores
+
+
+def _validar_secuencia_cfg(seq) -> list:
+    """Valida el bloque 'sequence' (secuenciador de pasos). Espejo del
+    validador de plc_maestro y del secuenciador en Texto Estructurado."""
+    errores = []
+    if not isinstance(seq, dict):
+        return ["'sequence' no es un objeto."]
+    if not seq.get("start") or not _entrada_valida(seq.get("start")):
+        errores.append(f"sequence.start='{seq.get('start')}' debe ser una entrada valida (I1..I7).")
+    if str(seq.get("mode", "once")).lower() not in SEQ_MODES:
+        errores.append(f"sequence.mode='{seq.get('mode')}' debe ser 'once' o 'loop'.")
+    if seq.get("reset") is not None and not _entrada_valida(seq.get("reset")):
+        errores.append(f"sequence.reset='{seq.get('reset')}' no es una entrada valida.")
+    steps = seq.get("steps")
+    if not isinstance(steps, list) or not steps:
+        errores.append("sequence.steps debe ser una lista con al menos un paso.")
+    elif len(steps) > SEQ_MAX_STEPS:
+        errores.append(f"sequence.steps no puede tener mas de {SEQ_MAX_STEPS} pasos.")
+    else:
+        for i, st in enumerate(steps):
+            etq = f"sequence paso {i+1}"
+            if not isinstance(st, dict):
+                errores.append(f"{etq}: no es un objeto."); continue
+            outs = st.get("outputs")
+            if not isinstance(outs, list) or not outs:
+                errores.append(f"{etq}: 'outputs' debe listar al menos una salida.")
+            else:
+                for o in outs:
+                    if str(o).upper() not in ENGINE_OUTPUTS:
+                        errores.append(f"{etq}: salida '{o}' invalida. Usa Q10, Q11 o Q12.")
+            try:
+                v = int(st.get("duration_s"))
+                if v < 1 or v > 32767:
+                    errores.append(f"{etq}: duration_s {v} fuera de [1,32767].")
+            except (TypeError, ValueError):
+                errores.append(f"{etq}: duration_s no es entero.")
     return errores
 
 
@@ -396,6 +487,7 @@ def normalizar_logica_config(cfg: dict) -> dict:
     sysc = cfg.setdefault("system", {})
     sysc.setdefault("enable", True)
     sysc.setdefault("global_stop", None)
+    cfg.setdefault("outputs", [])
     for o in cfg.get("outputs", []):
         o["output"] = str(o.get("output", "")).upper()
         lg = o.setdefault("logic", {"mode": "off"})
@@ -405,6 +497,13 @@ def normalizar_logica_config(cfg: dict) -> dict:
         if not o.get("expr"):
             o["expr"] = _expr_de_logica(lg, o["output"])
         o.setdefault("comment", "")
+    seq = cfg.get("sequence")
+    if isinstance(seq, dict):
+        seq["mode"] = str(seq.get("mode", "once")).lower()
+        seq.setdefault("reset", None)
+        for st in seq.get("steps", []):
+            if isinstance(st, dict) and isinstance(st.get("outputs"), list):
+                st["outputs"] = [str(o).upper() for o in st["outputs"]]
     return cfg
 
 # ─── Carga de contexto JSON ──────────────────────────────────────
@@ -1613,7 +1712,7 @@ async def generar_logica(req: LogicaRequest):
 
     # Red de seguridad + reintento: si la peticion pide enclavamiento pero el
     # modelo no lo genero, reintentar UNA vez antes de emitir el aviso.
-    if es_enclavamiento(texto) and not _tiene_latch(cfg):
+    if es_enclavamiento(texto) and not cfg.get("sequence") and not _tiene_latch(cfg):
         log.warning("Enclavamiento sin latch en 1ª respuesta — reintentando...")
         retry_msgs = list(messages)
         retry_msgs.append({

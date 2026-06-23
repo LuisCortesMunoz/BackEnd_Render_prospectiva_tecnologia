@@ -163,6 +163,32 @@ ADDR_COUNTER_RESET_SRC = {
 }
 
 
+# ---------------------------------------------------------------------------
+# SECUENCIADOR DE PASOS  (capa opcional sobre el motor por salida)
+# Si SeqEnable=1, controla Q10/Q11/Q12 por pasos (ej. semaforo). Cada paso
+# enciende las salidas de su mascara durante SeqDur[paso] segundos y avanza
+# con el pulso de 1 s del PLC. Si SeqEnable=0, el motor por salida funciona
+# igual que siempre (no se altera la logica existente).
+# ---------------------------------------------------------------------------
+ADDR_SEQ_ENABLE     = R(60)   # 0 = apagado, 1 = activo
+ADDR_SEQ_START_SRC  = R(61)   # codigo de entrada que arranca (1..5)
+ADDR_SEQ_MODE       = R(62)   # 0 = una vez, 1 = ciclico
+ADDR_SEQ_STEP_COUNT = R(63)   # numero de pasos (1..SEQ_MAX_STEPS)
+ADDR_SEQ_RESET_SRC  = R(64)   # entrada que aborta/reinicia (0 = ninguna)
+# R(65) SeqActiveFlag, R(66) SeqCurStep, R(67) SeqStepAcc -> solo lectura
+SEQ_MASK_BASE = 70            # %R70..%R77 mascara de salidas por paso
+SEQ_DUR_BASE  = 80            # %R80..%R87 duracion en segundos por paso
+SEQ_MAX_STEPS = 8
+
+SEQ_MODES = {"once": 0, "loop": 1}
+
+# Bit de cada salida dentro de la mascara de un paso (bit0=Q10, bit1=Q11, bit2=Q12)
+OUT_BIT = {
+    "Q10": 1, "Q11": 2, "Q12": 4,
+    "VERDE": 1, "AMARILLA": 2, "ROJA": 4,
+}
+
+
 class XL4:
     def __init__(self, ip=PLC_IP, port=PLC_PORT, unit=UNIT_ID):
         self.ip = ip
@@ -473,10 +499,67 @@ class XL4:
         print(f"{salida}: reset físico de contador desactivado")
 
     # -----------------------------------------------------------------------
+    # SECUENCIADOR DE PASOS
+    # -----------------------------------------------------------------------
+    def configurar_secuencia(self, start, steps, mode="once", reset=None):
+        """Configura el secuenciador (ej. semaforo) y lo activa (SeqEnable=1).
+
+        start  : entrada que arranca la secuencia ('I1'..'I7').
+        steps  : lista de pasos {"outputs": ["Q10",...], "duration_s": N}.
+        mode   : 'once' (una vez) o 'loop' (ciclico).
+        reset  : entrada que aborta/reinicia (opcional).
+        """
+        modo = mode if isinstance(mode, int) else SEQ_MODES.get(str(mode).lower(), 0)
+
+        if not isinstance(steps, list) or not (1 <= len(steps) <= SEQ_MAX_STEPS):
+            raise ValueError(f"La secuencia debe tener entre 1 y {SEQ_MAX_STEPS} pasos.")
+
+        self._w(ADDR_SEQ_START_SRC, self._src(start))
+        self._w(ADDR_SEQ_MODE, modo)
+        self._w(ADDR_SEQ_STEP_COUNT, len(steps))
+        self._w(ADDR_SEQ_RESET_SRC, self._src(reset))
+
+        for i in range(SEQ_MAX_STEPS):
+            if i < len(steps):
+                mask = 0
+                for o in steps[i].get("outputs", []):
+                    key = str(o).upper()
+                    if key not in OUT_BIT:
+                        raise ValueError(f"Paso {i + 1}: salida no valida '{o}'.")
+                    mask |= OUT_BIT[key]
+                dur = int(steps[i].get("duration_s", 0))
+                if dur < 1 or dur > 32767:
+                    raise ValueError(f"Paso {i + 1}: duration_s {dur} fuera de [1, 32767].")
+            else:
+                mask, dur = 0, 0
+            self._w(R(SEQ_MASK_BASE + i), mask)
+            self._w(R(SEQ_DUR_BASE + i), dur)
+
+        self._w(ADDR_SEQ_ENABLE, 1)
+        print(f"SECUENCIA activada: arranque={start} modo={mode} pasos={len(steps)}"
+              + (f" reset={reset}" if reset else ""))
+
+    def quitar_secuencia(self):
+        """Apaga el secuenciador (SeqEnable=0) y limpia su configuracion."""
+        self._w(ADDR_SEQ_ENABLE, 0)
+        self._w(ADDR_SEQ_START_SRC, 0)
+        self._w(ADDR_SEQ_MODE, 0)
+        self._w(ADDR_SEQ_STEP_COUNT, 0)
+        self._w(ADDR_SEQ_RESET_SRC, 0)
+        for i in range(SEQ_MAX_STEPS):
+            self._w(R(SEQ_MASK_BASE + i), 0)
+            self._w(R(SEQ_DUR_BASE + i), 0)
+        print("SECUENCIA desactivada")
+
+    # -----------------------------------------------------------------------
     # RESET GENERAL
     # -----------------------------------------------------------------------
     def reset_todo(self, borrar_acumulados=True):
         self._w(ADDR_CMD, 0)
+
+        # Apagar el secuenciador antes que nada (si quedo activo de una carga
+        # anterior, dejaria de controlar las salidas al reconfigurar).
+        self.quitar_secuencia()
 
         for s in ("Q10", "Q11", "Q12"):
             self.apagar(s)
@@ -615,9 +698,12 @@ def validar_config(cfg) -> list:
         return ["El JSON raiz no es un objeto."]
 
     outputs = cfg.get("outputs")
-    if not isinstance(outputs, list) or not outputs:
-        errores.append("Falta 'outputs' o esta vacio: debe haber al menos una salida.")
+    seq = cfg.get("sequence")
+    if not isinstance(outputs, list):
         outputs = []
+    # Una config valida necesita al menos salidas O una secuencia.
+    if not outputs and not seq:
+        errores.append("Falta 'outputs' o esta vacio: debe haber al menos una salida (o una 'sequence').")
 
     vistos = set()
     for i, o in enumerate(outputs):
@@ -687,11 +773,54 @@ def validar_config(cfg) -> list:
                 if not _es_entrada_valida(ct.get("reset_input")):
                     errores.append(f"{tag}: counter.reset_input='{ct.get('reset_input')}' invalido.")
 
+    if seq is not None:
+        errores.extend(_validar_secuencia(seq))
+
     sysc = cfg.get("system") or {}
     if not isinstance(sysc, dict):
         errores.append("'system' no es un objeto.")
     elif not _es_entrada_valida(sysc.get("global_stop")):
         errores.append(f"system.global_stop='{sysc.get('global_stop')}' no es una entrada valida.")
+
+    return errores
+
+
+def _validar_secuencia(seq) -> list:
+    """Valida el bloque 'sequence' del JSON dual. Espejo del secuenciador
+    en Texto Estructurado del PLC."""
+    errores = []
+    if not isinstance(seq, dict):
+        return ["'sequence' no es un objeto."]
+
+    if not seq.get("start") or not _es_entrada_valida(seq.get("start")):
+        errores.append(f"sequence.start='{seq.get('start')}' debe ser una entrada valida (I1..I7).")
+
+    modo = str(seq.get("mode", "once")).lower()
+    if modo not in SEQ_MODES:
+        errores.append(f"sequence.mode='{seq.get('mode')}' debe ser 'once' o 'loop'.")
+
+    if seq.get("reset") is not None and not _es_entrada_valida(seq.get("reset")):
+        errores.append(f"sequence.reset='{seq.get('reset')}' no es una entrada valida.")
+
+    steps = seq.get("steps")
+    if not isinstance(steps, list) or not steps:
+        errores.append("sequence.steps debe ser una lista con al menos un paso.")
+    elif len(steps) > SEQ_MAX_STEPS:
+        errores.append(f"sequence.steps no puede tener mas de {SEQ_MAX_STEPS} pasos.")
+    else:
+        for i, st in enumerate(steps):
+            etq = f"sequence paso {i + 1}"
+            if not isinstance(st, dict):
+                errores.append(f"{etq}: no es un objeto.")
+                continue
+            outs = st.get("outputs")
+            if not isinstance(outs, list) or not outs:
+                errores.append(f"{etq}: 'outputs' debe listar al menos una salida.")
+            else:
+                for o in outs:
+                    if str(o).upper() not in OUT_BIT:
+                        errores.append(f"{etq}: salida '{o}' invalida. Usa Q10, Q11 o Q12.")
+            _entero_en_rango(st.get("duration_s"), 1, 32767, f"{etq} duration_s", errores)
 
     return errores
 
@@ -738,6 +867,11 @@ def plan_config(cfg) -> list:
             plan.append((metodo, (out, ct["preset"]), {}))
             if ct.get("reset_input"):
                 plan.append(("configurar_reset_contador", (out, ct["reset_input"]), {}))
+
+    seq = cfg.get("sequence")
+    if isinstance(seq, dict) and seq.get("steps"):
+        plan.append(("configurar_secuencia", (seq.get("start"), seq.get("steps")),
+                     {"mode": seq.get("mode", "once"), "reset": seq.get("reset")}))
 
     sysc = cfg.get("system") or {}
     if sysc.get("global_stop"):
