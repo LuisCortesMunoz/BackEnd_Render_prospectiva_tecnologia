@@ -1360,6 +1360,10 @@ class LogicaResponse(BaseModel):
     outputs: int
     warnings: List[str] = []
     ejemplo_id: str = ""  # id en memoria de feedback (para POST /feedback)
+    # Mismo engine_config envuelto como lo espera el editor y /aplicar-plc:
+    # program.metadata.engine_config. Es ADITIVO (no reemplaza a 'logic'); el
+    # front puede cargar el programa al PLC sin transformar la respuesta.
+    program: dict = {}
 
 
 class AplicarPLCRequest(BaseModel):
@@ -1761,12 +1765,15 @@ async def generar_logica(req: LogicaRequest):
         log.warning(f"No se pudo guardar ejemplo logica: {e}")
 
     log.info(f"/generar-logica OK — {len(cfg.get('outputs', []))} salida(s)")
+    nombre_prog = cfg.get("name", "Programa maletin")
     return LogicaResponse(
         logic=cfg,
-        name=cfg.get("name", "Programa maletin"),
+        name=nombre_prog,
         outputs=len(cfg.get("outputs", [])),
         warnings=warnings,
         ejemplo_id=ejemplo_id,
+        # Forma lista para el editor / POST /aplicar-plc (program.metadata.engine_config).
+        program={"metadata": {"name": nombre_prog, "engine_config": cfg}},
     )
 
 

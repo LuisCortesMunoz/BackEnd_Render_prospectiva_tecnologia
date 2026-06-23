@@ -477,6 +477,66 @@
       document.getElementById('aiPrompt').focus();
     }
 
+    // ─── Engine-config → esquema de dibujo ───────────────────────────
+    // El backend /generar-logica devuelve el "engine_config" (outputs/sequence),
+    // no el esquema viejo logica_ladder/filas. Este adaptador lo traduce a ese
+    // esquema para reutilizar tal cual el renderer (renderRungDiagram/renderElement).
+    // Es ADITIVO: si un programa ya trae 'logica_ladder', no se toca.
+    function engineConfigToLadder(cfg) {
+      if (!cfg || typeof cfg !== 'object') return [];
+      const el = (tipo, tag) => ({ tipo, tag });
+      const rungs = [];
+
+      // Secuencia temporizada (semaforo): un renglon por paso.
+      if (cfg.sequence && Array.isArray(cfg.sequence.steps) && cfg.sequence.steps.length) {
+        const seq = cfg.sequence;
+        seq.steps.forEach((step, i) => {
+          const fila = [];
+          if (seq.start) fila.push(el('XIC', seq.start));
+          (step.outputs || []).forEach(o => fila.push(el('OTE', o)));
+          rungs.push({
+            comentario: `Paso ${i + 1} — ${step.duration_s ?? '?'} s`
+                        + (seq.mode === 'loop' ? ' (ciclico)' : ''),
+            filas: { 'fila 0': fila }
+          });
+        });
+        return rungs;
+      }
+
+      // Logica por salida.
+      (cfg.outputs || []).forEach(o => {
+        const lg = o.logic || {};
+        const fila = [];
+        if (cfg.system && cfg.system.global_stop) fila.push(el('XIO', cfg.system.global_stop));
+        switch (lg.mode) {
+          case 'directo':
+            if (lg.source && lg.source !== 'NINGUNA') fila.push(el('XIC', lg.source));
+            if (lg.enable) fila.push(el('XIC', lg.enable));
+            break;
+          case 'enclavado':
+            if (lg.start)  fila.push(el('XIC', lg.start));
+            if (lg.enable) fila.push(el('XIC', lg.enable));
+            if (lg.stop)   fila.push(el('XIO', lg.stop));
+            break;
+          case 'combinacional':
+            if (lg.a)    fila.push(el('XIC', lg.a));
+            if (lg.b)    fila.push(el('XIC', lg.b));
+            if (lg.stop) fila.push(el('XIO', lg.stop));
+            break;
+          // 'off' u otros: sin contactos (salida apagada).
+        }
+        if (o.timer)   fila.push(el(o.timer.type === 'pulse' ? 'TP' : 'TON', o.output));
+        if (o.counter) fila.push(el('CTU', o.output));
+        fila.push(el('OTE', o.output));
+        const opTxt = (lg.mode === 'combinacional' && lg.op) ? ` [${lg.op}]` : '';
+        rungs.push({
+          comentario: (o.comment || o.expr || `${o.output} (${lg.mode || 'off'})`) + opTxt,
+          filas: { 'fila 0': fila }
+        });
+      });
+      return rungs;
+    }
+
     // ─── Rung rendering ──────────────────────────────────────────────
     function renderRungs(program) {
       const container = document.getElementById('rungContainer');
@@ -628,13 +688,19 @@
         const res = await fetch('/generar-logica', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt })
+          body: JSON.stringify({ texto: prompt })   // el backend espera 'texto'
         });
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
-        window._currentProgram = data;
-        renderRungs(data);
-        addLog('Programa generado: ' + (data.logica_ladder?.length || 0) + ' renglones.', 'info');
+        // El engine_config viene en data.logic; data.program ya lo trae envuelto
+        // como metadata.engine_config (lo que necesita /aplicar-plc).
+        window._currentProgram = data.program
+          || { metadata: { name: data.name, engine_config: data.logic } };
+        // Dibujo derivado del engine_config (deja editable el renglon vacio tambien).
+        window._currentProgram.logica_ladder = engineConfigToLadder(data.logic);
+        renderRungs(window._currentProgram);
+        (data.warnings || []).forEach(w => addLog('Aviso: ' + w, 'warn'));
+        addLog('Programa generado: ' + window._currentProgram.logica_ladder.length + ' renglones.', 'info');
       } catch (err) {
         addLog('Error: ' + err.message, 'error');
       } finally {
@@ -680,15 +746,27 @@
     };
     document.getElementById('uploadBtn').onclick = async () => {
       if (!window._currentProgram) { addLog('No hay programa para cargar.', 'warn'); return; }
+      const cfg = (window._currentProgram.metadata || {}).engine_config;
+      if (!cfg) {
+        addLog('Este programa no tiene engine_config. Genera el programa con el asistente IA.', 'warn');
+        return;
+      }
       addLog('Enviando al PLC...', 'info');
       try {
         const res = await fetch('/aplicar-plc', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ programa: window._currentProgram })
+          body: JSON.stringify({ program: window._currentProgram })  // backend espera 'program'
         });
         const data = await res.json();
-        addLog(data.mensaje || 'Cargado en PLC.', res.ok ? 'info' : 'error');
+        if (!res.ok) {
+          // FastAPI manda el error en 'detail'.
+          addLog('Error al cargar: ' + (data.detail || ('HTTP ' + res.status)), 'error');
+        } else if (data.status === 'dry-run') {
+          addLog(`Dry-run OK — ${data.salidas} salida(s), no se escribio al PLC.`, 'info');
+        } else {
+          addLog(`Cargado en PLC (${data.plc}) — ${data.salidas} salida(s).`, 'info');
+        }
       } catch (e) {
         addLog('Error al cargar: ' + e.message, 'error');
       }
