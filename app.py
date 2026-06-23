@@ -5,7 +5,7 @@
 # Historial : respuestas/historial.json   (persistente entre reinicios)
 # Memoria   : memoria/ejemplos.json       (feedback del usuario → mejores respuestas)
 
-import os, re, json, logging, datetime, threading
+import os, re, json, time, logging, datetime, threading
 import socket, ipaddress, subprocess, platform
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -1669,6 +1669,214 @@ async def generar_logica(req: LogicaRequest):
         warnings=warnings,
         ejemplo_id=ejemplo_id,
     )
+
+
+# ─── Copiloto de chat (modo Aprendizaje / Practico) ──────────────
+# Portado del backend local de Ollama (Practica 4) a Groq, para que el
+# chat del frontend funcione EN LA NUBE sin Ollama ni nada local.
+# Es codigo NUEVO e independiente: no toca la generacion Ladder/PLC.
+# Contrato identico al backend viejo (main.py): GET /profiles y POST /chat
+# con los mismos campos que ya envia/espera copilot.js.
+
+# Modelo de chat en Groq. gpt-oss-120b es razonador y consume max_tokens con
+# su razonamiento interno (mal para respuestas cortas), por eso el chat usa
+# por defecto un modelo de produccion no-razonador. Configurable por env.
+MODELO_CHAT = os.environ.get("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
+DEFAULT_PROFILE = "media"
+
+# Perfiles copiados TAL CUAL del backend de Ollama (mismos system prompts y
+# parametros) para no cambiar el comportamiento que el usuario ya conocia.
+# 'num_ctx' y 'repeat_penalty' no existen en Groq: el front los usa solo para
+# rellenar campos de la UI; aqui se conservan en el perfil pero se ignoran al
+# llamar a Groq.
+COPILOT_PROFILES = {
+    "generico": {
+        "label": "Genérico",
+        "description": "Asistente sin especializar. Úsalo como línea base para comparar contra los perfiles especializados.",
+        "system_prompt": (
+            "Eres un asistente académico claro, preciso y útil para estudiantes "
+            "universitarios. Respondes siempre en español."
+        ),
+        "params": {"temperature": 0.7, "top_p": 0.9, "num_predict": 300,
+                   "num_ctx": 4096, "repeat_penalty": 1.1},
+    },
+    "instantanea": {
+        "label": "Instantánea",
+        "description": "La opción más rápida. Para dudas sencillas, traducciones, correcciones y listas rápidas.",
+        "system_prompt": (
+            "Eres LadderVoice Copilot en modo Instantánea: un copiloto de automatización "
+            "industrial y programación de PLCs en lenguaje Ladder para estudiantes "
+            "universitarios. Tu prioridad es la rapidez.\n\n"
+            "Reglas:\n"
+            "- Responde en español, de forma breve y directa (idealmente 5 líneas o menos).\n"
+            "- Usa listas cortas cuando mejoren la claridad.\n"
+            "- Si la tarea es compleja (diseñar lógica Ladder completa, depurar código "
+            "extenso), da solo la respuesta esencial y sugiere cambiar al modo Media o Alta.\n"
+            "- Si falta información, haz una sola pregunta puntual en lugar de asumir.\n"
+            "- No inventes referencias, datos técnicos ni normas.\n"
+            "- Si no sabes algo, dilo explícitamente."
+        ),
+        "params": {"temperature": 0.4, "top_p": 0.9, "num_predict": 180,
+                   "num_ctx": 2048, "repeat_penalty": 1.1},
+    },
+    "media": {
+        "label": "Media",
+        "description": "Punto intermedio. Explicaciones paso a paso, comparar opciones, errores sencillos de código.",
+        "system_prompt": (
+            "Eres LadderVoice Copilot en modo Media: un copiloto de automatización "
+            "industrial y programación de PLCs en lenguaje Ladder para estudiantes "
+            "universitarios. Buscas el equilibrio entre rapidez y profundidad.\n\n"
+            "Tu tarea principal es ayudar con: explicaciones paso a paso, comparación de "
+            "opciones, resumen de documentos, mejora de prompts, errores sencillos de "
+            "código (Python, Flask, JavaScript) y lógica Ladder básica.\n\n"
+            "Formato:\n"
+            "- Responde en español con pasos numerados o secciones cortas.\n"
+            "- Al explicar Ladder usa ejemplos con entradas (I0.x), salidas (Q0.x), "
+            "marcas (M0.x) y timers (T0).\n\n"
+            "Reglas:\n"
+            "- Si falta información, pregunta antes de asumir.\n"
+            "- No inventes referencias, datos técnicos ni normas.\n"
+            "- Advierte riesgos eléctricos básicos cuando la pregunta involucre "
+            "conexiones, motores o baterías.\n"
+            "- Si no sabes algo, dilo explícitamente."
+        ),
+        "params": {"temperature": 0.7, "top_p": 0.9, "num_predict": 450,
+                   "num_ctx": 4096, "repeat_penalty": 1.1},
+    },
+    "alta": {
+        "label": "Alta",
+        "description": "Máximo razonamiento. Problemas largos, programación y depuración, análisis de PLC/Ladder, decisiones con muchos pasos.",
+        "system_prompt": (
+            "Eres LadderVoice Copilot en modo Alta: un copiloto experto en automatización "
+            "industrial, PLCs y lógica Ladder (contactos NO/NC, bobinas, set/reset, "
+            "timers TON/TOF, contadores CTU/CTD, comparadores), comunicación Modbus TCP "
+            "y desarrollo en Python (FastAPI, Flask) y JavaScript. Tu prioridad es la "
+            "calidad del razonamiento sobre la velocidad.\n\n"
+            "Método de trabajo:\n"
+            "- Analiza el problema antes de responder y muestra tu razonamiento en pasos.\n"
+            "- Separa explícitamente hechos, inferencias y recomendaciones.\n"
+            "- Al depurar código: identifica la causa probable, la evidencia que la "
+            "sustenta y la corrección propuesta con código comentado.\n\n"
+            "Formato:\n"
+            "- Responde en español. Para tareas complejas usa secciones tituladas: "
+            "Análisis, Propuesta, Pasos, Riesgos.\n"
+            "- Para lógica Ladder describe cada rung con sus elementos y direcciones "
+            "(I0.x, Q0.x, M0.x, T0, C0).\n\n"
+            "Reglas:\n"
+            "- Si falta información crítica (modelo de PLC, voltaje, corriente, diagrama "
+            "de conexión), pregunta primero antes de dar instrucciones específicas.\n"
+            "- Advierte riesgos de seguridad eléctrica cuando aplique.\n"
+            "- No inventes referencias, registros Modbus, datos de hardware ni normas.\n"
+            "- Si no puedes verificar algo, dilo explícitamente."
+        ),
+        "params": {"temperature": 0.7, "top_p": 0.9, "num_predict": 900,
+                   "num_ctx": 8192, "repeat_penalty": 1.1},
+    },
+}
+
+
+class ChatRequest(BaseModel):
+    message: str
+    # El front manda un nombre de modelo de Ollama (ej. 'llama3.2:3b'); aqui se
+    # ignora si trae ':' y se usa MODELO_CHAT (ver _modelo_chat_groq).
+    model: Optional[str] = None
+    copilot_profile: str = DEFAULT_PROFILE
+    system_prompt: Optional[str] = None
+    temperature: float = 0.7
+    top_p: float = 0.9
+    num_predict: int = 450
+    # Aceptados por compatibilidad con el front; Groq no los usa.
+    num_ctx: Optional[int] = None
+    repeat_penalty: Optional[float] = None
+    keep_alive: Optional[str] = None
+
+
+def _perfil_chat(profile_id: str) -> dict:
+    p = COPILOT_PROFILES.get(profile_id)
+    if p is None:
+        raise HTTPException(
+            400, f"Perfil no válido: '{profile_id}'. "
+                 f"Opciones: {', '.join(COPILOT_PROFILES)}.")
+    return p
+
+
+def _modelo_chat_groq(model: Optional[str]) -> str:
+    """Los nombres de Ollama llevan ':' (llama3.2:3b) y no sirven en Groq.
+    Si el cliente manda uno asi (o nada), se usa MODELO_CHAT."""
+    m = (model or "").strip()
+    return MODELO_CHAT if (not m or ":" in m) else m
+
+
+@app.get("/profiles")
+def chat_profiles():
+    """Perfiles del copiloto de chat (mismos que el backend viejo de Ollama)."""
+    return {"default": DEFAULT_PROFILE, "profiles": COPILOT_PROFILES}
+
+
+@app.post("/chat")
+def chat(req: ChatRequest):
+    """Copiloto de chat del modo Aprendizaje/Practico, ahora sobre Groq.
+    Mantiene el mismo contrato de entrada/salida que el backend de Ollama."""
+    if groq_client is None:
+        raise HTTPException(
+            503, "Chat deshabilitado: este servidor no tiene GROQ_API_KEY. "
+                 "Usa el backend de Render para el copiloto.")
+    mensaje = (req.message or "").strip()
+    if not mensaje:
+        raise HTTPException(400, "El mensaje no puede estar vacío.")
+    if len(mensaje) > 4000:
+        raise HTTPException(400, "Mensaje demasiado largo, máximo 4000 caracteres.")
+
+    perfil        = _perfil_chat(req.copilot_profile)
+    system_prompt = (req.system_prompt or "").strip() or perfil["system_prompt"]
+    modelo        = _modelo_chat_groq(req.model)
+
+    start = time.perf_counter()
+    try:
+        resp = groq_client.chat.completions.create(
+            model=modelo,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": mensaje},
+            ],
+            temperature=req.temperature,
+            top_p=req.top_p,
+            max_tokens=req.num_predict,
+        )
+    except APIStatusError as e:
+        if e.status_code in (413, 429):
+            raise HTTPException(
+                429, "Límite de tokens por minuto del plan gratuito de Groq. "
+                     "Espera un minuto y vuelve a intentar.")
+        raise HTTPException(502, f"Error de Groq: {e}")
+    except Exception as e:
+        log.error(f"Error /chat: {e}")
+        raise HTTPException(500, f"Error generando respuesta: {e}")
+
+    backend_ms = round((time.perf_counter() - start) * 1000, 1)
+    reply = (resp.choices[0].message.content or "").strip()
+    if not reply:
+        raise HTTPException(500, "El modelo respondió sin contenido. Reintenta.")
+
+    pin = getattr(resp.usage, "prompt_tokens", None)
+    pout = getattr(resp.usage, "completion_tokens", None)
+    tps = round(pout / (backend_ms / 1000), 1) if (pout and backend_ms > 0) else None
+    log.info(f"/chat OK — perfil {req.copilot_profile} | modelo {modelo} | "
+             f"tokens entrada {pin} salida {pout} | {backend_ms} ms")
+
+    return {
+        "model":              modelo,
+        "copilot_profile":    req.copilot_profile,
+        "copilot_label":      perfil["label"],
+        "system_prompt_used": system_prompt,
+        "reply":              reply,
+        "metrics": {
+            "backend_ms":        backend_ms,
+            "prompt_eval_count": pin,
+            "eval_count":        pout,
+            "tokens_per_second": tps,
+        },
+    }
 
 
 # ─── Deteccion / configuracion de la IP del PLC ──────────────────
