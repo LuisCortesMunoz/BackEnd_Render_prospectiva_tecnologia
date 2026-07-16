@@ -53,6 +53,21 @@ if groq_client is None:
     log.warning("GROQ_API_KEY no configurada: la generacion (Groq/STT) estara "
                 "deshabilitada. Los endpoints del puente al PLC (/plc/*) si funcionan.")
 
+# ─── Agente: modulos de la arquitectura nueva (aditivo, ver ARQUITECTURA_AGENTE.md) ─
+# Import defensivo: si faltaran los modulos/perfiles, el servidor arranca igual y
+# simplemente NO se aplica la deteccion de ambiguedad (mismo comportamiento que
+# antes de la Fase 1).
+try:
+    import profile_registry
+    from agents import clarify as agent_clarify
+    _AGENTS_OK = True
+except Exception as _e_agents:
+    _AGENTS_OK = False
+    log.warning(f"Modulos de agente no disponibles ({_e_agents}); se usa el flujo clasico.")
+
+# Interruptor para desactivar la deteccion de ambiguedad sin redeploy.
+AGENT_CLARIFY_ENABLED = _AGENTS_OK and os.environ.get("AGENT_CLARIFY_ENABLED", "1") != "0"
+
 # ─── Rutas de archivos ────────────────────────────────────────────
 
 CONTEXTO_JSON_PATH = os.environ.get("CONTEXTO_JSON", "context_json/contexto.json")
@@ -1364,6 +1379,13 @@ class LogicaResponse(BaseModel):
     # program.metadata.engine_config. Es ADITIVO (no reemplaza a 'logic'); el
     # front puede cargar el programa al PLC sin transformar la respuesta.
     program: dict = {}
+    # Fase 1 (agente): campos ADITIVOS opcionales. status="ok" por defecto
+    # mantiene intacto el contrato para clientes que los ignoran. Cuando
+    # status="needs_clarification", 'logic' viene vacio y hay 'questions'.
+    status: str = "ok"
+    questions: List[dict] = []
+    assumptions: List[str] = []
+    analysis: dict = {}
 
 
 class AplicarPLCRequest(BaseModel):
@@ -1638,6 +1660,28 @@ async def generar_logica(req: LogicaRequest):
         raise HTTPException(400, "El campo 'texto' no puede estar vacio.")
     if len(texto) > 2000:
         raise HTTPException(400, "Texto demasiado largo, maximo 2000 caracteres.")
+
+    # Fase 1 (agente): deteccion de prompts ambiguos. Si la peticion es NUEVA
+    # (no es una modificacion de un programa anterior) y le faltan datos criticos
+    # (salida o entrada), se responde con preguntas en vez de inventar. Las
+    # peticiones claras siguen EXACTAMENTE el flujo de siempre.
+    es_modificacion = bool(req.contexto and req.contexto.programa_anterior)
+    if AGENT_CLARIFY_ENABLED and not es_modificacion:
+        try:
+            perfil_clarify = profile_registry.cargar_perfil(req.device_profile)
+        except Exception:
+            perfil_clarify = None
+        if perfil_clarify:
+            analisis = agent_clarify.analizar_peticion(texto, perfil_clarify, req.contexto)
+            if analisis["ambiguous"]:
+                log.info(f"/generar-logica needs_clarification — falta: {analisis['missing']}")
+                return LogicaResponse(
+                    logic={}, name="", outputs=0,
+                    status="needs_clarification",
+                    questions=analisis["questions"],
+                    assumptions=analisis["assumptions"],
+                    analysis={"missing": analisis["missing"], "slots": analisis["slots"]},
+                )
 
     # OJO: aqui NO se inyecta la memoria de feedback (memoria/ejemplos.json):
     # esos ejemplos estan en el esquema VIEJO (logica_ladder/filas/XIC/OTE) y
