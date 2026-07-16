@@ -1597,7 +1597,7 @@ async def voz_a_ladder(
             raise HTTPException(422, "Transcripcion vacia. Habla mas claro o graba de nuevo.")
         if len(prompt) > 2000:
             raise HTTPException(400, "Transcripcion demasiado larga, maximo 2000 caracteres.")
-        datos, schema, js_string, ejemplo_id = consultar_retorna_schema(prompt)
+        _, schema, js_string, ejemplo_id = consultar_retorna_schema(prompt)
         return VozLadderResponse(
             texto=prompt, stt=stt,
             ladder=crear_ladder_response(prompt, schema, js_string, ejemplo_id),
@@ -1619,7 +1619,7 @@ async def generar_ladder(req: PromptRequest):
     if len(req.prompt) > 2000:
         raise HTTPException(400, "Prompt demasiado largo, maximo 2000 caracteres.")
     try:
-        datos, schema, js_string, ejemplo_id = consultar_retorna_schema(req.prompt.strip(), req.contexto)
+        _, schema, js_string, ejemplo_id = consultar_retorna_schema(req.prompt.strip(), req.contexto)
         return crear_ladder_response(req.prompt.strip(), schema, js_string, ejemplo_id)
     except ValueError as e:
         raise HTTPException(422, str(e))
