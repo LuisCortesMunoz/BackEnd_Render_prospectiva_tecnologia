@@ -60,6 +60,7 @@ if groq_client is None:
 try:
     import profile_registry
     from agents import clarify as agent_clarify
+    from agents import validators as agent_validators
     _AGENTS_OK = True
 except Exception as _e_agents:
     _AGENTS_OK = False
@@ -67,6 +68,8 @@ except Exception as _e_agents:
 
 # Interruptor para desactivar la deteccion de ambiguedad sin redeploy.
 AGENT_CLARIFY_ENABLED = _AGENTS_OK and os.environ.get("AGENT_CLARIFY_ENABLED", "1") != "0"
+# Interruptor para desactivar la reflexion semantica (Fase 2) sin redeploy.
+AGENT_SEMANTIC_ENABLED = _AGENTS_OK and os.environ.get("AGENT_SEMANTIC_ENABLED", "1") != "0"
 
 # ─── Rutas de archivos ────────────────────────────────────────────
 
@@ -1710,12 +1713,26 @@ async def generar_logica(req: LogicaRequest):
     messages.append({"role": "user", "content":
                      f"{texto}\n\nResponde SOLO con el JSON del esquema indicado."})
 
-    # Auto-revision iterativa: el agente genera, se valida a si mismo y, si el
-    # JSON sale invalido, se le devuelven SUS errores para que se corrija, hasta
-    # MAX_AUTOREVISIONES intentos. Solo se rinde (422) si tras todos los intentos
-    # sigue invalido. A la primera buena, sale sin gastar llamadas de mas.
+    # Perfil activo para la reflexion semantica (Fase 2). Cacheado por el registro.
+    perfil_activo = None
+    if AGENT_SEMANTIC_ENABLED:
+        try:
+            perfil_activo = profile_registry.cargar_perfil(req.device_profile)
+        except Exception:
+            perfil_activo = None
+
+    # Auto-revision iterativa (bucle del agente, Fase 2): el agente genera, se valida
+    # a si mismo (SINTACTICO + SEMANTICO) y, si algo sale mal, se le devuelven SUS
+    # errores para que se corrija, hasta MAX_AUTOREVISIONES intentos. A la primera
+    # buena, sale sin gastar llamadas de mas.
+    #  - Fallo SINTACTICO agotado -> 422 (igual que antes).
+    #  - Fallo solo SEMANTICO agotado -> fallback LENIENT: se acepta el candidato
+    #    sintacticamente valido y sus problemas se muestran como AVISOS (nunca se
+    #    rechaza algo que el flujo anterior habria aceptado).
     cfg = None
     errores = []
+    mejor_candidato = None   # ultimo candidato SINTACTICAMENTE valido (para fallback)
+    mejor_avisos = []        # avisos/problemas semanticos asociados a cfg o al fallback
     intentos = max(1, MAX_AUTOREVISIONES)
     msgs_iter = list(messages)
     for intento in range(1, intentos + 1):
@@ -1732,13 +1749,31 @@ async def generar_logica(req: LogicaRequest):
             raise HTTPException(500, str(e))
 
         errores = validar_logica_config(candidato)
-        if not errores:
+        errores_semanticos, avisos_semanticos = [], []
+        if not errores and perfil_activo is not None:
+            # Reflexion: coherencia y capacidades del perfil (Fase 2).
+            try:
+                sem = agent_validators.validar_semantica(candidato, perfil_activo)
+                errores_semanticos = sem.get("errors", []) or []
+                avisos_semanticos  = sem.get("warnings", []) or []
+            except Exception as e:
+                log.warning(f"Validacion semantica fallo (se ignora): {e}")
+
+        if not errores and not errores_semanticos:
             cfg = candidato
+            mejor_avisos = avisos_semanticos
             if intento > 1:
                 log.info(f"Auto-revision exitosa en el intento {intento}/{intentos}.")
             break
 
-        log.warning(f"Auto-revision {intento}/{intentos}: JSON invalido — {errores}")
+        # Recordar el mejor candidato SINTACTICAMENTE valido (para el fallback lenient).
+        if not errores:
+            mejor_candidato = candidato
+            mejor_avisos = list(avisos_semanticos) + ["Revisa la logica: " + e for e in errores_semanticos]
+
+        errores_feedback = errores if errores else errores_semanticos
+        tipo = "sintactico" if errores else "semantico (reflexion)"
+        log.warning(f"Auto-revision {intento}/{intentos}: {tipo} — {errores_feedback}")
         if intento < intentos:
             # Realimenta los errores concretos para que el modelo se corrija.
             msgs_iter = list(messages)
@@ -1746,9 +1781,15 @@ async def generar_logica(req: LogicaRequest):
                               "content": json.dumps(candidato, ensure_ascii=False)})
             msgs_iter.append({"role": "user", "content": (
                 "El JSON anterior es INVALIDO por estos motivos:\n- "
-                + "\n- ".join(errores)
+                + "\n- ".join(errores_feedback)
                 + "\nCorrige SOLO esos errores y devuelve el JSON COMPLETO del "
                   "esquema indicado, sin texto extra.")})
+
+    # Fallback lenient (Fase 2): si nunca quedo perfecto pero hubo un candidato
+    # sintacticamente valido (solo fallaron chequeos semanticos), se acepta ese.
+    if cfg is None and mejor_candidato is not None:
+        cfg = mejor_candidato
+        log.info("Fase 2: aceptado candidato sintacticamente valido; problemas semanticos como avisos.")
 
     if cfg is None:
         raise HTTPException(
@@ -1757,6 +1798,8 @@ async def generar_logica(req: LogicaRequest):
 
     cfg = normalizar_logica_config(cfg)
     warnings = list(cfg.get("system", {}).get("warnings", []) or [])
+    if mejor_avisos:
+        warnings.extend(mejor_avisos)
 
     # Red de seguridad + reintento: si la peticion pide enclavamiento pero el
     # modelo no lo genero, reintentar UNA vez antes de emitir el aviso.
