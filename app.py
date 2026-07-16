@@ -59,6 +59,7 @@ if groq_client is None:
 # antes de la Fase 1).
 try:
     import profile_registry
+    import engine_spec
     from agents import clarify as agent_clarify
     from agents import validators as agent_validators
     from agents import experts as agent_experts
@@ -365,13 +366,25 @@ def _expr_de_logica(lg: dict, salida: str) -> str:
     return "0"
 
 
-def _entrada_valida(nombre) -> bool:
-    return nombre is None or str(nombre).upper() in ENGINE_INPUTS
+def _entrada_valida(nombre, entradas=None) -> bool:
+    conj = entradas if entradas is not None else ENGINE_INPUTS
+    return nombre is None or str(nombre).upper() in conj
 
 
-def validar_logica_config(cfg: dict) -> list:
-    """Valida el JSON dual contra el hardware fijo del maletin. Devuelve la
-    lista de errores (vacia = ok). Espejo del validador de Python (XL4)."""
+def validar_logica_config(cfg: dict, perfil: dict = None) -> list:
+    """Valida el JSON dual contra el hardware. Devuelve la lista de errores
+    (vacia = ok). Espejo del validador de Python (XL4).
+
+    'perfil' None (por defecto) -> usa el vocabulario FIJO del maletin
+    (comportamiento historico intacto). Con un perfil, deriva el vocabulario de
+    el (Fase 4: soporte de otros PLC sin tocar esta funcion)."""
+    usar_perfil = perfil is not None
+    salidas   = engine_spec.salidas_validas(perfil) if usar_perfil else ENGINE_OUTPUTS
+    entradas  = engine_spec.entradas_validas(perfil) if usar_perfil else ENGINE_INPUTS
+    modos     = engine_spec.modos(perfil)            if usar_perfil else ENGINE_MODES
+    t_timer   = engine_spec.tipos_timer(perfil)      if usar_perfil else TIMER_TYPES
+    t_counter = engine_spec.tipos_counter(perfil)    if usar_perfil else COUNTER_TYPES
+
     errores = []
     if not isinstance(cfg, dict):
         return ["El JSON raiz no es un objeto."]
@@ -390,35 +403,42 @@ def validar_logica_config(cfg: dict) -> list:
             errores.append(f"{tag}: no es un objeto."); continue
         sal = str(o.get("output", "")).upper()
         tag = f"salida {i+1} ({sal})"
-        if sal not in ENGINE_OUTPUTS:
-            errores.append(f"{tag}: salida invalida. Usa Q10, Q11 o Q12.")
+        if sal not in salidas:
+            if usar_perfil:
+                ids = ", ".join(str(s.get("id")) for s in perfil.get("outputs", []))
+                errores.append(f"{tag}: salida invalida. Usa {ids}.")
+            else:
+                errores.append(f"{tag}: salida invalida. Usa Q10, Q11 o Q12.")
         else:
-            canon = "Q10" if sal in ("Q10", "VERDE") else "Q11" if sal in ("Q11", "AMARILLA") else "Q12"
+            if usar_perfil:
+                canon = engine_spec.canon_salida(perfil, sal) or sal
+            else:
+                canon = "Q10" if sal in ("Q10", "VERDE") else "Q11" if sal in ("Q11", "AMARILLA") else "Q12"
             if canon in vistos:
                 errores.append(f"{tag}: salida repetida.")
             vistos.add(canon)
 
         lg = o.get("logic") or {"mode": "off"}
         mode = str(lg.get("mode", "off")).lower()
-        if mode not in ENGINE_MODES:
+        if mode not in modos:
             errores.append(f"{tag}: mode '{mode}' invalido.")
         if mode == "directo":
             if not lg.get("source"):
                 errores.append(f"{tag}: 'directo' requiere 'source'.")
             for c in ("source", "enable"):
-                if not _entrada_valida(lg.get(c)):
+                if not _entrada_valida(lg.get(c), entradas):
                     errores.append(f"{tag}: '{c}'='{lg.get(c)}' no es entrada valida.")
         elif mode == "enclavado":
             if not lg.get("start"):
                 errores.append(f"{tag}: 'enclavado' requiere 'start'.")
             for c in ("start", "stop", "enable"):
-                if not _entrada_valida(lg.get(c)):
+                if not _entrada_valida(lg.get(c), entradas):
                     errores.append(f"{tag}: '{c}'='{lg.get(c)}' no es entrada valida.")
         elif mode == "combinacional":
             if not lg.get("a") or not lg.get("b"):
                 errores.append(f"{tag}: 'combinacional' requiere 'a' y 'b'.")
             for c in ("a", "b", "stop"):
-                if not _entrada_valida(lg.get(c)):
+                if not _entrada_valida(lg.get(c), entradas):
                     errores.append(f"{tag}: '{c}'='{lg.get(c)}' no es entrada valida.")
             if str(lg.get("op", "OR")).upper() not in ("OR", "AND"):
                 errores.append(f"{tag}: 'op' debe ser OR o AND.")
@@ -427,57 +447,74 @@ def validar_logica_config(cfg: dict) -> list:
 
         tm = o.get("timer")
         if tm:
-            if str(tm.get("type")).lower() not in TIMER_TYPES:
+            ttype = str(tm.get("type")).lower()
+            if ttype not in t_timer:
                 errores.append(f"{tag}: timer.type debe ser on_delay o pulse.")
             else:
-                low = 0 if str(tm["type"]).lower() == "on_delay" else 1
+                if usar_perfil:
+                    rng = engine_spec.rango_timer(perfil, ttype) or [0, 32767]
+                    low, high = rng[0], rng[1]
+                else:
+                    low, high = (0 if ttype == "on_delay" else 1), 32767
                 try:
                     v = int(tm.get("preset_s"))
-                    if v < low or v > 32767:
-                        errores.append(f"{tag}: timer.preset_s {v} fuera de [{low},32767].")
+                    if v < low or v > high:
+                        errores.append(f"{tag}: timer.preset_s {v} fuera de [{low},{high}].")
                 except (TypeError, ValueError):
                     errores.append(f"{tag}: timer.preset_s no es entero.")
         ct = o.get("counter")
         if ct:
-            if str(ct.get("type")).lower() not in COUNTER_TYPES:
+            ctype = str(ct.get("type")).lower()
+            if ctype not in t_counter:
                 errores.append(f"{tag}: counter.type debe ser up o up_held.")
             else:
-                low = 0 if str(ct["type"]).lower() == "up" else 1
+                if usar_perfil:
+                    rng = engine_spec.rango_counter(perfil, ctype) or [0, 32767]
+                    low, high = rng[0], rng[1]
+                else:
+                    low, high = (0 if ctype == "up" else 1), 32767
                 try:
                     v = int(ct.get("preset"))
-                    if v < low or v > 32767:
-                        errores.append(f"{tag}: counter.preset {v} fuera de [{low},32767].")
+                    if v < low or v > high:
+                        errores.append(f"{tag}: counter.preset {v} fuera de [{low},{high}].")
                 except (TypeError, ValueError):
                     errores.append(f"{tag}: counter.preset no es entero.")
-                if not _entrada_valida(ct.get("reset_input")):
+                if not _entrada_valida(ct.get("reset_input"), entradas):
                     errores.append(f"{tag}: counter.reset_input invalido.")
 
     if seq is not None:
-        errores.extend(_validar_secuencia_cfg(seq))
+        errores.extend(_validar_secuencia_cfg(seq, perfil))
 
     sysc = cfg.get("system") or {}
-    if not _entrada_valida(sysc.get("global_stop")):
+    if not _entrada_valida(sysc.get("global_stop"), entradas):
         errores.append(f"system.global_stop='{sysc.get('global_stop')}' invalido.")
     return errores
 
 
-def _validar_secuencia_cfg(seq) -> list:
+def _validar_secuencia_cfg(seq, perfil=None) -> list:
     """Valida el bloque 'sequence' (secuenciador de pasos). Espejo del
-    validador de plc_maestro y del secuenciador en Texto Estructurado."""
+    validador de plc_maestro y del secuenciador en Texto Estructurado.
+    'perfil' None -> vocabulario fijo del maletin (comportamiento historico)."""
+    usar_perfil = perfil is not None
+    entradas  = engine_spec.entradas_validas(perfil)  if usar_perfil else ENGINE_INPUTS
+    salidas   = engine_spec.salidas_validas(perfil)   if usar_perfil else ENGINE_OUTPUTS
+    seq_modos = engine_spec.modos_secuencia(perfil)   if usar_perfil else SEQ_MODES
+    max_pasos = engine_spec.max_pasos_secuencia(perfil) if usar_perfil else SEQ_MAX_STEPS
+
     errores = []
     if not isinstance(seq, dict):
         return ["'sequence' no es un objeto."]
-    if not seq.get("start") or not _entrada_valida(seq.get("start")):
+    if not seq.get("start") or not _entrada_valida(seq.get("start"), entradas):
         errores.append(f"sequence.start='{seq.get('start')}' debe ser una entrada valida (I1..I7).")
-    if str(seq.get("mode", "once")).lower() not in SEQ_MODES:
+    if str(seq.get("mode", "once")).lower() not in seq_modos:
         errores.append(f"sequence.mode='{seq.get('mode')}' debe ser 'once' o 'loop'.")
-    if seq.get("reset") is not None and not _entrada_valida(seq.get("reset")):
+    if seq.get("reset") is not None and not _entrada_valida(seq.get("reset"), entradas):
         errores.append(f"sequence.reset='{seq.get('reset')}' no es una entrada valida.")
     steps = seq.get("steps")
     if not isinstance(steps, list) or not steps:
         errores.append("sequence.steps debe ser una lista con al menos un paso.")
-    elif len(steps) > SEQ_MAX_STEPS:
-        errores.append(f"sequence.steps no puede tener mas de {SEQ_MAX_STEPS} pasos.")
+    elif len(steps) > max_pasos:
+        errores.append(f"sequence.steps no puede tener mas de {max_pasos} pasos.")
     else:
         for i, st in enumerate(steps):
             etq = f"sequence paso {i+1}"
@@ -488,7 +525,7 @@ def _validar_secuencia_cfg(seq) -> list:
                 errores.append(f"{etq}: 'outputs' debe listar al menos una salida.")
             else:
                 for o in outs:
-                    if str(o).upper() not in ENGINE_OUTPUTS:
+                    if str(o).upper() not in salidas:
                         errores.append(f"{etq}: salida '{o}' invalida. Usa Q10, Q11 o Q12.")
             try:
                 v = int(st.get("duration_s"))
@@ -1716,13 +1753,25 @@ async def generar_logica(req: LogicaRequest):
     messages.append({"role": "user", "content":
                      f"{texto}\n\nResponde SOLO con el JSON del esquema indicado."})
 
-    # Perfil activo (Fases 0/2/3): reflexion semantica + guia de expertos. Cacheado.
+    # Perfil activo (Fases 0/2/3/4). Cacheado por el registro.
     perfil_activo = None
-    if AGENT_SEMANTIC_ENABLED or AGENT_EXPERTS_ENABLED:
+    if _AGENTS_OK:
         try:
             perfil_activo = profile_registry.cargar_perfil(req.device_profile)
         except Exception:
             perfil_activo = None
+
+    # Fase 4: el validador sintactico usa el perfil SOLO si NO es el maletin por
+    # defecto; asi el maletin conserva su ruta historica byte-identica.
+    perfil_validador = None
+    if perfil_activo is not None and perfil_activo.get("id") != profile_registry.DEFAULT_PROFILE:
+        perfil_validador = perfil_activo
+        # El system prompt base describe el maletin; para OTRO PLC se le da su I/O.
+        try:
+            messages.insert(1, {"role": "system",
+                                "content": engine_spec.descripcion_hardware(perfil_activo)})
+        except Exception as e:
+            log.warning(f"Descripcion de hardware fallo (se ignora): {e}")
 
     # Fase 3: refuerza el prompt con (a) guia de EXPERTOS segun la intencion y
     # (b) EJEMPLOS validados del MISMO esquema (accepted/corrected). Es aditivo,
@@ -1774,9 +1823,9 @@ async def generar_logica(req: LogicaRequest):
             log.error(f"Error generar-logica (modelo): {e}")
             raise HTTPException(500, str(e))
 
-        errores = validar_logica_config(candidato)
+        errores = validar_logica_config(candidato, perfil_validador)
         errores_semanticos, avisos_semanticos = [], []
-        if not errores and perfil_activo is not None:
+        if not errores and AGENT_SEMANTIC_ENABLED and perfil_activo is not None:
             # Reflexion: coherencia y capacidades del perfil (Fase 2).
             try:
                 sem = agent_validators.validar_semantica(candidato, perfil_activo)
@@ -1848,7 +1897,7 @@ async def generar_logica(req: LogicaRequest):
         })
         try:
             cfg2 = llamar_modelo_json(retry_msgs)
-            errs2 = validar_logica_config(cfg2)
+            errs2 = validar_logica_config(cfg2, perfil_validador)
             if not errs2 and _tiene_latch(cfg2):
                 cfg = normalizar_logica_config(cfg2)
                 warnings = list(cfg.get("system", {}).get("warnings", []) or [])

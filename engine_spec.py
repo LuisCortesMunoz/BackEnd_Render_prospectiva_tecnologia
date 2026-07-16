@@ -99,3 +99,18 @@ def rango_duracion_secuencia(perfil: dict):
     """[low, high] permitido para sequence.steps[].duration_s, o None."""
     seq = perfil.get("capabilities", {}).get("sequence") or {}
     return list(seq.get("duration_s")) if "duration_s" in seq else None
+
+
+def descripcion_hardware(perfil: dict) -> str:
+    """Texto breve del hardware del perfil para inyectar en el prompt cuando el
+    PLC NO es el maletin por defecto (el system prompt base describe el maletin)."""
+    ins = ", ".join(f"{e['id']}({e.get('tipo', '')})" for e in perfil.get("inputs", []))
+    outs = ", ".join(f"{o['id']}({o.get('label', '')})".replace("()", "")
+                     for o in perfil.get("outputs", []))
+    caps = perfil.get("capabilities", {})
+    modos_txt = ", ".join(caps.get("modes", []))
+    return (f"HARDWARE DEL PERFIL '{perfil.get('id')}' — usa SOLO estas entradas/salidas "
+            f"(ignora las del maletin):\n"
+            f"- Entradas: {ins}\n"
+            f"- Salidas: {outs}\n"
+            f"- Modos permitidos: {modos_txt}")

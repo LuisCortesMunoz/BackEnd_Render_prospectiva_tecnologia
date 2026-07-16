@@ -1,0 +1,55 @@
+{
+  "id": "plc_extendido",
+  "version": 1,
+  "descripcion": "Perfil de ejemplo (Fase 4): PLC con mas E/S y capacidades. Demuestra que el agente escala solo agregando un perfil, sin tocar el nucleo. NOTA: la carga fisica al PLC (plc_maestro.py) sigue mapeada al Horner del maletin; este perfil es para el lado de generacion/validacion.",
+  "plc": {
+    "modelo": "PLC generico extendido",
+    "modbus": { "ip": "192.168.1.50", "port": 502, "unit_id": 1 }
+  },
+
+  "input_none": "NINGUNA",
+  "inputs": [
+    { "id": "I1", "tipo": "NA", "clase": "digital", "label": "Entrada 1" },
+    { "id": "I2", "tipo": "NC", "clase": "digital", "label": "Paro 2" },
+    { "id": "I3", "tipo": "NA", "clase": "digital", "label": "Entrada 3" },
+    { "id": "I4", "tipo": "NA", "clase": "digital", "label": "Entrada 4" },
+    { "id": "I5", "tipo": "NA", "clase": "digital", "label": "Entrada 5" },
+    { "id": "I6", "tipo": "NA", "clase": "digital", "label": "Entrada 6" },
+    { "id": "I7", "tipo": "NC", "clase": "digital", "label": "Paro 7" },
+    { "id": "I8", "tipo": "NC", "clase": "digital", "label": "Paro emergencia 8" }
+  ],
+
+  "outputs": [
+    { "id": "Q1", "clase": "digital", "label": "Salida 1" },
+    { "id": "Q2", "clase": "digital", "label": "Salida 2" },
+    { "id": "Q3", "clase": "digital", "label": "Salida 3" },
+    { "id": "Q4", "clase": "digital", "label": "Salida 4" },
+    { "id": "Q5", "clase": "digital", "label": "Salida 5" },
+    { "id": "Q6", "clase": "digital", "label": "Salida 6" }
+  ],
+
+  "capabilities": {
+    "modes": ["off", "directo", "enclavado", "combinacional"],
+    "timers": {
+      "on_delay": { "preset_s": [0, 32767] },
+      "pulse":    { "preset_s": [1, 32767] }
+    },
+    "counters": {
+      "up":      { "preset": [0, 32767] },
+      "up_held": { "preset": [1, 32767] }
+    },
+    "sequence": {
+      "enabled": true,
+      "modes": ["once", "loop"],
+      "max_steps": 12,
+      "duration_s": [1, 32767]
+    },
+    "analog": true,
+    "pid": false,
+    "math": false
+  },
+
+  "limits": {
+    "max_inputs_per_output": 2
+  }
+}
