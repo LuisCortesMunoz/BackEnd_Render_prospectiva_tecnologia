@@ -1,0 +1,55 @@
+{
+  "id": "maletin_basico",
+  "version": 1,
+  "descripcion": "Maletin de laboratorio Horner XL4 / XC1E5. Perfil por defecto.",
+  "plc": {
+    "modelo": "Horner XL4 / XC1E5",
+    "cscape": "10.2",
+    "modbus": { "ip": "192.168.3.12", "port": 502, "unit_id": 1 }
+  },
+
+  "input_none": "NINGUNA",
+  "inputs": [
+    { "id": "I1", "tipo": "NA", "clase": "digital", "label": "Boton arranque" },
+    { "id": "I2", "tipo": "NC", "clase": "digital", "label": "Boton paro" },
+    { "id": "I3", "tipo": "NA", "clase": "digital", "label": "Selector/reset" },
+    { "id": "I4", "tipo": "NA", "clase": "digital", "label": "Selector" },
+    { "id": "I7", "tipo": "NC", "clase": "digital", "label": "Paro" }
+  ],
+
+  "outputs": [
+    { "id": "Q10", "clase": "digital", "label": "verde" },
+    { "id": "Q11", "clase": "digital", "label": "amarilla" },
+    { "id": "Q12", "clase": "digital", "label": "roja" }
+  ],
+
+  "capabilities": {
+    "modes": ["off", "directo", "enclavado", "combinacional"],
+    "timers": {
+      "on_delay": { "preset_s": [0, 32767] },
+      "pulse":    { "preset_s": [1, 32767] }
+    },
+    "counters": {
+      "up":      { "preset": [0, 32767] },
+      "up_held": { "preset": [1, 32767] }
+    },
+    "sequence": {
+      "enabled": true,
+      "modes": ["once", "loop"],
+      "max_steps": 8,
+      "duration_s": [1, 32767]
+    },
+    "analog": false,
+    "pid": false,
+    "math": false
+  },
+
+  "limits": {
+    "max_inputs_per_output": 2
+  },
+
+  "notas": [
+    "El mapeo fisico Modbus (%R -> registro) vive en plc_maestro.py; este perfil no lo duplica.",
+    "Las salidas aceptan tambien sus alias en mayuscula (VERDE/AMARILLA/ROJA) via el label."
+  ]
+}
