@@ -6,7 +6,12 @@
 #
 # Uso:  python test_agente_validators.py
 
-import os, json, asyncio
+import os, json, asyncio, tempfile
+# Aislar la memoria: en Fase 3 generar_logica consulta ejemplos_relevantes, que
+# escribe 'uses'. Usamos un archivo temporal para no tocar memoria/ejemplos.json.
+os.environ["MEMORIA_JSON"] = os.path.join(tempfile.gettempdir(), "test_mem_validators.json")
+if os.path.exists(os.environ["MEMORIA_JSON"]):
+    os.remove(os.environ["MEMORIA_JSON"])
 os.environ.setdefault("GROQ_API_KEY", "test-key-local")
 
 import app

@@ -61,15 +61,18 @@ try:
     import profile_registry
     from agents import clarify as agent_clarify
     from agents import validators as agent_validators
+    from agents import experts as agent_experts
+    from agents import memory as agent_memory
     _AGENTS_OK = True
 except Exception as _e_agents:
     _AGENTS_OK = False
     log.warning(f"Modulos de agente no disponibles ({_e_agents}); se usa el flujo clasico.")
 
-# Interruptor para desactivar la deteccion de ambiguedad sin redeploy.
-AGENT_CLARIFY_ENABLED = _AGENTS_OK and os.environ.get("AGENT_CLARIFY_ENABLED", "1") != "0"
-# Interruptor para desactivar la reflexion semantica (Fase 2) sin redeploy.
-AGENT_SEMANTIC_ENABLED = _AGENTS_OK and os.environ.get("AGENT_SEMANTIC_ENABLED", "1") != "0"
+# Interruptores para desactivar cada capa del agente sin redeploy.
+AGENT_CLARIFY_ENABLED  = _AGENTS_OK and os.environ.get("AGENT_CLARIFY_ENABLED", "1")  != "0"  # Fase 1
+AGENT_SEMANTIC_ENABLED = _AGENTS_OK and os.environ.get("AGENT_SEMANTIC_ENABLED", "1") != "0"  # Fase 2
+AGENT_EXPERTS_ENABLED  = _AGENTS_OK and os.environ.get("AGENT_EXPERTS_ENABLED", "1")  != "0"  # Fase 3
+AGENT_MEMORY_ENABLED   = _AGENTS_OK and os.environ.get("AGENT_MEMORY_ENABLED", "1")   != "0"  # Fase 3
 
 # ─── Rutas de archivos ────────────────────────────────────────────
 
@@ -1713,13 +1716,36 @@ async def generar_logica(req: LogicaRequest):
     messages.append({"role": "user", "content":
                      f"{texto}\n\nResponde SOLO con el JSON del esquema indicado."})
 
-    # Perfil activo para la reflexion semantica (Fase 2). Cacheado por el registro.
+    # Perfil activo (Fases 0/2/3): reflexion semantica + guia de expertos. Cacheado.
     perfil_activo = None
-    if AGENT_SEMANTIC_ENABLED:
+    if AGENT_SEMANTIC_ENABLED or AGENT_EXPERTS_ENABLED:
         try:
             perfil_activo = profile_registry.cargar_perfil(req.device_profile)
         except Exception:
             perfil_activo = None
+
+    # Fase 3: refuerza el prompt con (a) guia de EXPERTOS segun la intencion y
+    # (b) EJEMPLOS validados del MISMO esquema (accepted/corrected). Es aditivo,
+    # no se aplica en modificaciones, esta flag-gated y si algo falla se ignora.
+    # Los validadores (Fases 1/2) siguen custodiando la salida.
+    if not es_modificacion:
+        extras = []
+        if AGENT_EXPERTS_ENABLED and perfil_activo is not None:
+            try:
+                guia = agent_experts.componer_guia(texto, perfil_activo)
+                if guia:
+                    extras.append(guia)
+            except Exception as e:
+                log.warning(f"Guia de expertos fallo (se ignora): {e}")
+        if AGENT_MEMORY_ENABLED:
+            try:
+                rel = agent_memory.filtrar_logica(ejemplos_relevantes(texto))
+                if rel:
+                    extras.append(agent_memory.bloque_logica_prompt(rel))
+            except Exception as e:
+                log.warning(f"Memoria de ejemplos fallo (se ignora): {e}")
+        if extras:
+            messages.insert(1, {"role": "system", "content": "\n\n".join(extras)})
 
     # Auto-revision iterativa (bucle del agente, Fase 2): el agente genera, se valida
     # a si mismo (SINTACTICO + SEMANTICO) y, si algo sale mal, se le devuelven SUS
