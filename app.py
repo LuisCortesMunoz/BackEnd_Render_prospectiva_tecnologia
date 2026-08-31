@@ -1949,7 +1949,7 @@ async def generar_logica(req: LogicaRequest):
 # Modelo de chat en Groq. gpt-oss-120b es razonador y consume max_tokens con
 # su razonamiento interno (mal para respuestas cortas), por eso el chat usa
 # por defecto un modelo de produccion no-razonador. Configurable por env.
-MODELO_CHAT = os.environ.get("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
+MODELO_CHAT = os.environ.get("GROQ_CHAT_MODEL", "qwen/qwen3.6-27b")
 DEFAULT_PROFILE = "media"
 
 # Perfiles copiados TAL CUAL del backend de Ollama (mismos system prompts y
@@ -2110,6 +2110,7 @@ def chat(req: ChatRequest):
             temperature=req.temperature,
             top_p=req.top_p,
             max_tokens=req.num_predict,
+            reasoning_effort="none",
         )
     except APIStatusError as e:
         if e.status_code in (413, 429):

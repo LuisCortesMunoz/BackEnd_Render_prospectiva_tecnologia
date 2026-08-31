@@ -34,7 +34,7 @@ El backend cumple **dos roles** según dónde corra:
 | `GROQ_API_KEY` | Generar lógica/Ladder y chat | Sí en Render |
 | `GROQ_API_KEY_stt` | Voz a texto (Whisper) | Sí, si usas voz |
 | `GROQ_MODEL` | Modelo de generación (default `openai/gpt-oss-120b`) | No |
-| `GROQ_CHAT_MODEL` | Modelo del chat (default `llama-3.3-70b-versatile`) | No |
+| `GROQ_CHAT_MODEL` | Modelo del chat (default `qwen/qwen3.6-27b`) | No |
 | `GROQ_STT_MODEL` | Modelo de voz (default `whisper-large-v3`) | No |
 | `ADMIN_TOKEN` | Protege los endpoints `/admin/*` | Recomendada |
 | `ALLOWED_ORIGINS` | Dominios del frontend (CORS) | No |
