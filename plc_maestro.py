@@ -18,13 +18,55 @@ SALIDAS:
 ENTRADAS:
   I1 = codigo 1
   I2 = codigo 2
-  I3 = codigo 3
-  I4 = codigo 4
+  I3 = codigo 3   (tambien S1 de la banda, NC)
+  I4 = codigo 4   (tambien S2 de la banda, NC)
   I7 = codigo 5
 
 TIPO FISICO:
   I1, I3, I4 = NA
   I2, I7     = NC
+
+----------------------------------------------------------------------------
+SELECTOR DE EQUIPO (Ladder maestro nuevo)
+----------------------------------------------------------------------------
+El PLC es uno solo y ahora atiende dos equipos. SysMode decide cual manda:
+  SysMode = 0  standby (todo apagado, VFD en paro)
+  SysMode = 1  maletin (motor por salida + secuenciador)
+  SysMode = 2  banda   (VFD + sensores S1/S2 + torreta)
+
+El ladder evalua  MasterEnable := (SysMode = 1) AND (CmdWord <> 0),
+por lo que escribir solo CmdWord=1 YA NO enciende nada. habilitar() escribe
+ambos registros.
+
+----------------------------------------------------------------------------
+MAPA DE REGISTROS %R
+----------------------------------------------------------------------------
+  %R00001  CmdWord            habilitacion general del maletin
+  %R00002  GenStopSrc         paro general
+  %R00003  ComboIndex         (lectura) entradas fisicas
+  %R00004  OutStatus          (lectura) salidas Q10/Q11/Q12
+  %R00005  SysMode            selector de equipo  [NUEVO]
+  %R00009  BandFreqRef        frecuencia de la banda en Hz  [NUEVO]
+  %R00010..%R00039            bloques de configuracion por salida
+  %R00040..%R00054            acumulados, resets y reset fisico
+  %R00060..%R00087            secuenciador de pasos
+  %R00090  BandCmdWord        habilitacion de la banda  [NUEVO]
+  %R00091  BandS1Preset       espera de S1 en segundos  [NUEVO]
+  %R00092  BandS2Preset       espera de S2 en segundos  [NUEVO]
+  %R00093  BandS1RetrigTime   anti-retrigger S1 (default 8 s)  [NUEVO]
+  %R00094  BandS2RetrigTime   anti-retrigger S2 (default 12 s)  [NUEVO]
+  %R00095  BandVFDReset       reset del VFD, auto-clear  [NUEVO]
+  %R00096  BandDirCmd         0 = derecha | 1 = izquierda  [NUEVO]
+  %R00097  BandProdCountReg   (lectura) productos contados  [NUEVO]
+  %R00500  control_vfd        (lectura) 18=der | 34=izq | 1=paro
+  %R00502  vfd_freq_read      (lectura) velocidad real x100
+  %R00504  vfd_freq_send      (lectura) BandFreqRef x 100
+  %R00506  vfd_reset          (lectura) pulso de reset
+  %R00508  leer_vfd_speed     (lectura) velocidad legible en Hz
+
+Las direcciones marcadas [NUEVO] fuera de %R00009 y %R00500.. venian como
+"%R nueva" en el ladder: se asignaron aqui en huecos libres y deben
+declararse con esas mismas direcciones en la tabla de variables de Cscape.
 ============================================================================
 """
 
@@ -50,6 +92,25 @@ ADDR_CMD = R(1)
 ADDR_GENSTOP = R(2)
 ADDR_INDEX = R(3)
 ADDR_STATUS = R(4)
+
+
+# ---------------------------------------------------------------------------
+# SELECTOR DE EQUIPO  (Ladder maestro nuevo, secciones 4 y 12.0)
+# El ladder ahora exige  MasterEnable := (SysMode = 1) AND (CmdWord <> 0).
+# Sin escribir SysMode, CmdWord por si solo YA NO habilita el maletin.
+#   0 = standby (todo apagado)   1 = maletin   2 = banda transportadora
+# ---------------------------------------------------------------------------
+ADDR_SYSMODE = R(5)
+
+SYSMODE_STANDBY = 0
+SYSMODE_MALETIN = 1
+SYSMODE_BANDA = 2
+
+SYSMODES = {
+    "standby": SYSMODE_STANDBY,
+    "maletin": SYSMODE_MALETIN,
+    "banda": SYSMODE_BANDA,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +250,67 @@ OUT_BIT = {
 }
 
 
+# ---------------------------------------------------------------------------
+# BANDA TRANSPORTADORA + VFD  (seccion 12 del Ladder maestro)
+#
+# La banda NO tiene PLC propio: corre en el mismo XL4 del maletin y solo se
+# activa con SysMode = 2 AND BandCmdWord <> 0. Cuando esta activa, el ladder
+# sobreescribe Q10/Q11/Q12 con la torreta (verde/amarillo/rojo).
+#
+# Los registros %R00500..%R00508 los escribe/lee el PLC hacia el VFD; desde
+# aqui solo se LEEN para monitoreo (no se escriben nunca).
+#
+# NOTA: BandFreqRef es la unica direccion fija que trae el ladder (%R00009).
+# El resto venia marcado como "%R nueva": se asignan aqui en el bloque libre
+# %R00090..%R00097 y DEBEN declararse con esas mismas direcciones en la tabla
+# de variables de Cscape.
+#
+# BandProdCount es una variable RETENTIVA interna del ladder y no se puede
+# leer por Modbus tal cual. Para exponerla hay que publicarla en un %R al
+# final de la seccion 12 del programa de Cscape:
+#
+#     BandProdCountReg := BandProdCount;    (* %R00097 *)
+#
+# donde BandProdCountReg es un INT nuevo mapeado a %R00097 (no retentivo).
+# ---------------------------------------------------------------------------
+ADDR_BAND_CMD        = R(90)   # BandCmdWord      <>0 = habilitar banda
+ADDR_BAND_FREQ_REF   = R(9)    # BandFreqRef      Hz (el PLC lo multiplica x100)
+ADDR_BAND_S1_PRESET  = R(91)   # BandS1Preset     espera de S1 en segundos
+ADDR_BAND_S2_PRESET  = R(92)   # BandS2Preset     espera de S2 en segundos
+ADDR_BAND_S1_RETRIG  = R(93)   # BandS1RetrigTime anti-retrigger S1 (default 8)
+ADDR_BAND_S2_RETRIG  = R(94)   # BandS2RetrigTime anti-retrigger S2 (default 12)
+ADDR_BAND_VFD_RESET  = R(95)   # BandVFDReset     <>0 = reset VFD (auto-clear)
+ADDR_BAND_DIR        = R(96)   # BandDirCmd       0 = derecha | 1 = izquierda
+ADDR_BAND_PROD_COUNT = R(97)   # BandProdCountReg (lectura) productos contados
+
+# Tope del contador de productos en el ladder (CTU PV=9999: al llegar, vuelve a 0)
+BAND_PROD_COUNT_MAX = 9999
+
+# Registros del VFD (solo lectura desde Python)
+ADDR_VFD_CONTROL     = R(500)  # 18 = derecha | 34 = izquierda | 1 = paro
+ADDR_VFD_FREQ_READ   = R(502)  # velocidad real del VFD (escalada x100)
+ADDR_VFD_FREQ_SEND   = R(504)  # BandFreqRef x 100
+ADDR_VFD_RESET       = R(506)  # pulso de reset (auto-clear en 12.1)
+ADDR_VFD_SPEED_HMI   = R(508)  # %R00502 / 100 -> valor legible
+
+VFD_CMD_DERECHA   = 18
+VFD_CMD_IZQUIERDA = 34
+VFD_CMD_PARO      = 1
+
+# Sensores fisicos de la banda (NC: el ladder los invierte con NOT I[])
+# S1 = I3 = I[2]   S2 = I4 = I[3]
+BAND_SENSOR_S1 = "I3"
+BAND_SENSOR_S2 = "I4"
+
+BAND_DIR = {
+    "derecha": 0, "right": 0, "der": 0, "cw": 0, "0": 0,
+    "izquierda": 1, "left": 1, "izq": 1, "ccw": 1, "1": 1,
+}
+
+BAND_S1_RETRIG_DEFAULT = 8    # segundos (TOF ~8 s del ladder original)
+BAND_S2_RETRIG_DEFAULT = 12   # segundos (TOF ~12 s del ladder original)
+
+
 class XL4:
     def __init__(self, ip=PLC_IP, port=PLC_PORT, unit=UNIT_ID):
         self.ip = ip
@@ -280,8 +402,15 @@ class XL4:
     # COMANDOS GENERALES
     # -----------------------------------------------------------------------
     def habilitar(self, on=True):
-        self._w(ADDR_CMD, 1 if on else 0)
-        print(f"Sistema {'HABILITADO' if on else 'DESHABILITADO'}")
+        # El ladder nuevo exige SysMode=1 ademas de CmdWord<>0 para que
+        # MasterEnable sea TRUE. Se escribe el modo junto con el comando.
+        if on:
+            self._w(ADDR_SYSMODE, SYSMODE_MALETIN)
+            self._w(ADDR_CMD, 1)
+        else:
+            self._w(ADDR_CMD, 0)
+            self._w(ADDR_SYSMODE, SYSMODE_STANDBY)
+        print(f"Sistema {'HABILITADO (modo maletin)' if on else 'DESHABILITADO (standby)'}")
 
     def paro_general(self, entrada):
         self._w(ADDR_GENSTOP, self._src(entrada))
@@ -552,10 +681,183 @@ class XL4:
         print("SECUENCIA desactivada")
 
     # -----------------------------------------------------------------------
+    # SELECTOR DE EQUIPO  (SysMode)
+    # -----------------------------------------------------------------------
+    def seleccionar_modo(self, modo):
+        """Fija SysMode: 'standby'/0, 'maletin'/1 o 'banda'/2.
+
+        Solo un subsistema puede estar activo a la vez: con SysMode=1 la banda
+        queda deshabilitada y el VFD en paro; con SysMode=2 el motor por salida
+        y el secuenciador quedan deshabilitados."""
+        if isinstance(modo, int):
+            valor = modo
+        else:
+            clave = str(modo).lower()
+            if clave not in SYSMODES:
+                raise ValueError(f"Modo no valido: {modo}. Usa {list(SYSMODES.keys())}")
+            valor = SYSMODES[clave]
+
+        if valor not in (SYSMODE_STANDBY, SYSMODE_MALETIN, SYSMODE_BANDA):
+            raise ValueError("SysMode debe ser 0 (standby), 1 (maletin) o 2 (banda).")
+
+        self._w(ADDR_SYSMODE, valor)
+        print(f"SysMode -> {valor} "
+              f"({'standby' if valor == 0 else 'maletin' if valor == 1 else 'banda'})")
+
+    def leer_modo(self):
+        """Lee SysMode del PLC."""
+        return self._r(ADDR_SYSMODE)
+
+    # -----------------------------------------------------------------------
+    # BANDA TRANSPORTADORA + VFD
+    # -----------------------------------------------------------------------
+    def _dir_banda(self, direccion):
+        if direccion is None:
+            return None
+        if isinstance(direccion, int):
+            if direccion not in (0, 1):
+                raise ValueError("La direccion debe ser 0 (derecha) o 1 (izquierda).")
+            return direccion
+        clave = str(direccion).lower()
+        if clave not in BAND_DIR:
+            raise ValueError(f"Direccion no valida: {direccion}. Usa 'derecha' o 'izquierda'.")
+        return BAND_DIR[clave]
+
+    def configurar_banda(self, frecuencia_hz=None, espera_s1=None, espera_s2=None,
+                         retrigger_s1=None, retrigger_s2=None, direccion=None):
+        """Escribe la configuracion de la banda SIN habilitarla.
+
+        frecuencia_hz  : referencia de frecuencia al VFD (BandFreqRef, %R00009).
+        espera_s1/s2   : segundos que la banda se detiene al detectar S1 / S2.
+        retrigger_s1/s2: bloqueo anti-retrigger tras el rearranque (segundos).
+        direccion      : 'derecha' (VFD 18) o 'izquierda' (VFD 34).
+        """
+        if frecuencia_hz is not None:
+            hz = int(frecuencia_hz)
+            if hz < 0 or hz > 32767:
+                raise ValueError("La frecuencia debe estar entre 0 y 32767 Hz.")
+            self._w(ADDR_BAND_FREQ_REF, hz)
+
+        for valor, addr, etiqueta in (
+            (espera_s1, ADDR_BAND_S1_PRESET, "espera de S1"),
+            (espera_s2, ADDR_BAND_S2_PRESET, "espera de S2"),
+            (retrigger_s1, ADDR_BAND_S1_RETRIG, "anti-retrigger de S1"),
+            (retrigger_s2, ADDR_BAND_S2_RETRIG, "anti-retrigger de S2"),
+        ):
+            if valor is None:
+                continue
+            v = int(valor)
+            if v < 0 or v > 32767:
+                raise ValueError(f"El tiempo de {etiqueta} debe estar entre 0 y 32767 s.")
+            self._w(addr, v)
+
+        d = self._dir_banda(direccion)
+        if d is not None:
+            self._w(ADDR_BAND_DIR, d)
+
+        print(
+            "BANDA configurada"
+            + (f" | frecuencia={frecuencia_hz} Hz" if frecuencia_hz is not None else "")
+            + (f" | espera S1={espera_s1} s" if espera_s1 is not None else "")
+            + (f" | espera S2={espera_s2} s" if espera_s2 is not None else "")
+            + (f" | retrigger S1={retrigger_s1} s" if retrigger_s1 is not None else "")
+            + (f" | retrigger S2={retrigger_s2} s" if retrigger_s2 is not None else "")
+            + (f" | direccion={'izquierda' if d == 1 else 'derecha'}" if d is not None else "")
+        )
+
+    def habilitar_banda(self, on=True):
+        """Arranca o detiene la banda (SysMode=2 + BandCmdWord).
+
+        Al apagarla se vuelve a standby: el ladder pone el VFD en paro (1) y
+        Q10/Q11/Q12 regresan al control del motor por salida."""
+        if on:
+            self._w(ADDR_CMD, 0)            # el maletin no puede estar activo a la vez
+            self._w(ADDR_SYSMODE, SYSMODE_BANDA)
+            self._w(ADDR_BAND_CMD, 1)
+            print("BANDA HABILITADA (SysMode=2)")
+        else:
+            self._w(ADDR_BAND_CMD, 0)
+            self._w(ADDR_SYSMODE, SYSMODE_STANDBY)
+            print("BANDA DESHABILITADA (standby, VFD en paro)")
+
+    def parar_banda(self):
+        """Paro de la banda dejando la configuracion escrita."""
+        self.habilitar_banda(False)
+
+    def banda_frecuencia(self, hz):
+        """Cambia la referencia de frecuencia del VFD en caliente."""
+        self.configurar_banda(frecuencia_hz=hz)
+
+    def banda_direccion(self, direccion):
+        """Cambia el sentido de giro ('derecha' = 18 | 'izquierda' = 34)."""
+        self.configurar_banda(direccion=direccion)
+
+    def reset_vfd(self):
+        """Pulso de reset al VFD. El ladder lo auto-limpia en el siguiente scan."""
+        self._w(ADDR_BAND_VFD_RESET, 1)
+        print("VFD: reset enviado")
+
+    def leer_banda(self):
+        """Estado de la banda: comando al VFD, velocidad real y torreta."""
+        control = self._r(ADDR_VFD_CONTROL)
+        vel_hmi = self._r(ADDR_VFD_SPEED_HMI)
+        freq_raw = self._r(ADDR_VFD_FREQ_READ)
+        idx = self._r(ADDR_INDEX)
+        status = self._r(ADDR_STATUS)
+        productos = self._r(ADDR_BAND_PROD_COUNT)
+
+        # S1/S2 son NC: el ladder los normaliza con NOT I[]. Aqui se replica
+        # sobre los bits crudos de ComboIndex (bit2 = I3, bit3 = I4).
+        s1 = 0 if (idx >> 2) & 1 else 1
+        s2 = 0 if (idx >> 3) & 1 else 1
+
+        datos = {
+            "vfd_control": control,
+            "marcha": control in (VFD_CMD_DERECHA, VFD_CMD_IZQUIERDA),
+            "direccion": ("izquierda" if control == VFD_CMD_IZQUIERDA
+                          else "derecha" if control == VFD_CMD_DERECHA else "paro"),
+            "velocidad_hz": vel_hmi,
+            "velocidad_raw": freq_raw,
+            "S1": s1,
+            "S2": s2,
+            "productos": productos,
+            "torreta": {
+                "verde": status & 1,
+                "amarilla": (status >> 1) & 1,
+                "roja": (status >> 2) & 1,
+            },
+        }
+
+        print(
+            f"BANDA | VFD={control} ({datos['direccion']}) "
+            f"vel={vel_hmi} Hz | S1={s1} S2={s2} | "
+            f"productos={productos} | "
+            f"torreta V={datos['torreta']['verde']} "
+            f"A={datos['torreta']['amarilla']} R={datos['torreta']['roja']}"
+        )
+
+        return datos
+
+    def leer_contador_productos(self):
+        """Productos contados por la banda (BandProdCount publicado en %R00097).
+
+        El ladder incrementa el contador cada vez que S1 completa su espera y
+        libera la banda; al llegar a BAND_PROD_COUNT_MAX vuelve a 0. Es
+        retentivo en el PLC: sobrevive a un corte de energia."""
+        n = self._r(ADDR_BAND_PROD_COUNT)
+        print(f"BANDA: productos contados = {n}")
+        return n
+
+    # -----------------------------------------------------------------------
     # RESET GENERAL
     # -----------------------------------------------------------------------
     def reset_todo(self, borrar_acumulados=True):
         self._w(ADDR_CMD, 0)
+
+        # Standby: apaga banda y VFD antes de reconfigurar. Si SysMode quedara
+        # en 2 de una carga anterior, la torreta seguiria mandando en Q10..Q12.
+        self._w(ADDR_BAND_CMD, 0)
+        self._w(ADDR_SYSMODE, SYSMODE_STANDBY)
 
         # Apagar el secuenciador antes que nada (si quedo activo de una carga
         # anterior, dejaria de controlar las salidas al reconfigurar).
@@ -602,9 +904,14 @@ class XL4:
         Q11 = (status >> 1) & 1
         Q12 = (status >> 2) & 1
 
+        # I3/I4 son ademas los sensores NC de la banda (S1/S2 = NOT I[]).
+        S1 = 0 if I3 else 1
+        S2 = 0 if I4 else 1
+
         print(
             f"Entradas electricas: "
             f"I1={I1} I2={I2} I3={I3} I4={I4} I7={I7}  |  "
+            f"Banda: S1={S1} S2={S2}  |  "
             f"Salidas: Q10={Q10} Q11={Q11} Q12={Q12}"
         )
 
@@ -699,11 +1006,13 @@ def validar_config(cfg) -> list:
 
     outputs = cfg.get("outputs")
     seq = cfg.get("sequence")
+    band = cfg.get("band")
     if not isinstance(outputs, list):
         outputs = []
-    # Una config valida necesita al menos salidas O una secuencia.
-    if not outputs and not seq:
-        errores.append("Falta 'outputs' o esta vacio: debe haber al menos una salida (o una 'sequence').")
+    # Una config valida necesita al menos salidas, una secuencia o la banda.
+    if not outputs and not seq and not band:
+        errores.append("Falta 'outputs' o esta vacio: debe haber al menos una salida "
+                       "(o una 'sequence', o un bloque 'band').")
 
     vistos = set()
     for i, o in enumerate(outputs):
@@ -776,11 +1085,59 @@ def validar_config(cfg) -> list:
     if seq is not None:
         errores.extend(_validar_secuencia(seq))
 
+    if band is not None:
+        errores.extend(_validar_banda(band))
+
     sysc = cfg.get("system") or {}
     if not isinstance(sysc, dict):
         errores.append("'system' no es un objeto.")
-    elif not _es_entrada_valida(sysc.get("global_stop")):
-        errores.append(f"system.global_stop='{sysc.get('global_stop')}' no es una entrada valida.")
+    else:
+        if not _es_entrada_valida(sysc.get("global_stop")):
+            errores.append(f"system.global_stop='{sysc.get('global_stop')}' no es una entrada valida.")
+        modo = sysc.get("mode")
+        if modo is not None and str(modo).lower() not in SYSMODES:
+            errores.append(f"system.mode='{modo}' debe ser {sorted(SYSMODES.keys())}.")
+
+    # El ladder nuevo usa I3/I4 como sensores NC de la banda (S1/S2). Mezclar
+    # banda y motor sobre esas entradas deja el estado NA/NC ambiguo.
+    if band and _banda_activa(band):
+        if seq:
+            errores.append("No se puede activar la banda y el secuenciador a la vez "
+                           "(la torreta sobreescribe Q10/Q11/Q12).")
+        for i, o in enumerate(outputs):
+            if not isinstance(o, dict):
+                continue
+            lg = o.get("logic") or {}
+            usadas = [str(lg.get(c)).upper() for c in ("source", "start", "stop", "a", "b", "enable")
+                      if lg.get(c)]
+            if BAND_SENSOR_S1 in usadas or BAND_SENSOR_S2 in usadas:
+                errores.append(f"salida {i + 1} ({o.get('output')}): I3/I4 estan reservadas "
+                               "como sensores S1/S2 de la banda; no se pueden usar en la "
+                               "logica del maletin mientras la banda este activa.")
+
+    return errores
+
+
+def _banda_activa(band) -> bool:
+    """True si el bloque 'band' del JSON pide arrancar la banda."""
+    return isinstance(band, dict) and bool(band.get("enable", True))
+
+
+def _validar_banda(band) -> list:
+    """Valida el bloque 'band' del JSON. Espejo de la seccion 12 del ladder."""
+    errores = []
+    if not isinstance(band, dict):
+        return ["'band' no es un objeto."]
+
+    if band.get("freq_hz") is not None:
+        _entero_en_rango(band.get("freq_hz"), 0, 32767, "band.freq_hz", errores)
+    for campo in ("wait_s1_s", "wait_s2_s", "retrigger_s1_s", "retrigger_s2_s"):
+        if band.get(campo) is not None:
+            _entero_en_rango(band.get(campo), 0, 32767, f"band.{campo}", errores)
+
+    d = band.get("direction")
+    if d is not None and str(d).lower() not in BAND_DIR:
+        errores.append(f"band.direction='{d}' debe ser 'derecha' o 'izquierda'.")
 
     return errores
 
@@ -873,10 +1230,29 @@ def plan_config(cfg) -> list:
         plan.append(("configurar_secuencia", (seq.get("start"), seq.get("steps")),
                      {"mode": seq.get("mode", "once"), "reset": seq.get("reset")}))
 
+    band = cfg.get("band")
+    banda_on = _banda_activa(band)
+    if isinstance(band, dict):
+        plan.append(("configurar_banda", (), {
+            "frecuencia_hz": band.get("freq_hz"),
+            "espera_s1": band.get("wait_s1_s"),
+            "espera_s2": band.get("wait_s2_s"),
+            "retrigger_s1": band.get("retrigger_s1_s", BAND_S1_RETRIG_DEFAULT),
+            "retrigger_s2": band.get("retrigger_s2_s", BAND_S2_RETRIG_DEFAULT),
+            "direccion": band.get("direction"),
+        }))
+
     sysc = cfg.get("system") or {}
     if sysc.get("global_stop"):
         plan.append(("paro_general", (sysc["global_stop"],), {}))
-    if sysc.get("enable", True):
+
+    # Selector de equipo: SysMode=2 manda la banda, SysMode=1 el maletin.
+    # Solo uno puede quedar activo (lo exige el ladder en 4 y 12.0).
+    if banda_on:
+        plan.append(("habilitar_banda", (True,), {}))
+    elif str(sysc.get("mode", "maletin")).lower() == "banda":
+        plan.append(("seleccionar_modo", ("banda",), {}))
+    elif sysc.get("enable", True):
         plan.append(("habilitar", (True,), {}))
 
     return plan
