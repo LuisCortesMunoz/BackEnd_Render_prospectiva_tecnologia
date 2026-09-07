@@ -332,7 +332,61 @@ JSON: {"name":"Semaforo I1","device_profile":"maletin_basico","reset_before":tru
             {"outputs":["Q12"],"duration_s":5}]},
  "outputs":[]}
 Nota: se usa "sequence" (no timers por salida) y "outputs" va vacio. Cada paso enciende UNA
-salida por su duracion y avanza solo; "once" = se ejecuta una vez por cada pulsacion de I1."""
+salida por su duracion y avanza solo; "once" = se ejecuta una vez por cada pulsacion de I1.
+
+BANDA TRANSPORTADORA (equipo SEPARADO del maletin) — MUY IMPORTANTE:
+El mismo PLC controla DOS equipos y solo UNO puede estar activo a la vez:
+  - MALETIN: los botones y lamparas descritos arriba.
+  - BANDA transportadora: motor con VFD, dos sensores y una torreta de 3 luces.
+Usa el bloque "band" SOLO cuando el usuario hable de: la banda, la cinta, el VFD, el
+variador, la velocidad o frecuencia del motor, los sensores S1/S2, la torreta, o de
+mover/detener/invertir la banda. Para todo lo demas sigue usando "outputs"/"sequence".
+
+Hardware de la banda (no inventes nada fuera de esto):
+- VFD (variador): mueve la banda hacia la derecha o hacia la izquierda, a una
+  frecuencia en Hz. Solo esos dos sentidos.
+- Sensor S1 y sensor S2: detectan una pieza sobre la banda. Cuando uno detecta,
+  la banda se DETIENE los segundos indicados y despues sigue sola.
+- Torreta de 3 luces: verde (corriendo), amarilla (pieza saliendo del sensor),
+  roja (detenida esperando). La maneja el PLC por su cuenta: NUNCA la pongas en
+  "outputs" ni en "sequence".
+
+Esquema de "band":
+  {
+    "enable": true,          // true = arrancar la banda
+    "direction": "derecha",  // "derecha" o "izquierda" (default "derecha")
+    "freq_hz": 35,           // frecuencia del VFD en Hz, entero 0..32767; null si no se menciona
+    "wait_s1_s": 5,          // segundos detenida cuando S1 detecta; null si no aplica
+    "wait_s2_s": 3,          // segundos detenida cuando S2 detecta; null si no aplica
+    "retrigger_s1_s": 8,     // bloqueo tras rearrancar por S1 (default 8)
+    "retrigger_s2_s": 12     // bloqueo tras rearrancar por S2 (default 12)
+  }
+Reglas de la banda:
+- Cuando uses "band", el arreglo "outputs" va VACIO: [] y NO uses "sequence".
+- I3 e I4 SON los sensores S1 y S2: no los uses en la logica del maletin si hay banda.
+- Si el usuario solo dice "mueve la banda", pon enable y direction (mas freq_hz si
+  menciona velocidad o Hz) y deja wait_s1_s y wait_s2_s en null: sin sensores no hay paros.
+- "detener la banda cuando S1 detecte una pieza durante 5 segundos" -> wait_s1_s: 5.
+- Solo cambia retrigger_s1_s / retrigger_s2_s si el usuario habla de ese bloqueo;
+  si no lo menciona, deja los valores por defecto (8 y 12).
+- Los segundos y los Hz son enteros. Nunca inventes sensores, salidas ni sentidos nuevos.
+
+EJEMPLO de banda simple (peticion -> JSON):
+Peticion: "Mueve la banda hacia la derecha a 40 Hz."
+JSON: {"name":"Banda a la derecha","device_profile":"maletin_basico","reset_before":true,
+ "system":{"enable":true,"global_stop":null},
+ "band":{"enable":true,"direction":"derecha","freq_hz":40,
+   "wait_s1_s":null,"wait_s2_s":null,"retrigger_s1_s":8,"retrigger_s2_s":12},
+ "outputs":[]}
+
+EJEMPLO de banda con sensor (peticion -> JSON):
+Peticion: "La banda avanza a 30 Hz y se detiene 5 segundos cuando S1 detecta una pieza."
+JSON: {"name":"Banda con paro por S1","device_profile":"maletin_basico","reset_before":true,
+ "system":{"enable":true,"global_stop":null},
+ "band":{"enable":true,"direction":"derecha","freq_hz":30,
+   "wait_s1_s":5,"wait_s2_s":null,"retrigger_s1_s":8,"retrigger_s2_s":12},
+ "outputs":[]}
+Nota: la torreta NO se declara; el PLC la enciende sola (verde corriendo, roja esperando)."""
 
 
 def _expr_de_logica(lg: dict, salida: str) -> str:
@@ -390,11 +444,13 @@ def validar_logica_config(cfg: dict, perfil: dict = None) -> list:
         return ["El JSON raiz no es un objeto."]
     outputs = cfg.get("outputs")
     seq = cfg.get("sequence")
+    band = cfg.get("band")
     if not isinstance(outputs, list):
         outputs = []
-    # Una config valida necesita al menos salidas O una secuencia.
-    if not outputs and not seq:
-        return ["Falta 'outputs' o esta vacio: debe haber al menos una salida (o una 'sequence')."]
+    # Una config valida necesita al menos salidas, una secuencia O la banda.
+    if not outputs and not seq and not band:
+        return ["Falta 'outputs' o esta vacio: debe haber al menos una salida "
+                "(o una 'sequence', o un bloque 'band')."]
 
     vistos = set()
     for i, o in enumerate(outputs):
@@ -485,9 +541,58 @@ def validar_logica_config(cfg: dict, perfil: dict = None) -> list:
     if seq is not None:
         errores.extend(_validar_secuencia_cfg(seq, perfil))
 
+    if band is not None:
+        errores.extend(_validar_banda_cfg(band))
+
+    # I3/I4 son los sensores S1/S2 de la banda: mezclarlos con la logica del
+    # maletin deja el estado NA/NC ambiguo (mismo criterio que plc_maestro).
+    if isinstance(band, dict) and band.get("enable", True):
+        if seq:
+            errores.append("No se puede usar 'band' y 'sequence' a la vez "
+                           "(la torreta sobreescribe Q10/Q11/Q12).")
+        for i, o in enumerate(outputs):
+            if not isinstance(o, dict):
+                continue
+            lg = o.get("logic") or {}
+            usadas = {str(lg.get(c)).upper() for c in
+                      ("source", "start", "stop", "a", "b", "enable") if lg.get(c)}
+            if usadas & {"I3", "I4"}:
+                errores.append(f"salida {i + 1} ({o.get('output')}): I3/I4 estan "
+                               "reservadas como sensores S1/S2 de la banda.")
+
     sysc = cfg.get("system") or {}
     if not _entrada_valida(sysc.get("global_stop"), entradas):
         errores.append(f"system.global_stop='{sysc.get('global_stop')}' invalido.")
+    return errores
+
+
+BAND_DIRS = {"derecha", "right", "der", "cw", "izquierda", "left", "izq", "ccw"}
+
+
+def _validar_banda_cfg(band) -> list:
+    """Valida el bloque 'band' (banda transportadora + VFD). Espejo exacto de
+    _validar_banda en plc_maestro.py y de validarBanda en el frontend."""
+    errores = []
+    if not isinstance(band, dict):
+        return ["'band' no es un objeto."]
+
+    for campo, low in (("freq_hz", 0), ("wait_s1_s", 0), ("wait_s2_s", 0),
+                       ("retrigger_s1_s", 0), ("retrigger_s2_s", 0)):
+        v = band.get(campo)
+        if v is None:
+            continue
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            errores.append(f"band.{campo}: '{v}' no es entero.")
+            continue
+        if n < low or n > 32767:
+            errores.append(f"band.{campo}: {n} fuera de [{low}, 32767].")
+
+    d = band.get("direction")
+    if d is not None and str(d).lower() not in BAND_DIRS:
+        errores.append(f"band.direction='{d}' debe ser 'derecha' o 'izquierda'.")
+
     return errores
 
 
@@ -562,6 +667,19 @@ def normalizar_logica_config(cfg: dict) -> dict:
         for st in seq.get("steps", []):
             if isinstance(st, dict) and isinstance(st.get("outputs"), list):
                 st["outputs"] = [str(o).upper() for o in st["outputs"]]
+    # Banda: mismos defaults que aplica plc_maestro, para que el dibujo del
+    # frontend y lo que se escribe al PLC coincidan exactamente.
+    band = cfg.get("band")
+    if isinstance(band, dict):
+        band.setdefault("enable", True)
+        band["direction"] = str(band.get("direction") or "derecha").lower()
+        band.setdefault("freq_hz", None)
+        band.setdefault("wait_s1_s", None)
+        band.setdefault("wait_s2_s", None)
+        if band.get("retrigger_s1_s") is None:
+            band["retrigger_s1_s"] = 8
+        if band.get("retrigger_s2_s") is None:
+            band["retrigger_s2_s"] = 12
     return cfg
 
 # ─── Carga de contexto JSON ──────────────────────────────────────
