@@ -6,13 +6,14 @@
 # Memoria   : memoria/ejemplos.json       (feedback del usuario → mejores respuestas)
 
 import os, re, json, time, logging, datetime, threading
+import hmac, hashlib, asyncio
 import socket, ipaddress, subprocess, platform
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -41,6 +42,15 @@ MAX_AUDIO_MB  = int(os.environ.get("MAX_AUDIO_MB",  "25"))
 GROQ_API_KEY     = os.environ.get("GROQ_API_KEY")
 GROQ_API_KEY_STT = os.environ.get("GROQ_API_KEY_stt")
 ADMIN_TOKEN      = os.environ.get("ADMIN_TOKEN", "")
+
+# Contrasena de acceso a la herramienta. Se define en Render -> Environment.
+# Si esta vacia la proteccion queda DESACTIVADA y el backend se comporta como
+# siempre: asi el puente local del PLC (misma app.py corriendo en la red del
+# PLC, sin variables) sigue funcionando y no hay forma de quedarse fuera por
+# olvidar definirla.
+APP_PASSWORD     = os.environ.get("APP_PASSWORD", "").strip()
+# Duracion de la sesion antes de volver a pedir la contrasena.
+APP_SESSION_HORAS = int(os.environ.get("APP_SESSION_HORAS", "12"))
 
 # El puente local al PLC (Modbus) no necesita Groq. Si la llave no esta
 # presente (p. ej. corriendo en la red del PLC, con las llaves solo en
@@ -1459,6 +1469,81 @@ ALLOWED_ORIGINS = os.environ.get(
 ).split(",")
 ALLOWED_ORIGINS = [o.strip() for o in ALLOWED_ORIGINS if o.strip()]
 
+# ─── Acceso con contrasena (APP_PASSWORD) ────────────────────────
+# La contrasena se define en Render -> Environment. El navegador la manda una
+# vez a /login y recibe a cambio un token firmado; a partir de ahi lo envia en
+# la cabecera Authorization. No se guarda ninguna sesion en el servidor: el
+# token se verifica con HMAC, asi sigue siendo valido aunque Render reinicie
+# el proceso o levante varios workers.
+#
+# Cambiar APP_PASSWORD invalida automaticamente todos los tokens emitidos,
+# porque la contrasena es la llave con la que se firman.
+
+# Rutas que siguen abiertas: la portada, el estado del servicio y el propio
+# login. Las de /admin ya tienen su propio ADMIN_TOKEN.
+RUTAS_ABIERTAS = {"/", "/api", "/health", "/login", "/ladder",
+                  "/docs", "/redoc", "/openapi.json", "/favicon.ico"}
+
+
+def _crear_token() -> str:
+    """Token 'expiracion.firma' firmado con la contrasena como llave HMAC."""
+    exp = int(time.time()) + APP_SESSION_HORAS * 3600
+    firma = hmac.new(APP_PASSWORD.encode(), str(exp).encode(), hashlib.sha256).hexdigest()
+    return f"{exp}.{firma}"
+
+
+def _token_valido(token: str) -> bool:
+    if not token or "." not in token:
+        return False
+    exp_txt, firma = token.split(".", 1)
+    if not exp_txt.isdigit() or int(exp_txt) < time.time():
+        return False
+    esperada = hmac.new(APP_PASSWORD.encode(), exp_txt.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(firma, esperada)
+
+
+# OJO con el orden: este middleware se registra ANTES que CORSMiddleware, para
+# que CORS quede por fuera. Starlette ejecuta primero el ultimo registrado, y
+# si el 401 saliera sin cabeceras CORS el navegador reportaria un error de CORS
+# en vez del 401 y el front no podria distinguir "sesion caducada".
+@app.middleware("http")
+async def proteger_con_password(request: Request, call_next):
+    if not APP_PASSWORD:                       # proteccion desactivada
+        return await call_next(request)
+    ruta = request.url.path
+    # El preflight de CORS nunca lleva cabecera Authorization.
+    if (request.method == "OPTIONS" or ruta in RUTAS_ABIERTAS
+            or ruta.startswith("/static") or ruta.startswith("/admin")):
+        return await call_next(request)
+
+    cabecera = request.headers.get("authorization", "")
+    token = cabecera[7:].strip() if cabecera[:7].lower() == "bearer " else ""
+    if not _token_valido(token):
+        return JSONResponse(
+            {"detail": "Sesion no valida o caducada. Vuelve a introducir la contrasena."},
+            status_code=401,
+        )
+    return await call_next(request)
+
+
+class LoginRequest(BaseModel):
+    password: str
+
+
+@app.post("/login")
+async def login(req: LoginRequest):
+    """Cambia la contrasena por un token de sesion."""
+    if not APP_PASSWORD:
+        # Sin contrasena configurada no hay nada que proteger; se responde OK
+        # para que el front no bloquee la herramienta.
+        return {"status": "sin_password", "token": "", "expira_en_h": 0}
+    if not hmac.compare_digest(req.password.strip(), APP_PASSWORD):
+        # Retardo fijo: encarece el probar contrasenas a lo bruto.
+        await asyncio.sleep(1.0)
+        raise HTTPException(401, "Contrasena incorrecta.")
+    return {"status": "ok", "token": _crear_token(), "expira_en_h": APP_SESSION_HORAS}
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -1743,6 +1828,10 @@ def api_info():
 def health():
     return {
         "status":             "ok",
+        # El front lo consulta al abrir la pagina: si es False no muestra la
+        # pantalla de contrasena (backend sin APP_PASSWORD, p. ej. el puente
+        # local del PLC).
+        "password_requerida": bool(APP_PASSWORD),
         "modelo_ladder":      MODELO,
         "stt_configurado":    groq_client_stt is not None,
         "modelo_stt":         MODELO_STT,
