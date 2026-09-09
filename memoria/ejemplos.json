@@ -127,7 +127,7 @@
    "seal-in",
    "stop"
   ],
-  "uses": 1
+  "uses": 2
  },
  {
   "id": "ej_20260612_011309_322352",
@@ -145,28 +145,60 @@
        "fila": 0,
        "descripcion": "logica serie principal",
        "elementos": [
-        {"tipo": "XIC", "operando": "%I1", "descripcion": "boton arranque"},
-        {"tipo": "XIO", "operando": "%I2", "descripcion": "boton paro NC"},
-        {"tipo": "OTE", "operando": "%Q12", "descripcion": "lampara roja"}
+        {
+         "tipo": "XIC",
+         "operando": "%I1",
+         "descripcion": "boton arranque"
+        },
+        {
+         "tipo": "XIO",
+         "operando": "%I2",
+         "descripcion": "boton paro NC"
+        },
+        {
+         "tipo": "OTE",
+         "operando": "%Q12",
+         "descripcion": "lampara roja"
+        }
        ]
       },
       {
        "fila": 1,
        "descripcion": "auto-retencion, solo el contacto",
        "elementos": [
-        {"tipo": "XIC", "operando": "%Q12", "descripcion": "contacto de memoria"}
+        {
+         "tipo": "XIC",
+         "operando": "%Q12",
+         "descripcion": "contacto de memoria"
+        }
        ]
       }
      ]
     }
    ],
-   "variables_usadas": {"entradas": ["%I1", "%I2"], "salidas": ["%Q12"], "marcas": [], "registros": []}
+   "variables_usadas": {
+    "entradas": [
+     "%I1",
+     "%I2"
+    ],
+    "salidas": [
+     "%Q12"
+    ],
+    "marcas": [],
+    "registros": []
+   }
   },
   "user_correction": null,
   "error_explanation": null,
   "final_ladder_json": null,
   "status": "accepted",
-  "tags": ["Horner_XL4", "button", "output", "seal-in", "stop"],
-  "uses": 0
+  "tags": [
+   "Horner_XL4",
+   "button",
+   "output",
+   "seal-in",
+   "stop"
+  ],
+  "uses": 1
  }
 ]
