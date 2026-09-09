@@ -135,8 +135,22 @@ SENSOR_ACTIONS = {
 }
 
 # Sensores fisicos: S1 = %I0004 -> I[3] ; S2 = %I0005 -> I[4]. Ambos NC (el
-# ladder los invierte con NOT). No hay mas entradas expuestas en este PLC.
+# ladder los invierte con NOT).
 SENSORES = {1: "S1", 2: "S2"}
+
+# Botonera fisica del tablero (Ladder v2.0, seccion 1b). NO se controla por
+# Modbus: el ladder la lee directo y el backend solo puede OBSERVAR su efecto.
+#   %I0001 -> I[0]  I1  NA  arranque: flanco de subida pone BandEnable = 1
+#   %I0002 -> I[1]  I2  NC  RESERVADO, sin funcion asignada en el ladder
+#   %I0003 -> I[2]  I3  NC  paro: fuerza GenStop y pone BandEnable = 0
+# I3 tiene prioridad sobre todo lo demas, incluido este backend: mientras
+# este presionado el ladder borra BandEnable en cada scan, asi que un
+# habilitar() por Modbus no surte efecto (ver el aviso en habilitar()).
+BOTONES = {
+    "I1": {"addr": "%I0001", "tipo": "NA", "funcion": "arranque"},
+    "I2": {"addr": "%I0002", "tipo": "NC", "funcion": None},
+    "I3": {"addr": "%I0003", "tipo": "NC", "funcion": "paro"},
+}
 
 # Bit de cada lampara dentro de una mascara de torreta (0..7)
 TORRETA_BIT = {"verde": 1, "amarilla": 2, "roja": 4}
@@ -151,6 +165,7 @@ STATUS_BITS = [
     (32,  "s2_count_done"),  # b5 contador S2 alcanzo preset
     (64,  "init_armed"),     # b6 secuencia init completa
     (128, "gen_stop"),       # b7 parada general activa
+    (256, "stop_button"),    # b8 boton fisico de paro I3 presionado
 ]
 
 INIT_SEQ_ESTADOS = {
@@ -342,9 +357,24 @@ class BandaPLC:
 
     # -- §8/§9  marcha y paro ---------------------------------------------
     def habilitar(self, on=True):
-        """BandEnable (%R1). Con 0 el ladder fuerza GenStop y VFD en paro."""
+        """BandEnable (%R1). Con 0 el ladder fuerza GenStop y VFD en paro.
+
+        El boton fisico de paro I3 tiene prioridad sobre este registro: si
+        esta presionado, el ladder vuelve a poner BandEnable en 0 en el
+        siguiente scan y la banda no arranca. Se avisa en vez de dejar que
+        el comando se pierda en silencio."""
         self._w(ADDR_BAND_ENABLE, 1 if on else 0)
         print(f"BANDA {'HABILITADA' if on else 'DETENIDA'}")
+        if on and self.paro_por_boton():
+            print("AVISO: el boton fisico de paro (I3) esta presionado; "
+                  "la banda NO arrancara hasta que se libere y se pulse I1.")
+
+    def paro_por_boton(self) -> bool:
+        """True si el boton fisico de paro I3 esta presionado (BandStatus b8).
+
+        Es la unica via para distinguir un paro por botonera de los demas
+        motivos de gen_stop (sensor, secuencia init, BandEnable=0)."""
+        return bool(self._r(ADDR_BAND_STATUS) & 256)
 
     def parar(self):
         self.habilitar(False)

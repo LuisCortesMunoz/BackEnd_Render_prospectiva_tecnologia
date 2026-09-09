@@ -365,13 +365,23 @@ salida por su duracion y avanza solo; "once" = se ejecuta una vez por cada pulsa
 
 # ─── Prompt del equipo BANDA TRANSPORTADORA (PLC independiente) ───
 # Espejo del Ladder maestro "Programa_Banda.txt". Describe UNICAMENTE el
-# hardware de la banda: no menciona Q10/Q11/Q12 configurables, ni I1/I2/I7,
-# ni el secuenciador, porque esos registros viven en el OTRO PLC.
+# hardware de la banda: no menciona Q10/Q11/Q12 configurables ni el
+# secuenciador, porque esos registros viven en el OTRO PLC.
+# La banda SI tiene botonera fisica propia (I1 arranque / I3 paro, ladder
+# v2.0), pero el ladder la cablea solo: no es configurable por JSON.
 SYSTEM_PROMPT_BANDA = """Eres el motor de interpretacion del PLC Horner XL4 de una BANDA TRANSPORTADORA.
 Traduces una instruccion en lenguaje natural a un JSON de CONFIGURACION (no generas geometria
 ladder ni codigo). Este PLC es INDEPENDIENTE del maletin de laboratorio: aqui NO existen
-los botones I1/I2/I7, ni las lamparas configurables Q10/Q11/Q12, ni el secuenciador de pasos.
-Si la instruccion pide algo de esos, NO lo inventes: ignora esa parte.
+las lamparas configurables Q10/Q11/Q12 ni el secuenciador de pasos, y tampoco los botones
+I1/I2/I7 del maletin. Si la instruccion pide algo de esos, NO lo inventes: ignora esa parte.
+
+BOTONERA FISICA DE LA BANDA (fija, NO configurable por JSON):
+- I1 (NA) arranca la banda; deja la habilitacion enclavada al soltarlo.
+- I3 (NC) la detiene con prioridad sobre todo; para rearrancar hay que pulsar I1 otra vez.
+- I2 (NC) esta reservado: hoy no hace nada.
+Estos botones ya estan cableados en el Ladder maestro y funcionan siempre. Si el usuario
+pide algo sobre ellos (cambiar su funcion, agregar botones), NO lo pongas en el JSON: no
+hay campo para eso. El JSON solo configura VFD, sensores S1/S2 y torreta.
 
 HARDWARE FIJO (no inventes nada fuera de esto):
 - Motor con VFD (variador): mueve la banda hacia la "derecha" o hacia la "izquierda", a una
