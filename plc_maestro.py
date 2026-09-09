@@ -553,9 +553,45 @@ class XL4:
             self._w(R(SEQ_MASK_BASE + i), mask)
             self._w(R(SEQ_DUR_BASE + i), dur)
 
+        # Relectura ANTES de activar: si un registro del secuenciador no
+        # conserva lo que se le escribio, es que otra variable del Ladder
+        # maestro ocupa esa direccion y la sobreescribe en cada scan. Con el
+        # ladder actual un SeqDur en 0 CONGELA el paso (se queda encendido
+        # para siempre), asi que mas vale no activar la secuencia y decir
+        # exactamente que registro fallo.
+        problemas = self._verificar_secuencia(steps)
+        if problemas:
+            raise ValueError(
+                "La secuencia no se pudo grabar en el PLC:\n  - "
+                + "\n  - ".join(problemas)
+                + "\n  Esas direcciones las esta escribiendo el propio Ladder "
+                  "maestro: revisa en Cscape que variable las tiene asignada "
+                  "y liberala (la secuencia NO se activo).")
+
         self._w(ADDR_SEQ_ENABLE, 1)
         print(f"SECUENCIA activada: arranque={start} modo={mode} pasos={len(steps)}"
               + (f" reset={reset}" if reset else ""))
+
+    def _verificar_secuencia(self, steps) -> list:
+        """Relee mascaras y duraciones y devuelve los pasos que no cuadran."""
+        problemas = []
+        for i in range(len(steps)):
+            esperado_dur = int(steps[i].get("duration_s", 0))
+            leido_dur = self._r(R(SEQ_DUR_BASE + i))
+            if leido_dur != esperado_dur:
+                problemas.append(
+                    f"paso {i + 1}: se escribio duracion {esperado_dur} s en "
+                    f"%R{SEQ_DUR_BASE + i} pero el PLC devuelve {leido_dur}")
+
+            esperado_mask = 0
+            for o in steps[i].get("outputs", []):
+                esperado_mask |= OUT_BIT[str(o).upper()]
+            leido_mask = self._r(R(SEQ_MASK_BASE + i))
+            if leido_mask != esperado_mask:
+                problemas.append(
+                    f"paso {i + 1}: se escribio mascara {esperado_mask} en "
+                    f"%R{SEQ_MASK_BASE + i} pero el PLC devuelve {leido_mask}")
+        return problemas
 
     def quitar_secuencia(self):
         """Apaga el secuenciador (SeqEnable=0) y limpia su configuracion."""
