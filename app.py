@@ -63,6 +63,17 @@ if groq_client is None:
     log.warning("GROQ_API_KEY no configurada: la generacion (Groq/STT) estara "
                 "deshabilitada. Los endpoints del puente al PLC (/plc/*) si funcionan.")
 
+# ─── Selector de equipo (MODO MALETIN / MODO BANDA) ───────────────
+# Decide a que PLC pertenece cada instruccion ANTES de generar nada. Import
+# defensivo: si faltara el modulo, todo se comporta como el flujo historico
+# (maletin) en vez de tumbar el servidor.
+try:
+    import device_router
+    _ROUTER_OK = True
+except Exception as _e_router:
+    _ROUTER_OK = False
+    log.warning(f"device_router no disponible ({_e_router}); solo modo maletin.")
+
 # ─── Agente: modulos de la arquitectura nueva (aditivo, ver ARQUITECTURA_AGENTE.md) ─
 # Import defensivo: si faltaran los modulos/perfiles, el servidor arranca igual y
 # simplemente NO se aplica la deteccion de ambiguedad (mismo comportamiento que
@@ -342,61 +353,94 @@ JSON: {"name":"Semaforo I1","device_profile":"maletin_basico","reset_before":tru
             {"outputs":["Q12"],"duration_s":5}]},
  "outputs":[]}
 Nota: se usa "sequence" (no timers por salida) y "outputs" va vacio. Cada paso enciende UNA
-salida por su duracion y avanza solo; "once" = se ejecuta una vez por cada pulsacion de I1.
+salida por su duracion y avanza solo; "once" = se ejecuta una vez por cada pulsacion de I1."""
 
-BANDA TRANSPORTADORA (equipo SEPARADO del maletin) — MUY IMPORTANTE:
-El mismo PLC controla DOS equipos y solo UNO puede estar activo a la vez:
-  - MALETIN: los botones y lamparas descritos arriba.
-  - BANDA transportadora: motor con VFD, dos sensores y una torreta de 3 luces.
-Usa el bloque "band" SOLO cuando el usuario hable de: la banda, la cinta, el VFD, el
-variador, la velocidad o frecuencia del motor, los sensores S1/S2, la torreta, o de
-mover/detener/invertir la banda. Para todo lo demas sigue usando "outputs"/"sequence".
 
-Hardware de la banda (no inventes nada fuera de esto):
-- VFD (variador): mueve la banda hacia la derecha o hacia la izquierda, a una
+# ─── Prompt del equipo BANDA TRANSPORTADORA (PLC independiente) ───
+# Espejo del Ladder maestro "Programa_Banda.txt". Describe UNICAMENTE el
+# hardware de la banda: no menciona Q10/Q11/Q12 configurables, ni I1/I2/I7,
+# ni el secuenciador, porque esos registros viven en el OTRO PLC.
+SYSTEM_PROMPT_BANDA = """Eres el motor de interpretacion del PLC Horner XL4 de una BANDA TRANSPORTADORA.
+Traduces una instruccion en lenguaje natural a un JSON de CONFIGURACION (no generas geometria
+ladder ni codigo). Este PLC es INDEPENDIENTE del maletin de laboratorio: aqui NO existen
+los botones I1/I2/I7, ni las lamparas configurables Q10/Q11/Q12, ni el secuenciador de pasos.
+Si la instruccion pide algo de esos, NO lo inventes: ignora esa parte.
+
+HARDWARE FIJO (no inventes nada fuera de esto):
+- Motor con VFD (variador): mueve la banda hacia la "derecha" o hacia la "izquierda", a una
   frecuencia en Hz. Solo esos dos sentidos.
-- Sensor S1 y sensor S2: detectan una pieza sobre la banda. Cuando uno detecta,
-  la banda se DETIENE los segundos indicados y despues sigue sola.
-- Torreta de 3 luces: verde (corriendo), amarilla (pieza saliendo del sensor),
-  roja (detenida esperando). La maneja el PLC por su cuenta: NUNCA la pongas en
-  "outputs" ni en "sequence".
+- Sensor S1 y sensor S2: detectan una pieza sobre la banda. Son los unicos sensores.
+- Torreta de 3 luces: verde, amarilla, roja. Se declara con mascaras (ver abajo); el PLC
+  la enciende solo, nunca la pongas como "salidas".
 
-Esquema de "band":
-  {
-    "enable": true,          // true = arrancar la banda
-    "direction": "derecha",  // "derecha" o "izquierda" (default "derecha")
-    "freq_hz": 35,           // frecuencia del VFD en Hz, entero 0..32767; null si no se menciona
-    "wait_s1_s": 5,          // segundos detenida cuando S1 detecta; null si no aplica
-    "wait_s2_s": 3,          // segundos detenida cuando S2 detecta; null si no aplica
-    "retrigger_s1_s": 8,     // bloqueo tras rearrancar por S1 (default 8)
-    "retrigger_s2_s": 12     // bloqueo tras rearrancar por S2 (default 12)
-  }
-Reglas de la banda:
-- Cuando uses "band", el arreglo "outputs" va VACIO: [] y NO uses "sequence".
-- I3 e I4 SON los sensores S1 y S2: no los uses en la logica del maletin si hay banda.
-- Si el usuario solo dice "mueve la banda", pon enable y direction (mas freq_hz si
-  menciona velocidad o Hz) y deja wait_s1_s y wait_s2_s en null: sin sensores no hay paros.
-- "detener la banda cuando S1 detecte una pieza durante 5 segundos" -> wait_s1_s: 5.
-- Solo cambia retrigger_s1_s / retrigger_s2_s si el usuario habla de ese bloqueo;
-  si no lo menciona, deja los valores por defecto (8 y 12).
-- Los segundos y los Hz son enteros. Nunca inventes sensores, salidas ni sentidos nuevos.
+ACCIONES DE CADA SENSOR (elige una por sensor):
+  - "paro_temporizado" -> al detectar, la banda se DETIENE los segundos indicados y sigue sola.
+  - "paro_enclavado"   -> al detectar, se detiene los segundos indicados y QUEDA DETENIDA
+                          (hasta que se cargue un programa nuevo).
+  - "contar"           -> solo cuenta las piezas que pasan; la banda no se detiene.
+  - "contar_y_parar"   -> cuenta y, al llegar al conteo indicado, DETIENE la banda.
+  - "nada"             -> el sensor no hace nada.
 
-EJEMPLO de banda simple (peticion -> JSON):
+MASCARAS DE TORRETA (entero 0..7): verde=1, amarilla=2, roja=4; se suman.
+  ej.: verde+roja = 5 ; las tres = 7 ; ninguna = 0.
+
+ESQUEMA EXACTO:
+{
+  "name": "string",
+  "device": "banda",
+  "band": {
+    "enable": true,               // true = arrancar la banda ; false = dejarla parada
+    "direction": "derecha",       // "derecha" o "izquierda" (default "derecha")
+    "freq_hz": 35,                // frecuencia del VFD en Hz, entero 0..32767; null si no se menciona
+    "s1_action": "paro_temporizado",  // accion de S1 ; null si no se menciona S1
+    "wait_s1_s": 5,               // segundos detenida por S1 (acciones de paro); null si no aplica
+    "count_s1": null,             // piezas a contar en S1 (acciones de conteo); null si no aplica
+    "torreta_s1": null,           // mascara 0..7 mientras dura el evento de S1; null si no se menciona
+    "s2_action": null,            // lo mismo para S2
+    "wait_s2_s": null,
+    "count_s2": null,
+    "torreta_s2": null,
+    "torreta_run": null,          // mascara 0..7 con la banda en marcha; null si no se menciona
+    "torreta_idle": null          // mascara 0..7 con la banda detenida; null si no se menciona
+  },
+  "outputs": []
+}
+
+REGLAS DE RESPUESTA:
+- Responde SOLO con JSON valido, sin texto extra ni ```.
+- "outputs" SIEMPRE va vacio: [] . NUNCA uses "sequence".
+- Solo rellena lo que el usuario declara; lo demas va en null. No inventes sensores,
+  tiempos, conteos ni sentidos de giro.
+- Los segundos, los Hz y los conteos son enteros.
+- Si el usuario solo dice "mueve la banda", pon enable y direction (mas freq_hz si menciona
+  velocidad o Hz) y deja los sensores en null: sin sensores no hay paros.
+
+EJEMPLO (peticion -> JSON):
 Peticion: "Mueve la banda hacia la derecha a 40 Hz."
-JSON: {"name":"Banda a la derecha","device_profile":"maletin_basico","reset_before":true,
- "system":{"enable":true,"global_stop":null},
+JSON: {"name":"Banda a la derecha","device":"banda",
  "band":{"enable":true,"direction":"derecha","freq_hz":40,
-   "wait_s1_s":null,"wait_s2_s":null,"retrigger_s1_s":8,"retrigger_s2_s":12},
+   "s1_action":null,"wait_s1_s":null,"count_s1":null,"torreta_s1":null,
+   "s2_action":null,"wait_s2_s":null,"count_s2":null,"torreta_s2":null,
+   "torreta_run":null,"torreta_idle":null},
  "outputs":[]}
 
-EJEMPLO de banda con sensor (peticion -> JSON):
+EJEMPLO (peticion -> JSON):
 Peticion: "La banda avanza a 30 Hz y se detiene 5 segundos cuando S1 detecta una pieza."
-JSON: {"name":"Banda con paro por S1","device_profile":"maletin_basico","reset_before":true,
- "system":{"enable":true,"global_stop":null},
+JSON: {"name":"Banda con paro por S1","device":"banda",
  "band":{"enable":true,"direction":"derecha","freq_hz":30,
-   "wait_s1_s":5,"wait_s2_s":null,"retrigger_s1_s":8,"retrigger_s2_s":12},
+   "s1_action":"paro_temporizado","wait_s1_s":5,"count_s1":null,"torreta_s1":null,
+   "s2_action":null,"wait_s2_s":null,"count_s2":null,"torreta_s2":null,
+   "torreta_run":null,"torreta_idle":null},
  "outputs":[]}
-Nota: la torreta NO se declara; el PLC la enciende sola (verde corriendo, roja esperando)."""
+
+EJEMPLO (peticion -> JSON):
+Peticion: "Cuenta 10 piezas en S2 y detiene la banda; con la banda corriendo enciende la verde."
+JSON: {"name":"Conteo 10 en S2","device":"banda",
+ "band":{"enable":true,"direction":"derecha","freq_hz":null,
+   "s1_action":null,"wait_s1_s":null,"count_s1":null,"torreta_s1":null,
+   "s2_action":"contar_y_parar","wait_s2_s":null,"count_s2":10,"torreta_s2":null,
+   "torreta_run":1,"torreta_idle":null},
+ "outputs":[]}"""
 
 
 def _expr_de_logica(lg: dict, salida: str) -> str:
@@ -457,10 +501,16 @@ def validar_logica_config(cfg: dict, perfil: dict = None) -> list:
     band = cfg.get("band")
     if not isinstance(outputs, list):
         outputs = []
-    # Una config valida necesita al menos salidas, una secuencia O la banda.
-    if not outputs and not seq and not band:
+    # La banda es OTRO PLC, con otro Ladder maestro y otro mapa de registros:
+    # su bloque 'band' se valida con validar_logica_banda(), no aqui. Que
+    # aparezca en un programa de maletin significa que el equipo se enruto mal.
+    if band is not None:
+        return ["El bloque 'band' pertenece al PLC de la banda transportadora, "
+                "no al maletin. Genera ese programa en MODO BANDA."]
+    # Una config valida del maletin necesita salidas o una secuencia.
+    if not outputs and not seq:
         return ["Falta 'outputs' o esta vacio: debe haber al menos una salida "
-                "(o una 'sequence', o un bloque 'band')."]
+                "(o una 'sequence')."]
 
     vistos = set()
     for i, o in enumerate(outputs):
@@ -551,43 +601,45 @@ def validar_logica_config(cfg: dict, perfil: dict = None) -> list:
     if seq is not None:
         errores.extend(_validar_secuencia_cfg(seq, perfil))
 
-    if band is not None:
-        errores.extend(_validar_banda_cfg(band))
-
-    # I3/I4 son los sensores S1/S2 de la banda: mezclarlos con la logica del
-    # maletin deja el estado NA/NC ambiguo (mismo criterio que plc_maestro).
-    if isinstance(band, dict) and band.get("enable", True):
-        if seq:
-            errores.append("No se puede usar 'band' y 'sequence' a la vez "
-                           "(la torreta sobreescribe Q10/Q11/Q12).")
-        for i, o in enumerate(outputs):
-            if not isinstance(o, dict):
-                continue
-            lg = o.get("logic") or {}
-            usadas = {str(lg.get(c)).upper() for c in
-                      ("source", "start", "stop", "a", "b", "enable") if lg.get(c)}
-            if usadas & {"I3", "I4"}:
-                errores.append(f"salida {i + 1} ({o.get('output')}): I3/I4 estan "
-                               "reservadas como sensores S1/S2 de la banda.")
-
     sysc = cfg.get("system") or {}
     if not _entrada_valida(sysc.get("global_stop"), entradas):
         errores.append(f"system.global_stop='{sysc.get('global_stop')}' invalido.")
     return errores
 
 
-BAND_DIRS = {"derecha", "right", "der", "cw", "izquierda", "left", "izq", "ccw"}
+# ─── MODO BANDA: validacion y normalizacion (PLC independiente) ───
+# La banda tiene su propio Ladder maestro (Programa_Banda.txt) y su propio mapa
+# de registros. TODA su verdad vive en plc_banda.py; aqui solo se delega, para
+# que el backend y el PLC no puedan discrepar nunca.
+
+BAND_DIRS = {"derecha", "right", "der", "cw", "horario",
+             "izquierda", "left", "izq", "ccw", "antihorario"}
 
 
-def _validar_banda_cfg(band) -> list:
-    """Valida el bloque 'band' (banda transportadora + VFD). Espejo exacto de
-    _validar_banda en plc_maestro.py y de validarBanda en el frontend."""
+def validar_logica_banda(cfg: dict) -> list:
+    """Valida un engine_config de BANDA contra su Ladder maestro.
+
+    Delega en plc_banda.validar_config (misma funcion que corre justo antes de
+    escribir Modbus). Si plc_banda no se puede importar (falta pymodbus en un
+    entorno de solo generacion), cae a una validacion minima equivalente."""
+    try:
+        import plc_banda
+        return plc_banda.validar_config(cfg)
+    except ImportError:
+        pass
+
     errores = []
+    if not isinstance(cfg, dict):
+        return ["El JSON raiz no es un objeto."]
+    band = cfg.get("band")
     if not isinstance(band, dict):
-        return ["'band' no es un objeto."]
-
-    for campo, low in (("freq_hz", 0), ("wait_s1_s", 0), ("wait_s2_s", 0),
-                       ("retrigger_s1_s", 0), ("retrigger_s2_s", 0)):
+        return ["Falta el bloque 'band': un programa de la banda debe traerlo."]
+    if cfg.get("outputs"):
+        errores.append("El PLC de la banda no tiene Q10/Q11/Q12 configurables: "
+                       "'outputs' debe ir vacio.")
+    if cfg.get("sequence"):
+        errores.append("El PLC de la banda no tiene secuenciador de pasos.")
+    for campo in ("freq_hz", "wait_s1_s", "wait_s2_s", "count_s1", "count_s2"):
         v = band.get(campo)
         if v is None:
             continue
@@ -596,14 +648,51 @@ def _validar_banda_cfg(band) -> list:
         except (TypeError, ValueError):
             errores.append(f"band.{campo}: '{v}' no es entero.")
             continue
-        if n < low or n > 32767:
-            errores.append(f"band.{campo}: {n} fuera de [{low}, 32767].")
-
+        if n < 0 or n > 32767:
+            errores.append(f"band.{campo}: {n} fuera de [0, 32767].")
     d = band.get("direction")
     if d is not None and str(d).lower() not in BAND_DIRS:
         errores.append(f"band.direction='{d}' debe ser 'derecha' o 'izquierda'.")
-
     return errores
+
+
+def normalizar_logica_banda(cfg: dict) -> dict:
+    """Completa los campos del bloque 'band' con sus valores por defecto.
+
+    Conserva EXACTAMENTE las claves que el editor ya dibuja (enable, direction,
+    freq_hz, wait_s1_s, wait_s2_s) para no tocar la visualizacion; los campos
+    nuevos del Ladder maestro de la banda son ADITIVOS y el front los ignora."""
+    cfg.setdefault("name", "Programa banda")
+    cfg["device"] = "banda"
+    cfg["outputs"] = []                 # este PLC no tiene salidas configurables
+    cfg.pop("sequence", None)           # ni secuenciador de pasos
+    band = cfg.setdefault("band", {})
+    band.setdefault("enable", True)
+    band["direction"] = str(band.get("direction") or "derecha").lower()
+    for campo in ("freq_hz",
+                  "s1_action", "wait_s1_s", "count_s1", "torreta_s1",
+                  "s2_action", "wait_s2_s", "count_s2", "torreta_s2",
+                  "torreta_run", "torreta_idle"):
+        band.setdefault(campo, None)
+    # Compatibilidad de PRESENTACION: el editor dibuja los rungs de bloqueo a
+    # partir de estos dos campos. Se conservan con sus valores historicos para
+    # NO alterar el dibujo, pero plc_banda NUNCA los escribe: el Ladder maestro
+    # de la banda ya no tiene registro de anti-retrigger (lo resuelve por
+    # flanco de los sensores, S1_Rising / S2_Rising).
+    if band.get("retrigger_s1_s") is None:
+        band["retrigger_s1_s"] = 8
+    if band.get("retrigger_s2_s") is None:
+        band["retrigger_s2_s"] = 12
+    return cfg
+
+
+def avisos_logica_banda(cfg: dict) -> list:
+    """Avisos no bloqueantes del bloque 'band' (campos que el ladder ignora)."""
+    try:
+        import plc_banda
+        return plc_banda.avisos_config(cfg)
+    except Exception:
+        return []
 
 
 def _validar_secuencia_cfg(seq, perfil=None) -> list:
@@ -655,6 +744,7 @@ def normalizar_logica_config(cfg: dict) -> dict:
     """Completa campos por defecto y garantiza 'expr'/'comment' por salida
     para que el JSON dual viaje completo al frontend."""
     cfg.setdefault("name", "Programa maletin")
+    cfg["device"] = "maletin"
     cfg.setdefault("device_profile", "maletin_basico")
     cfg.setdefault("reset_before", True)
     sysc = cfg.setdefault("system", {})
@@ -677,19 +767,6 @@ def normalizar_logica_config(cfg: dict) -> dict:
         for st in seq.get("steps", []):
             if isinstance(st, dict) and isinstance(st.get("outputs"), list):
                 st["outputs"] = [str(o).upper() for o in st["outputs"]]
-    # Banda: mismos defaults que aplica plc_maestro, para que el dibujo del
-    # frontend y lo que se escribe al PLC coincidan exactamente.
-    band = cfg.get("band")
-    if isinstance(band, dict):
-        band.setdefault("enable", True)
-        band["direction"] = str(band.get("direction") or "derecha").lower()
-        band.setdefault("freq_hz", None)
-        band.setdefault("wait_s1_s", None)
-        band.setdefault("wait_s2_s", None)
-        if band.get("retrigger_s1_s") is None:
-            band["retrigger_s1_s"] = 8
-        if band.get("retrigger_s2_s") is None:
-            band["retrigger_s2_s"] = 12
     return cfg
 
 # ─── Carga de contexto JSON ──────────────────────────────────────
@@ -1613,12 +1690,19 @@ class LogicaRequest(BaseModel):
     texto: str
     device_profile: Optional[str] = None
     contexto: Optional[ContextoLadder] = None
+    # Equipo elegido por el usuario: "maletin" | "banda". None = que lo deduzca
+    # el backend a partir del texto (y pregunte si es ambiguo).
+    device: Optional[str] = None
 
 
 class LogicaResponse(BaseModel):
     logic: dict          # JSON dual engine-config (fuente de verdad para Python)
     name: str
     outputs: int
+    # Equipo al que se dirigio la generacion: "maletin" | "banda" | "" (sin
+    # resolver, cuando se pregunta cual). Es ADITIVO: los clientes viejos lo
+    # ignoran sin cambiar de comportamiento.
+    device: str = ""
     warnings: List[str] = []
     ejemplo_id: str = ""  # id en memoria de feedback (para POST /feedback)
     # Mismo engine_config envuelto como lo espera el editor y /aplicar-plc:
@@ -1644,6 +1728,9 @@ class AplicarPLCRequest(BaseModel):
     ip: Optional[str] = None
     port: Optional[int] = None
     dry_run: bool = False
+    # PLC destino: "maletin" | "banda". Si no viene, se deduce del propio
+    # engine_config (campo 'device', o la presencia del bloque 'band').
+    device: Optional[str] = None
 
 # ─── Logica principal Ladder ──────────────────────────────────────
 
@@ -1900,6 +1987,104 @@ async def generar_ladder(req: PromptRequest):
         raise HTTPException(500, str(e))
 
 
+# ─── MODO BANDA: generacion contra el Ladder maestro de la banda ──
+# Funcion INDEPENDIENTE de la del maletin (punto 4 de la separacion): usa su
+# propio system prompt, su propio validador y su propio normalizador. Ni una
+# sola linea de esta ruta puede producir registros del maletin.
+
+def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
+    """texto -> LLM -> engine_config de BANDA -> validacion -> respuesta.
+
+    Mismo flujo y mismo modelo que el maletin (auto-revision con realimentacion
+    de errores); lo unico que cambia es el vocabulario al que se mapea."""
+    messages = [{"role": "system", "content": SYSTEM_PROMPT_BANDA}]
+    if req.contexto:
+        previas = "\n".join(f"- {p}" for p in (req.contexto.historial or [])[-4:])
+        prev_cfg = None
+        if req.contexto.programa_anterior:
+            prev_cfg = (req.contexto.programa_anterior.get("metadata", {})
+                        .get("engine_config"))
+            # Solo se realimenta el programa anterior si TAMBIEN era de la banda:
+            # un engine_config del maletin aqui contaminaria el mapeo.
+            if prev_cfg is not None and not prev_cfg.get("band"):
+                prev_cfg = None
+        if previas or prev_cfg:
+            partes = []
+            if previas:
+                partes.append(f"Peticiones anteriores del usuario:\n{previas}")
+            if prev_cfg:
+                partes.append("PROGRAMA ACTUAL DE LA BANDA (modifica este JSON, "
+                              "conserva lo no pedido):\n"
+                              + json.dumps(prev_cfg, ensure_ascii=False))
+            messages.append({"role": "user", "content": "\n\n".join(partes)})
+            messages.append({"role": "assistant", "content":
+                             "Entendido. Aplicare la instruccion sobre ese programa "
+                             "de la banda y devolvere el JSON completo actualizado."})
+    messages.append({"role": "user", "content":
+                     f"{texto}\n\nResponde SOLO con el JSON del esquema indicado."})
+
+    # Auto-revision: el modelo genera, se valida contra el Ladder maestro de la
+    # banda y, si falla, se le devuelven SUS errores para que se corrija.
+    cfg = None
+    errores = []
+    intentos = max(1, MAX_AUTOREVISIONES)
+    msgs_iter = list(messages)
+    for intento in range(1, intentos + 1):
+        try:
+            candidato = llamar_modelo_json(msgs_iter)
+        except ValueError as e:
+            if intento < intentos:
+                log.warning(f"Banda auto-revision {intento}/{intentos}: JSON ilegible — {e}")
+                continue
+            raise HTTPException(422, str(e))
+        except Exception as e:
+            log.error(f"Error generar-logica banda (modelo): {e}")
+            raise HTTPException(500, str(e))
+
+        errores = validar_logica_banda(candidato)
+        if not errores:
+            cfg = candidato
+            if intento > 1:
+                log.info(f"Banda: auto-revision exitosa en el intento {intento}/{intentos}.")
+            break
+
+        log.warning(f"Banda auto-revision {intento}/{intentos}: {errores}")
+        if intento < intentos:
+            msgs_iter = list(messages)
+            msgs_iter.append({"role": "assistant",
+                              "content": json.dumps(candidato, ensure_ascii=False)})
+            msgs_iter.append({"role": "user", "content": (
+                "El JSON anterior es INVALIDO por estos motivos:\n- "
+                + "\n- ".join(errores)
+                + "\nCorrige SOLO esos errores y devuelve el JSON COMPLETO del "
+                  "esquema de la banda, sin texto extra.")})
+
+    if cfg is None:
+        raise HTTPException(
+            422, "El JSON de la banda no es valido tras varios intentos:\n- "
+            + "\n- ".join(errores))
+
+    cfg = normalizar_logica_banda(cfg)
+    warnings = avisos_logica_banda(cfg)
+
+    try:
+        guardar_historial(texto, json.dumps(cfg, ensure_ascii=False)[:1500])
+    except Exception as e:
+        log.warning(f"No se pudo guardar historial (banda): {e}")
+
+    nombre_prog = cfg.get("name", "Programa banda")
+    log.info(f"/generar-logica OK (BANDA) — {nombre_prog}")
+    return LogicaResponse(
+        logic=cfg,
+        name=nombre_prog,
+        outputs=0,                      # este PLC no tiene salidas configurables
+        device="banda",
+        warnings=warnings,
+        ejemplo_id="",
+        program={"metadata": {"name": nombre_prog, "engine_config": cfg}},
+    )
+
+
 @app.post("/generar-logica", response_model=LogicaResponse)
 async def generar_logica(req: LogicaRequest):
     """Flujo NUEVO (ver CONTRACT del frontend): la IA interpreta la intencion
@@ -1911,11 +2096,45 @@ async def generar_logica(req: LogicaRequest):
     if len(texto) > 2000:
         raise HTTPException(400, "Texto demasiado largo, maximo 2000 caracteres.")
 
+    es_modificacion = bool(req.contexto and req.contexto.programa_anterior)
+
+    # ── PASO 0: SELECCION DE EQUIPO (MODO MALETIN / MODO BANDA) ──────
+    # Antes de generar nada hay que saber a que PLC va la instruccion: cada
+    # equipo tiene su propio Ladder maestro y su propio mapa de registros, y
+    # NUNCA se mezclan. Prioridad:
+    #   1) el equipo que el usuario ya eligio (req.device),
+    #   2) el equipo del programa que se esta modificando,
+    #   3) la deteccion sobre el texto,
+    #   4) si es ambiguo -> se pregunta (no se adivina).
+    equipo = "maletin"
+    if _ROUTER_OK:
+        device_pedido = req.device
+        if not device_pedido and es_modificacion:
+            meta_prev = req.contexto.programa_anterior.get("metadata", {}) or {}
+            prev = meta_prev.get("engine_config") or {}
+            # Un programa anterior con bloque 'band' es, por definicion, de la banda.
+            device_pedido = prev.get("device") or ("banda" if prev.get("band") else None)
+        ruta = device_router.resolver_dispositivo(texto, device_pedido)
+        if ruta["ambiguo"]:
+            log.info(f"/generar-logica equipo ambiguo — {ruta['motivo']}")
+            return LogicaResponse(
+                logic={}, name="", outputs=0, device="",
+                status="needs_clarification",
+                questions=[device_router.pregunta_equipo()],
+                assumptions=[],
+                analysis={"equipo": "ambiguo", "motivo": ruta["motivo"]},
+            )
+        equipo = ruta["device"] or "maletin"
+
+    # MODO BANDA: PLC independiente, prompt propio y validador propio.
+    if equipo == "banda":
+        return _generar_logica_banda(texto, req)
+
+    # ── MODO MALETIN: de aqui hacia abajo, el flujo historico intacto ──
     # Fase 1 (agente): deteccion de prompts ambiguos. Si la peticion es NUEVA
     # (no es una modificacion de un programa anterior) y le faltan datos criticos
     # (salida o entrada), se responde con preguntas en vez de inventar. Las
     # peticiones claras siguen EXACTAMENTE el flujo de siempre.
-    es_modificacion = bool(req.contexto and req.contexto.programa_anterior)
     if AGENT_CLARIFY_ENABLED and not es_modificacion:
         try:
             perfil_clarify = profile_registry.cargar_perfil(req.device_profile)
@@ -2139,6 +2358,7 @@ async def generar_logica(req: LogicaRequest):
         logic=cfg,
         name=nombre_prog,
         outputs=len(cfg.get("outputs", [])),
+        device="maletin",
         warnings=warnings,
         ejemplo_id=ejemplo_id,
         # Forma lista para el editor / POST /aplicar-plc (program.metadata.engine_config).
@@ -2363,27 +2583,73 @@ def chat(req: ChatRequest):
 
 # Override en runtime de la IP/puerto por defecto del PLC (se fija con
 # POST /plc/config; si es None se usa el valor de plc_maestro.PLC_IP).
-PLC_STATE = {"ip": None, "port": None}
+# ─── PLC destino: UNA conexion por equipo ─────────────────────────
+# Maletin y banda son PLC FISICAMENTE DISTINTOS (cada uno con su Ladder
+# maestro y su mapa de registros). El override de IP/puerto se guarda por
+# equipo para que una instruccion del maletin no pueda salir por la IP de la
+# banda ni al reves.
+PLC_STATE = {
+    "maletin": {"ip": None, "port": None},
+    "banda":   {"ip": None, "port": None},
+}
+
+DEVICE_DEFECTO = "maletin"
 
 
-def plc_default_ip() -> str:
-    if PLC_STATE["ip"]:
-        return PLC_STATE["ip"]
+def _device_valido(device) -> str:
+    """Normaliza el equipo destino; cualquier cosa rara cae en el maletin
+    (comportamiento historico)."""
+    if _ROUTER_OK:
+        d = device_router.normalizar_dispositivo(device)
+        if d:
+            return d
+    d = str(device or "").strip().lower()
+    return d if d in PLC_STATE else DEVICE_DEFECTO
+
+
+def plc_default_ip(device: str = DEVICE_DEFECTO) -> str:
+    dev = _device_valido(device)
+    if PLC_STATE[dev]["ip"]:
+        return PLC_STATE[dev]["ip"]
     try:
+        if dev == "banda":
+            import plc_banda
+            return plc_banda.PLC_IP          # "" si no se ha configurado
         import plc_maestro
         return plc_maestro.PLC_IP
     except Exception:
-        return "192.168.3.12"
+        return "192.168.3.12" if dev == "maletin" else ""
 
 
-def plc_default_port() -> int:
-    if PLC_STATE["port"]:
-        return PLC_STATE["port"]
+def plc_default_port(device: str = DEVICE_DEFECTO) -> int:
+    dev = _device_valido(device)
+    if PLC_STATE[dev]["port"]:
+        return PLC_STATE[dev]["port"]
     try:
+        if dev == "banda":
+            import plc_banda
+            return plc_banda.PLC_PORT
         import plc_maestro
         return plc_maestro.PLC_PORT
     except Exception:
         return 502
+
+
+def device_de_config(cfg: dict, pedido=None) -> str:
+    """A que PLC pertenece un engine_config.
+
+    Prioridad: lo que pida el cliente > el campo 'device' del propio programa >
+    la presencia del bloque 'band'. Sin ninguna señal, maletin (historico)."""
+    explicito = None
+    if _ROUTER_OK:
+        explicito = device_router.normalizar_dispositivo(pedido)
+        if not explicito:
+            explicito = device_router.normalizar_dispositivo((cfg or {}).get("device"))
+    if explicito:
+        return explicito
+    if isinstance(cfg, dict) and isinstance(cfg.get("band"), dict):
+        return "banda"
+    return DEVICE_DEFECTO
 
 
 def _ips_locales() -> set:
@@ -2447,31 +2713,55 @@ def _subredes_a_escanear(ip_base: str = "") -> list:
         bases.add(".".join(ip_base.split(".")[:3]) + ".0")
     for ip in _ips_locales():
         bases.add(".".join(ip.split(".")[:3]) + ".0")
-    bases.add(".".join(plc_default_ip().split(".")[:3]) + ".0")
+    # Las subredes de los DOS PLC (maletin y banda pueden estar en redes
+    # distintas); una IP vacia (banda sin configurar) simplemente no aporta.
+    for dev in PLC_STATE:
+        ip_dev = plc_default_ip(dev)
+        if ip_dev:
+            bases.add(".".join(ip_dev.split(".")[:3]) + ".0")
     return sorted(bases)
 
 
 @app.get("/plc/config")
-def plc_config_ver():
-    """IP/puerto del PLC que usara /aplicar-plc por defecto."""
-    return {"ip": plc_default_ip(), "port": plc_default_port(),
-            "override": dict(PLC_STATE)}
+def plc_config_ver(device: str = ""):
+    """IP/puerto que usara /aplicar-plc por defecto.
+
+    Sin 'device' devuelve el maletin (forma historica de la respuesta) y ademas
+    'devices' con los dos equipos, para que el frontend pueda mostrarlos."""
+    dev = _device_valido(device) if device else DEVICE_DEFECTO
+    return {
+        "device": dev,
+        "ip": plc_default_ip(dev),
+        "port": plc_default_port(dev),
+        "override": dict(PLC_STATE[dev]),
+        "devices": {
+            d: {"ip": plc_default_ip(d), "port": plc_default_port(d),
+                "override": dict(PLC_STATE[d])}
+            for d in PLC_STATE
+        },
+    }
 
 
 class PLCConfigRequest(BaseModel):
     ip: Optional[str] = None
     port: Optional[int] = None
+    # Equipo cuyo PLC se esta configurando: "maletin" (por defecto) o "banda".
+    device: Optional[str] = None
 
 
 @app.post("/plc/config")
 def plc_config_set(req: PLCConfigRequest):
-    """Fija la IP/puerto por defecto del PLC en este backend (en memoria)."""
+    """Fija la IP/puerto por defecto de UN equipo en este backend (en memoria).
+
+    Sin 'device' se configura el maletin, igual que antes."""
+    dev = _device_valido(req.device) if req.device else DEVICE_DEFECTO
     if req.ip is not None:
-        PLC_STATE["ip"] = req.ip.strip() or None
+        PLC_STATE[dev]["ip"] = req.ip.strip() or None
     if req.port is not None:
-        PLC_STATE["port"] = int(req.port) or None
-    log.info(f"PLC por defecto -> {plc_default_ip()}:{plc_default_port()}")
-    return {"status": "ok", "ip": plc_default_ip(), "port": plc_default_port()}
+        PLC_STATE[dev]["port"] = int(req.port) or None
+    log.info(f"PLC por defecto ({dev}) -> {plc_default_ip(dev)}:{plc_default_port(dev)}")
+    return {"status": "ok", "device": dev,
+            "ip": plc_default_ip(dev), "port": plc_default_port(dev)}
 
 
 @app.get("/plc/probar")
@@ -2529,15 +2819,80 @@ def plc_escanear(ip_base: str = "", port: int = 502, timeout_ms: int = 300):
     }
 
 
+# ─── Buscar el PLC conectado a esta computadora ───────────
+# El puente (iniciar_puente_PLC.bat) corre en la PC que tiene el PLC
+# enchufado, asi que puede encontrarlo solo y evitar que haya que escribir la
+# IP a mano cada vez. NO intenta adivinar que equipo es: solo dice que PLC
+# hay. La decision de cargar (y a cual) es siempre del usuario.
+
+
+@app.get("/plc/detectar")
+def plc_detectar(ip_base: str = "", port: int = 502, timeout_ms: int = 300):
+    """Busca PLC en la red y sugiere uno si solo hay uno.
+
+      plcs      -> IPs que responden en el puerto Modbus
+      sugerido  -> la IP a usar cuando NO hay ambiguedad (un solo PLC)
+      motivo    -> texto para mostrar en el editor
+    """
+    encontrados = plc_escanear(ip_base=ip_base, port=port, timeout_ms=timeout_ms)
+    ips = encontrados.get("encontrados", [])
+
+    if len(ips) == 1:
+        sugerido = ips[0]
+        motivo = f"Es el unico PLC que responde en la red ({sugerido})."
+    elif len(ips) > 1:
+        sugerido = None
+        motivo = (f"Hay {len(ips)} PLC en la red: elige a cual cargar "
+                  f"({', '.join(ips)}).")
+    else:
+        sugerido = None
+        motivo = ("No responde ningun PLC. ¿Esta encendido y conectado a esta "
+                  "computadora?")
+
+    log.info(f"/plc/detectar — {len(ips)} PLC(s); sugerido={sugerido or '-'}")
+    return {"status": "ok", "plcs": ips, "sugerido": sugerido, "motivo": motivo,
+            "subredes": encontrados.get("subredes", []), "puerto": port}
+
+
+def _resolver_plc(device: str, req: "AplicarPLCRequest") -> tuple:
+    """Decide a que IP:puerto se carga, sin obligar a escribirla cada vez.
+
+      1) la IP que mande el editor,
+      2) la configurada para ese equipo (env / POST /plc/config),
+      3) si no hay ninguna, se busca en la red: si responde UN SOLO PLC se usa
+         ese; si hay varios, se pide elegir (no se adivina).
+    Devuelve (ip, port, notas)."""
+    notas = []
+    ip = (req.ip or "").strip() or plc_default_ip(device)
+    port = req.port or plc_default_port(device)
+
+    if not ip:
+        det = plc_detectar(port=port, timeout_ms=300)
+        if det["sugerido"]:
+            ip = det["sugerido"]
+            notas.append(f"PLC detectado automaticamente: {ip}. " + det["motivo"])
+        else:
+            raise HTTPException(400, f"No hay IP para el PLC del {device} y no se "
+                                     f"pudo elegir una sola automaticamente. "
+                                     f"{det['motivo']}")
+
+    return ip, port, notas
+
+
 @app.post("/aplicar-plc")
 def aplicar_plc(req: AplicarPLCRequest):
     """Envia el programa al PLC fisico por Modbus TCP (boton 'Cargar' del editor).
-    Usa la clase XL4 de plc_maestro SIN modificar sus reglas.
 
-    IMPORTANTE: el PLC esta en una LAN privada (p. ej. 192.168.3.12). Este
-    endpoint SOLO alcanza el PLC si el backend corre LOCALMENTE en esa red; en
-    Render (internet) devolvera error de conexion. dry_run=true valida y
-    devuelve el plan sin tocar el PLC (sirve en cualquier lado)."""
+    Enruta por EQUIPO antes de tocar nada:
+      - maletin -> plc_maestro (Q10/Q11/Q12, I1..I7, secuenciador)
+      - banda   -> plc_banda   (VFD, sensores S1/S2, torreta)
+    Cada equipo usa SU modulo, SU validador y SU IP: un programa nunca puede
+    escribirse en el PLC del otro.
+
+    IMPORTANTE: los PLC estan en una LAN privada. Este endpoint SOLO los
+    alcanza si el backend corre LOCALMENTE en esa red; en Render (internet)
+    devolvera error de conexion. dry_run=true valida y devuelve el plan sin
+    tocar el PLC (sirve en cualquier lado)."""
     # 1) Obtener el engine_config (directo o desde program.metadata)
     cfg = req.logic
     if cfg is None and isinstance(req.program, dict):
@@ -2546,16 +2901,31 @@ def aplicar_plc(req: AplicarPLCRequest):
         raise HTTPException(400, "Falta el engine_config. Manda 'logic' o un 'program' "
                                  "que tenga metadata.engine_config (generado por la IA).")
 
-    # 2) Import perezoso: solo quien use el PLC necesita pymodbus instalado
+    # 2) ¿A que PLC va? (cliente > campo 'device' del programa > bloque 'band')
+    device = device_de_config(cfg, req.device)
+
+    if device == "banda":
+        return _aplicar_plc_banda(cfg, req)
+    return _aplicar_plc_maletin(cfg, req)
+
+
+def _aplicar_plc_maletin(cfg: dict, req: AplicarPLCRequest):
+    """MODO MALETIN: identico al flujo historico (plc_maestro / clase XL4)."""
     try:
         import plc_maestro
     except Exception as e:
         raise HTTPException(500, f"No se pudo cargar plc_maestro (¿falta pymodbus?): {e}")
 
-    # 3) Validar con las MISMAS reglas del motor antes de tocar el PLC
+    # Barrera anti-mezcla: los registros de la banda no existen en este PLC.
+    if isinstance(cfg.get("band"), dict):
+        raise HTTPException(422, "Este programa trae el bloque 'band' (banda "
+                                 "transportadora) pero se dirigio al PLC del maletin. "
+                                 "Cargalo con device='banda'.")
+
     errores = plc_maestro.validar_config(cfg)
     if errores:
-        raise HTTPException(422, "El programa no es valido para el PLC:\n- " + "\n- ".join(errores))
+        raise HTTPException(422, "El programa no es valido para el PLC del maletin:\n- "
+                            + "\n- ".join(errores))
 
     plan = plc_maestro.plan_config(cfg)
     plan_legible = [
@@ -2564,32 +2934,87 @@ def aplicar_plc(req: AplicarPLCRequest):
         for m, args, kw in plan
     ]
 
-    # 4) Dry-run: no toca el PLC (validacion/preview en cualquier entorno)
     if req.dry_run:
-        return {"status": "dry-run", "enviado": False,
+        return {"status": "dry-run", "enviado": False, "device": "maletin",
                 "salidas": len(cfg.get("outputs", [])), "plan": plan_legible}
 
-    # 5) Conectar y escribir al PLC real (Modbus TCP)
-    #    Prioridad: lo que mande el front (req.ip) > override del backend
-    #    (POST /plc/config) > valor por defecto de plc_maestro.
-    ip   = req.ip   or plc_default_ip()
-    port = req.port or plc_default_port()
-    plc  = plc_maestro.XL4(ip=ip, port=port)
+    # IP explicita > configurada > autodetectada; y se verifica que el PLC
+    # que responde sea de verdad el del maletin antes de escribirle.
+    ip, port, notas = _resolver_plc("maletin", req)
+    plc = plc_maestro.XL4(ip=ip, port=port)
     try:
         plc.connect()
     except Exception as e:
-        raise HTTPException(503, f"No se pudo conectar al PLC {ip}:{port}. "
+        raise HTTPException(503, f"No se pudo conectar al PLC del maletin {ip}:{port}. "
                                  f"¿Esta el backend en la misma red del PLC y encendido? Detalle: {e}")
     try:
         plc_maestro.aplicar_config(plc, cfg, dry_run=False)
     except Exception as e:
-        raise HTTPException(500, f"Error escribiendo al PLC: {e}")
+        raise HTTPException(500, f"Error escribiendo al PLC del maletin: {e}")
     finally:
         plc.close()
 
-    log.info(f"/aplicar-plc OK — {len(cfg.get('outputs', []))} salida(s) -> {ip}:{port}")
-    return {"status": "ok", "enviado": True, "plc": f"{ip}:{port}",
-            "salidas": len(cfg.get("outputs", [])), "plan": plan_legible}
+    log.info(f"/aplicar-plc OK (MALETIN) — {len(cfg.get('outputs', []))} salida(s) -> {ip}:{port}")
+    return {"status": "ok", "enviado": True, "device": "maletin", "plc": f"{ip}:{port}",
+            "salidas": len(cfg.get("outputs", [])), "plan": plan_legible,
+            "notas": notas}
+
+
+def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
+    """MODO BANDA: PLC independiente (plc_banda / clase BandaPLC).
+
+    Solo se escriben los registros del Ladder maestro de la banda; ninguno del
+    maletin es siquiera alcanzable desde aqui."""
+    try:
+        import plc_banda
+    except Exception as e:
+        raise HTTPException(500, f"No se pudo cargar plc_banda (¿falta pymodbus?): {e}")
+
+    errores = plc_banda.validar_config(cfg)
+    if errores:
+        raise HTTPException(422, "El programa no es valido para el PLC de la banda:\n- "
+                            + "\n- ".join(errores))
+
+    plan = plc_banda.plan_config(cfg)
+    plan_legible = [
+        f"banda.{m}(" + ", ".join([repr(a) for a in args]
+                                  + [f"{k}={v!r}" for k, v in kw.items()]) + ")"
+        for m, args, kw in plan
+    ]
+    avisos = plc_banda.avisos_config(cfg)
+
+    if req.dry_run:
+        return {"status": "dry-run", "enviado": False, "device": "banda",
+                "salidas": 0, "plan": plan_legible, "avisos": avisos}
+
+    # IP explicita > configurada > autodetectada; y se verifica que el PLC
+    # que responde sea de verdad el de la banda antes de escribirle.
+    ip, port, notas = _resolver_plc("banda", req)
+    if ip == plc_default_ip("maletin"):
+        raise HTTPException(409, f"La IP de la banda ({ip}) es la misma que la del "
+                                 "maletin. Son PLC independientes: corrige una de las "
+                                 "dos antes de cargar, o el programa acabaria en el "
+                                 "equipo equivocado.")
+
+    try:
+        plc = plc_banda.BandaPLC(ip=ip, port=port)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    try:
+        plc.connect()
+    except Exception as e:
+        raise HTTPException(503, f"No se pudo conectar al PLC de la banda {ip}:{port}. "
+                                 f"¿Esta el backend en la misma red del PLC y encendido? Detalle: {e}")
+    try:
+        plc_banda.aplicar_config(plc, cfg, dry_run=False)
+    except Exception as e:
+        raise HTTPException(500, f"Error escribiendo al PLC de la banda: {e}")
+    finally:
+        plc.close()
+
+    log.info(f"/aplicar-plc OK (BANDA) -> {ip}:{port}")
+    return {"status": "ok", "enviado": True, "device": "banda", "plc": f"{ip}:{port}",
+            "salidas": 0, "plan": plan_legible, "avisos": avisos, "notas": notas}
 
 
 @app.post("/feedback")
