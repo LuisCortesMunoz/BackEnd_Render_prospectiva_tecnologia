@@ -267,7 +267,7 @@ SECUENCIAS TEMPORIZADAS (semaforo / pasos uno tras otro) — MUY IMPORTANTE:
 La logica por salida de arriba NO puede encadenar etapas (una salida no puede
 disparar a otra, y solo tiene UN temporizador). Para peticiones donde las salidas
 se encienden EN ORDEN, una tras otra, con transiciones por TIEMPO automaticas
-(ej. semaforo: verde 5 s, luego amarilla 5 s, luego roja 5 s), NO uses timers por
+(ej. semaforo: verde 5 s, luego amarilla 2 s, luego roja 8 s), NO uses timers por
 salida: usa el bloque de nivel superior "sequence" y deja "outputs": [].
 
 Reconoce una secuencia cuando el usuario diga: secuencia, semaforo, "uno tras otro",
@@ -281,13 +281,19 @@ Esquema de "sequence":
     "reset": null,          // entrada que aborta/reinicia (opcional, normalmente null)
     "steps": [              // 1..8 pasos EN ORDEN; cada paso dura sus segundos y avanza solo
       {"outputs": ["Q10"], "duration_s": 5},
-      {"outputs": ["Q11"], "duration_s": 5},
-      {"outputs": ["Q12"], "duration_s": 5}
+      {"outputs": ["Q11"], "duration_s": 2},
+      {"outputs": ["Q12"], "duration_s": 8}
     ]
   }
 Reglas de la secuencia:
 - "outputs" de cada paso = salidas ENCENDIDAS durante ese paso (normalmente una sola,
   para que "nunca al mismo tiempo"). duration_s = segundos enteros (1..32767).
+- CADA paso lleva SU PROPIO duration_s: el numero de segundos que el usuario dijo
+  para ESA etapa concreta. Los tiempos NO se copian de un paso a otro ni se toman
+  de los ejemplos de arriba: son datos del usuario. Si pide "verde 5 segundos y
+  despues roja 3 segundos", los duration_s son 5 y 3, distintos entre si. Lee el
+  texto etapa por etapa y asigna a cada una el tiempo que le corresponde; que dos
+  pasos coincidan solo puede pasar si el usuario dio el mismo numero para ambos.
 - Al terminar el ultimo paso: con "once" todo se apaga (y vuelve a correr en la
   siguiente pulsacion); con "loop" regresa al paso 1.
 - Cuando uses "sequence", el arreglo "outputs" del nivel superior va VACIO: [].
@@ -343,15 +349,16 @@ Nota: la base es "directo" con source I1 (la entrada que se cuenta) y el enclava
 "up_held". NO se usa logica "enclavado" aqui.
 
 EJEMPLO de secuencia / semaforo (peticion -> JSON):
-Peticion: "Al presionar I1 enciende la verde 5 s, luego la amarilla 5 s, luego la roja 5 s,
+Peticion: "Al presionar I1 enciende la verde 5 s, luego la amarilla 2 s, luego la roja 8 s,
 una sola vez y nunca al mismo tiempo."
 JSON: {"name":"Semaforo I1","device_profile":"maletin_basico","reset_before":true,
  "system":{"enable":true,"global_stop":null},
  "sequence":{"start":"I1","mode":"once","reset":null,
    "steps":[{"outputs":["Q10"],"duration_s":5},
-            {"outputs":["Q11"],"duration_s":5},
-            {"outputs":["Q12"],"duration_s":5}]},
+            {"outputs":["Q11"],"duration_s":2},
+            {"outputs":["Q12"],"duration_s":8}]},
  "outputs":[]}
+Fijate en que 5, 2 y 8 son DISTINTOS y salen del texto de la peticion, uno por etapa.
 Nota: se usa "sequence" (no timers por salida) y "outputs" va vacio. Cada paso enciende UNA
 salida por su duracion y avanza solo; "once" = se ejecuta una vez por cada pulsacion de I1."""
 
