@@ -98,13 +98,18 @@ ADDR_TORRETA_RUN   = R(40)
 ADDR_TORRETA_IDLE  = R(41)
 
 # SECUENCIA INIT VFD  (solo lectura; los mueve la maquina de estados §7)
+# OJO: InitSeqState e InitTimerAccum NO tienen $tag en el Ladder maestro, asi
+# que el compilador de Cscape les asigna la direccion automaticamente y puede
+# MOVERLAS en cualquier recompilacion. Estas dos direcciones se verificaron
+# contra el PLC, pero son solo diagnostico: si dejan de cuadrar, pideles un
+# $tag fijo en Cscape. Nada del flujo de carga depende de ellas.
 ADDR_INIT_SEQ_STATE   = R(39)
 ADDR_INIT_TIMER_ACCUM = R(42)
-ADDR_VFD_FREQ_CALC    = R(45)
 
 # VFD (FIJOS, no modificar). Desde Python solo se LEEN: los gobierna el ladder.
 ADDR_VFD_CONTROL   = R(500)   # 18=derecha, 34=izquierda, 1=stop  (§15)
-ADDR_VFD_SPEED_RAW = R(502)   # velocidad actual leida del variador
+ADDR_VFD_SPEED_RAW = R(502)   # velocidad actual leida del variador (escala x100)
+ADDR_VFD_FREQ_CALC = R(504)   # consigna de frecuencia enviada al variador (x100)
 ADDR_VFD_RESET     = R(506)   # 0 / 2 durante la secuencia de reset (§7)
 
 
@@ -490,10 +495,49 @@ class BandaPLC:
             "s2_count": self._r(ADDR_S2_COUNT_ACCUM),
             "s2_timer_s": self._r(ADDR_S2_TIMER_ACCUM),
             "vfd_control": self._r(ADDR_VFD_CONTROL),
-            "vfd_freq_calc": self._r(ADDR_VFD_FREQ_CALC),
+            # Consigna cruda tal como la ve el variador (escala x100) y su
+            # equivalente en Hz, para no depender de como escale el ladder.
+            "vfd_freq_raw": self._r(ADDR_VFD_FREQ_CALC),
+            "vfd_freq_hz": self._r(ADDR_VFD_FREQ_CALC) / 100.0,
             "vfd_reset": self._r(ADDR_VFD_RESET),
-            "vfd_speed": self._r(ADDR_VFD_SPEED_DISP),
+            # %R502 SIEMPRE viene x100 del variador; %R8 es lo que el ladder
+            # decida mostrar en §9.
+            "vfd_speed_hz": self._r(ADDR_VFD_SPEED_RAW) / 100.0,
+            "vfd_speed_disp": self._r(ADDR_VFD_SPEED_DISP),
         }
+
+    # -- verificacion post-carga ------------------------------------------
+    def verificar_vfd(self) -> list:
+        """Comprueba que la consigna de frecuencia llego ESCALADA al variador.
+
+        El variador lee %R504 en centesimas de Hz, asi que el ladder debe
+        entregar FreqRequest * 100. Si el ST hace la asignacion sin escalar,
+        el variador recibe una frecuencia 100 veces menor (30 Hz -> 0.30 Hz)
+        y la banda no llega a moverse, sin que nada falle de forma visible.
+
+        Esto NO se puede corregir desde aqui: §8 reescribe %R504 en cada scan,
+        asi que cualquier valor que mande el backend dura menos de un scan. Se
+        detecta y se avisa para que el arreglo se haga en el ST."""
+        avisos = []
+        hz = self._r(ADDR_FREQ_REQUEST)
+        enviado = self._r(ADDR_VFD_FREQ_CALC)
+        if hz <= 0:
+            return avisos
+        if enviado == hz * 100:
+            return avisos                      # escalado correcto
+        if enviado == hz:
+            avisos.append(
+                f"El Ladder maestro esta entregando la frecuencia SIN escalar: "
+                f"%R504 = {enviado} en vez de {hz * 100}. El variador lo lee "
+                f"como {enviado / 100:.2f} Hz y la banda no se movera. "
+                f"Corrige en el ST (§7 estado 4 y §8): "
+                f"VFD_FreqCalc := FreqRequest * 100 ;")
+        else:
+            avisos.append(
+                f"La consigna del variador no cuadra con la frecuencia pedida: "
+                f"%R4 = {hz} Hz pero %R504 = {enviado} (se esperaba {hz * 100}). "
+                f"El variador la leera como {enviado / 100:.2f} Hz.")
+        return avisos
 
 
 # ---------------------------------------------------------------------------

@@ -3031,6 +3031,15 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
                                  f"¿Esta el backend en la misma red del PLC y encendido? Detalle: {e}")
     try:
         plc_banda.aplicar_config(plc, cfg, dry_run=False)
+        # Verificacion post-carga: confirma que la consigna de frecuencia
+        # llego ESCALADA al variador. Un ladder que asigne FreqRequest sin el
+        # x100 deja la banda inmovil sin que nada falle de forma visible.
+        try:
+            avisos = avisos + plc.verificar_vfd()
+        except Exception as e:
+            log.warning(f"No se pudo verificar la consigna del VFD: {e}")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Error escribiendo al PLC de la banda: {e}")
     finally:
