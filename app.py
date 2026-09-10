@@ -400,13 +400,19 @@ ACCIONES DE CADA SENSOR (elige una por sensor):
                           mascara de torreta indicada en torreta_sN mientras dura la espera.
   - "paro_presencia_torreta"   -> igual que "paro_presencia" y ademas enciende torreta_sN.
   - "nada"             -> el sensor no detiene la banda.
-CONTEO: no es una accion. Cualquier sensor mencionado CUENTA sus piezas solo; si el usuario
-pide contar N piezas, pon count_sN = N (y deja s N _action en "nada" si no pide que se
-detenga). El PLC lleva la cuenta, pero NO detiene la banda al llegar al conteo: si el
-usuario pide "cuenta 10 y detente", pon count_sN y ademas la accion de paro que corresponda.
+CONTEO: no es una accion, es CUANDO se ejecuta la accion. Cualquier sensor habilitado
+cuenta sus piezas solo. count_sN = 0 (o null) significa "actuar en CADA deteccion";
+count_sN = N significa "actuar UNA vez, al llegar a N detecciones". Si el usuario pide
+"cuenta 10 piezas y detente", pon count_sN = 10 y ademas la accion de paro que corresponda.
+Si solo pide contar sin detener, pon count_sN = N y sN_action = "nada".
 
 MASCARAS DE TORRETA (entero 0..7): verde=1, amarilla=2, roja=4; se suman.
   ej.: verde+roja = 5 ; las tres = 7 ; ninguna = 0.
+
+PLUMAS: la banda tiene dos plumas (barreras) motorizadas. Solo aceptan 3 comandos:
+"subir", "bajar" o "stop". Se ponen en pluma1 / pluma2 y solo si el usuario las menciona;
+en cualquier otro caso van en null. El PLC genera las salidas fisicas y evita que una
+pluma reciba los dos sentidos a la vez.
 
 ESQUEMA EXACTO:
 {
@@ -415,7 +421,7 @@ ESQUEMA EXACTO:
   "band": {
     "enable": true,               // true = arrancar la banda ; false = dejarla parada
     "direction": "derecha",       // "derecha" o "izquierda" (default "derecha")
-    "freq_hz": 35,                // frecuencia del VFD en Hz, entero 0..32767; null si no se menciona
+    "freq_hz": 35,                // frecuencia del VFD en Hz SIN escalar, entero 1..327; null si no se menciona
     "s1_action": "paro_temporizado",  // accion de S1 ; null si no se menciona S1
     "wait_s1_s": 5,               // segundos detenida por S1 (acciones de paro); null si no aplica
     "count_s1": null,             // piezas a contar en S1 (acciones de conteo); null si no aplica
@@ -425,7 +431,9 @@ ESQUEMA EXACTO:
     "count_s2": null,
     "torreta_s2": null,
     "torreta_run": null,          // mascara 0..7 con la banda en marcha; null si no se menciona
-    "torreta_idle": null          // mascara 0..7 con la banda detenida; null si no se menciona
+    "torreta_idle": null,         // mascara 0..7 con la banda detenida; null si no se menciona
+    "pluma1": null,               // "subir" | "bajar" | "stop" ; null si no se menciona
+    "pluma2": null                // lo mismo para la pluma 2
   },
   "outputs": []
 }
@@ -696,7 +704,8 @@ def normalizar_logica_banda(cfg: dict) -> dict:
     for campo in ("freq_hz",
                   "s1_action", "wait_s1_s", "count_s1", "torreta_s1",
                   "s2_action", "wait_s2_s", "count_s2", "torreta_s2",
-                  "torreta_run", "torreta_idle"):
+                  "torreta_run", "torreta_idle",
+                  "pluma1", "pluma2"):
         band.setdefault(campo, None)
     # Compatibilidad de PRESENTACION: el editor dibuja los rungs de bloqueo a
     # partir de estos dos campos. Se conservan con sus valores historicos para
@@ -3048,6 +3057,352 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
     log.info(f"/aplicar-plc OK (BANDA) -> {ip}:{port}")
     return {"status": "ok", "enviado": True, "device": "banda", "plc": f"{ip}:{port}",
             "salidas": 0, "plan": plan_legible, "avisos": avisos, "notas": notas}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# CONTROL EN VIVO DE LA BANDA TRANSPORTADORA
+# ═══════════════════════════════════════════════════════════════════
+# Estos endpoints existen SOLO para la banda. El maletin no los usa ni los
+# conoce: su flujo (/aplicar-plc con device='maletin') queda intacto.
+#
+# Reparto de responsabilidades, sin excepciones:
+#   Python  -> interpreta al frontend, VALIDA, escribe los registros de
+#              interfaz (R2/R4/R20..R41/R60/R61), dispara los triggers
+#              (R5/R6) y LEE el feedback (R1/R3/R7/R8/R25..R27/R35..R37/
+#              R62/R63).
+#   ST      -> toda la logica fisica: arranque, paro, direccion, frecuencia,
+#              reset del VFD, sensores, contadores, temporizadores, torreta,
+#              plumas, interlocks y los registros internos R500/R504/R506.
+#
+# Toda la comunicacion Modbus pasa por plc_banda.BandaPLC: aqui no hay ni una
+# sola llamada suelta a pymodbus.
+
+class BandaRequestBase(BaseModel):
+    # IP/puerto opcionales: si no vienen se usa la configurada para la banda
+    # (env BANDA_PLC_IP / POST /plc/config?device=banda) o la autodetectada.
+    ip: Optional[str] = None
+    port: Optional[int] = None
+
+
+class BandaConfigRequest(BandaRequestBase):
+    # Bloque 'band' del contrato (el mismo que genera la IA y dibuja el
+    # editor). Se acepta suelto o dentro de 'logic'.
+    band: Optional[dict] = None
+    logic: Optional[dict] = None
+    dry_run: bool = False
+    esperar_listo: bool = True
+
+
+class BandaDireccionRequest(BandaRequestBase):
+    direccion: object = None            # 1 / 2 / "derecha" / "izquierda"
+
+
+class BandaFrecuenciaRequest(BandaRequestBase):
+    freq_hz: int
+    direccion: object = None            # opcional: se reescribe con la frecuencia
+
+
+class BandaPlumaRequest(BandaRequestBase):
+    pluma: int
+    comando: object = None              # 0/1/2 o "stop"/"subir"/"bajar"
+
+
+class BandaSensorRequest(BandaRequestBase):
+    sensor: int
+
+
+def _banda_modulo():
+    try:
+        import plc_banda
+        return plc_banda
+    except Exception as e:
+        raise HTTPException(500, f"No se pudo cargar plc_banda (¿falta pymodbus?): {e}")
+
+
+def _banda_plc(req: "BandaRequestBase", autodetectar: bool = True):
+    """Resuelve IP/puerto de la BANDA y devuelve un BandaPLC conectado.
+
+    Misma barrera anti-mezcla que /aplicar-plc: si la IP de la banda coincide
+    con la del maletin se rechaza, porque son PLC distintos y el programa
+    acabaria en el equipo equivocado.
+
+    autodetectar=False lo usa el endpoint de POLLING: escanear la red cada vez
+    que el frontend refresca el estado seria absurdo, asi que sin IP conocida
+    se responde con un error claro en vez de ponerse a buscar."""
+    plc_banda = _banda_modulo()
+    if not autodetectar and not ((req.ip or "").strip() or plc_default_ip("banda")):
+        raise HTTPException(400, "No hay IP configurada para el PLC de la banda. "
+                                 "Usa POST /plc/config con device='banda' (o la "
+                                 "variable BANDA_PLC_IP) antes de leer su estado.")
+    ip, port, notas = _resolver_plc("banda", req)
+    if ip == plc_default_ip("maletin"):
+        raise HTTPException(409, f"La IP de la banda ({ip}) es la misma que la del "
+                                 "maletin. Son PLC independientes: corrige una de las "
+                                 "dos antes de operar.")
+    try:
+        plc = plc_banda.BandaPLC(ip=ip, port=port)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    try:
+        plc.connect()
+    except Exception as e:
+        raise HTTPException(503, f"No se pudo conectar al PLC de la banda {ip}:{port}. "
+                                 f"¿Esta el backend en la misma red del PLC y encendido? "
+                                 f"Detalle: {e}")
+    return plc, ip, port, notas
+
+
+def _banda_estado(plc) -> dict:
+    """Feedback completo + texto de fase, tal como lo pinta el frontend."""
+    plc_banda = _banda_modulo()
+    estado = plc.leer_estado()
+    estado["fase_texto"] = plc_banda.FASE_TEXTO.get(estado.get("fase"), "")
+    return estado
+
+
+@app.get("/banda/estado")
+def banda_estado(ip: str = "", port: int = 0):
+    """Lectura de feedback para el POLLING del frontend.
+
+    Devuelve SIEMPRE lo que dice el PLC, nunca el ultimo comando enviado: el
+    operador puede haber pulsado el paro fisico I3 y la pagina tiene que
+    enterarse. Registros leidos: R1, R3, R7, R8, R25-R27, R35-R37, R40, R41,
+    R62, R63 (+ diagnostico del VFD)."""
+    plc, ip_r, port_r, notas = _banda_plc(
+        BandaRequestBase(ip=ip or None, port=port or None), autodetectar=False)
+    try:
+        estado = _banda_estado(plc)
+    except Exception as e:
+        raise HTTPException(500, f"Error leyendo el PLC de la banda: {e}")
+    finally:
+        plc.close()
+    return {"status": "ok", "device": "banda", "plc": f"{ip_r}:{port_r}",
+            "estado": estado, "notas": notas}
+
+
+@app.post("/banda/config")
+def banda_config(req: BandaConfigRequest):
+    """Configuracion completa de la banda (el flujo normal del frontend).
+
+    Secuencia EXACTA, impuesta por el ST:
+      1. Validar TODO. Si algo esta mal no se escribe NADA ni se dispara el
+         trigger: se devuelve el error al frontend.
+      2. Escribir R2/R4, R20-R24, R30-R34, R40, R41.
+      3. Incrementar NewCfgFlag (R5) — SIEMPRE al final.
+      4. Esperar CfgReady (R7) = 1.
+      5. Informar. El arranque lo da el operador con el boton fisico I1."""
+    plc_banda = _banda_modulo()
+
+    band = req.band
+    if band is None and isinstance(req.logic, dict):
+        band = req.logic.get("band") if isinstance(req.logic.get("band"), dict) else None
+    if not isinstance(band, dict):
+        raise HTTPException(400, "Falta el bloque 'band' con la configuracion de la banda.")
+
+    cfg = {"device": "banda", "name": "Configuracion de banda", "band": band, "outputs": []}
+
+    # 1) Validacion previa: configuracion parcial NUNCA.
+    errores = plc_banda.validar_config(cfg)
+    if errores:
+        raise HTTPException(422, "La configuracion de la banda no es valida:\n- "
+                            + "\n- ".join(errores))
+
+    plan = plc_banda.plan_config(cfg)
+    plan_legible = [
+        f"banda.{m}(" + ", ".join([repr(a) for a in args]
+                                  + [f"{k}={v!r}" for k, v in kw.items()]) + ")"
+        for m, args, kw in plan
+    ]
+    avisos = plc_banda.avisos_config(cfg)
+
+    if req.dry_run:
+        return {"status": "dry-run", "enviado": False, "device": "banda",
+                "plan": plan_legible, "avisos": avisos}
+
+    plc, ip, port, notas = _banda_plc(req)
+    try:
+        # 2, 3 y 4) el plan ya lleva el orden correcto: paro -> parametros ->
+        # direccion -> NewCfgFlag -> esperar CfgReady.
+        plc_banda.aplicar_config(plc, cfg, dry_run=False)
+        try:
+            avisos = avisos + plc.verificar_vfd()
+        except Exception as e:
+            log.warning(f"No se pudo verificar la consigna del VFD: {e}")
+        estado = _banda_estado(plc)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Error escribiendo al PLC de la banda: {e}")
+    finally:
+        plc.close()
+
+    if not estado.get("cfg_ready"):
+        avisos.append("El PLC todavia no reporta CfgReady (%R7 = 1). Si no cambia "
+                      "en unos segundos, revisa que el paro I3 este suelto: con el "
+                      "paro activo el ST no completa la secuencia del VFD.")
+
+    log.info(f"/banda/config OK -> {ip}:{port}")
+    return {"status": "ok", "enviado": True, "device": "banda", "plc": f"{ip}:{port}",
+            "plan": plan_legible, "avisos": avisos, "notas": notas, "estado": estado}
+
+
+@app.post("/banda/frecuencia")
+def banda_frecuencia(req: BandaFrecuenciaRequest):
+    """CAMBIO DE FRECUENCIA: caso especial, con reconfiguracion obligatoria.
+
+    No se toca R4 con el VFD en marcha esperando que el cambio "cuaje". La
+    secuencia es: parar -> escribir R4 (y R2 si viene) -> NewCfgFlag ->
+    esperar CfgReady -> el operador vuelve a pulsar I1. El reset del VFD lo
+    ejecuta el ST; aqui solo se dispara y se espera."""
+    plc_banda = _banda_modulo()
+    hz = req.freq_hz
+    if not isinstance(hz, int) or isinstance(hz, bool):
+        raise HTTPException(422, "freq_hz debe ser un entero en Hz (sin escalar).")
+    if hz < plc_banda.FREQ_MIN_HZ or hz > plc_banda.FREQ_MAX_HZ:
+        raise HTTPException(422, f"freq_hz={hz} fuera de rango: el ST solo acepta "
+                                 f"{plc_banda.FREQ_MIN_HZ}..{plc_banda.FREQ_MAX_HZ} Hz "
+                                 f"(multiplica por 100 sobre un INT de 16 bits).")
+
+    plc, ip, port, notas = _banda_plc(req)
+    try:
+        # 1) Detener antes de reconfigurar (DirCmd = 0 -> el ST para el VFD).
+        plc.parar()
+        # 2) Nueva frecuencia (en Hz, sin escalar: el ST hace el x100).
+        direccion = req.direccion if req.direccion is not None else plc.read_band_register(
+            plc_banda.ADDR_DIR_CMD)
+        if direccion in (0, "0", None):
+            direccion = plc_banda.DIR_1     # el ST exige 1 o 2 para validar
+        plc.configurar_banda(frecuencia_hz=hz, direccion=direccion)
+        # 3) Trigger: el ST hace el reset del VFD y recarga la consigna.
+        plc.trigger_new_config()
+        # 4) Esperar confirmacion real.
+        listo = plc.esperar_config_lista()
+        avisos = plc.verificar_vfd()
+        estado = _banda_estado(plc)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Error cambiando la frecuencia de la banda: {e}")
+    finally:
+        plc.close()
+
+    if not listo:
+        avisos.append("El PLC no reporto CfgReady tras el cambio de frecuencia. "
+                      "Revisa que el paro I3 este suelto.")
+    avisos.append("Cada nueva configuracion borra la habilitacion: pulsa el boton "
+                  "fisico I1 para volver a arrancar la banda.")
+    return {"status": "ok", "device": "banda", "plc": f"{ip}:{port}",
+            "freq_hz": hz, "cfg_ready": listo, "avisos": avisos,
+            "notas": notas, "estado": estado}
+
+
+@app.post("/banda/direccion")
+def banda_direccion(req: BandaDireccionRequest):
+    """Cambia SOLO el sentido de giro (R2 = 1 o 2).
+
+    El ST usa DirCmd en vivo (§16), asi que el sentido no necesita secuencia
+    de reset: solo la frecuencia la necesita."""
+    plc, ip, port, notas = _banda_plc(req)
+    try:
+        d = plc.cambiar_direccion(req.direccion)
+        estado = _banda_estado(plc)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Error cambiando la direccion de la banda: {e}")
+    finally:
+        plc.close()
+    return {"status": "ok", "device": "banda", "plc": f"{ip}:{port}",
+            "dir_cmd": d, "notas": notas, "estado": estado}
+
+
+@app.post("/banda/paro")
+def banda_paro(req: BandaRequestBase):
+    """Paro por software: R2 = 0.
+
+    Para el ST eso es 'configuracion invalida' (§3) y responde con el VFD
+    parado (VFD_Control = 1) y CfgReady = 0. Ademas se dejan las dos plumas
+    quietas. NO sustituye al paro fisico I3, que sigue teniendo prioridad
+    absoluta y no se puede anular desde aqui."""
+    plc, ip, port, notas = _banda_plc(req)
+    try:
+        plc.parar()
+        plc.parar_plumas()
+        estado = _banda_estado(plc)
+    except Exception as e:
+        raise HTTPException(500, f"Error deteniendo la banda: {e}")
+    finally:
+        plc.close()
+    return {"status": "ok", "device": "banda", "plc": f"{ip}:{port}",
+            "notas": notas, "estado": estado,
+            "avisos": ["La banda queda detenida y SIN configuracion valida: envia "
+                       "la configuracion otra vez y pulsa I1 para volver a operar."]}
+
+
+@app.post("/banda/reset")
+def banda_reset(req: BandaRequestBase):
+    """Reset del VFD: cambia ResetCmd (R6) y espera CfgReady (R7).
+
+    El valor de R6 se INCREMENTA (1, 2, 3...) porque el ST detecta un CAMBIO
+    de valor, no un flanco 0->1. La secuencia de reset la ejecuta el ST."""
+    plc, ip, port, notas = _banda_plc(req)
+    try:
+        valor = plc.trigger_vfd_reset()
+        listo = plc.esperar_config_lista()
+        estado = _banda_estado(plc)
+    except Exception as e:
+        raise HTTPException(500, f"Error reseteando el VFD de la banda: {e}")
+    finally:
+        plc.close()
+    avisos = [] if listo else [
+        "El PLC no reporto CfgReady tras el reset. Revisa que el paro I3 este "
+        "suelto y que la configuracion cargada sea valida (direccion 1 o 2 y "
+        "frecuencia dentro de rango)."]
+    return {"status": "ok", "device": "banda", "plc": f"{ip}:{port}",
+            "reset_cmd": valor, "cfg_ready": listo, "avisos": avisos,
+            "notas": notas, "estado": estado}
+
+
+@app.post("/banda/pluma")
+def banda_pluma(req: BandaPlumaRequest):
+    """Comando de pluma: R60 (pluma 1) o R61 (pluma 2). 0=stop, 1=subir, 2=bajar.
+
+    Las salidas fisicas (Q6/Q7/Q8/Q9) y el enclavamiento entre sentidos son
+    del ST: aqui no se toca ninguna Q. El estado real se lee de R62/R63."""
+    plc, ip, port, notas = _banda_plc(req)
+    try:
+        cmd = plc.command_gate(req.pluma, req.comando)
+        estado = _banda_estado(plc)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Error mandando el comando a la pluma: {e}")
+    finally:
+        plc.close()
+    return {"status": "ok", "device": "banda", "plc": f"{ip}:{port}",
+            "pluma": req.pluma, "comando": cmd, "notas": notas, "estado": estado}
+
+
+@app.post("/banda/sensor/reset-contador")
+def banda_reset_contador(req: BandaSensorRequest):
+    """Pone a 0 el acumulado del sensor (R25 / R35).
+
+    El ST no tiene registro CountReset; el acumulado tambien lo borran el paro
+    fisico I3, NewCfgFlag y ResetCmd."""
+    plc, ip, port, notas = _banda_plc(req)
+    try:
+        plc.reset_contador(req.sensor)
+        estado = _banda_estado(plc)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Error reseteando el contador: {e}")
+    finally:
+        plc.close()
+    return {"status": "ok", "device": "banda", "plc": f"{ip}:{port}",
+            "sensor": req.sensor, "notas": notas, "estado": estado}
 
 
 @app.post("/feedback")
