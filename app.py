@@ -376,7 +376,9 @@ las lamparas configurables Q10/Q11/Q12 ni el secuenciador de pasos, y tampoco lo
 I1/I2/I7 del maletin. Si la instruccion pide algo de esos, NO lo inventes: ignora esa parte.
 
 BOTONERA FISICA DE LA BANDA (fija, NO configurable por JSON):
-- I1 (NA) arranca la banda; deja la habilitacion enclavada al soltarlo.
+- I1 (NA) es la UNICA forma de habilitar la banda: el Ladder maestro no tiene registro
+  BandEnable escribible. El JSON deja la configuracion y el sentido de giro cargados;
+  el arranque final lo da el operador con I1.
 - I3 (NC) la detiene con prioridad sobre todo; para rearrancar hay que pulsar I1 otra vez.
 - I2 (NC) esta reservado: hoy no hace nada.
 Estos botones ya estan cableados en el Ladder maestro y funcionan siempre. Si el usuario
@@ -392,11 +394,16 @@ HARDWARE FIJO (no inventes nada fuera de esto):
 
 ACCIONES DE CADA SENSOR (elige una por sensor):
   - "paro_temporizado" -> al detectar, la banda se DETIENE los segundos indicados y sigue sola.
-  - "paro_enclavado"   -> al detectar, se detiene los segundos indicados y QUEDA DETENIDA
-                          (hasta que se cargue un programa nuevo).
-  - "contar"           -> solo cuenta las piezas que pasan; la banda no se detiene.
-  - "contar_y_parar"   -> cuenta y, al llegar al conteo indicado, DETIENE la banda.
-  - "nada"             -> el sensor no hace nada.
+  - "paro_presencia"   -> la banda se detiene MIENTRAS el sensor siga viendo la pieza, y
+                          sigue sola en cuanto la pieza se retira.
+  - "paro_temporizado_torreta" -> igual que "paro_temporizado" y ademas enciende la
+                          mascara de torreta indicada en torreta_sN mientras dura la espera.
+  - "paro_presencia_torreta"   -> igual que "paro_presencia" y ademas enciende torreta_sN.
+  - "nada"             -> el sensor no detiene la banda.
+CONTEO: no es una accion. Cualquier sensor mencionado CUENTA sus piezas solo; si el usuario
+pide contar N piezas, pon count_sN = N (y deja s N _action en "nada" si no pide que se
+detenga). El PLC lleva la cuenta, pero NO detiene la banda al llegar al conteo: si el
+usuario pide "cuenta 10 y detente", pon count_sN y ademas la accion de paro que corresponda.
 
 MASCARAS DE TORRETA (entero 0..7): verde=1, amarilla=2, roja=4; se suman.
   ej.: verde+roja = 5 ; las tres = 7 ; ninguna = 0.
@@ -455,7 +462,7 @@ Peticion: "Cuenta 10 piezas en S2 y detiene la banda; con la banda corriendo enc
 JSON: {"name":"Conteo 10 en S2","device":"banda",
  "band":{"enable":true,"direction":"derecha","freq_hz":null,
    "s1_action":null,"wait_s1_s":null,"count_s1":null,"torreta_s1":null,
-   "s2_action":"contar_y_parar","wait_s2_s":null,"count_s2":10,"torreta_s2":null,
+   "s2_action":"paro_presencia","wait_s2_s":null,"count_s2":10,"torreta_s2":null,
    "torreta_run":1,"torreta_idle":null},
  "outputs":[]}"""
 

@@ -3,8 +3,13 @@
 CAPA FISICA DE LA BANDA TRANSPORTADORA  (PLC INDEPENDIENTE)
 ============================================================================
 
-Espejo EXACTO de "Programa_Banda.txt" (PROGRAMA MAESTRO - BANDA
-TRANSPORTADORA STANDALONE, Horner XL4 / XC1E5, Cscape 10.2 IEC ST).
+Espejo EXACTO del Ladder maestro NUEVO de la banda:
+    Archivos Cscape/Programa_Banda.txt        (texto estructurado)
+    Archivos Cscape/ladder_maestro_banda.csp  (tabla de tags = direcciones)
+
+Las direcciones de este modulo NO se deducen del texto del programa (el ST
+usa solo nombres simbolicos): salen de la tabla de tags vigente del .csp,
+que es la que el compilador de Cscape descargo al PLC.
 
 Este modulo es GEMELO e INDEPENDIENTE de plc_maestro.py:
 
@@ -44,108 +49,134 @@ def R(n: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# MAPA DE REGISTROS  (seccion "MAPA DE REGISTROS" del Ladder maestro)
+# MAPA DE REGISTROS  (tabla de tags vigente de ladder_maestro_banda.csp)
 # ---------------------------------------------------------------------------
 # CONTROL GENERAL
-ADDR_BAND_ENABLE   = R(1)    # BandEnable    RW  0=disable, 1=enable
-ADDR_DIR_CMD       = R(2)    # DirCmd        RW  0=derecha, 1=izquierda
-ADDR_NEW_CFG_FLAG  = R(3)    # NewCfgFlag    RW  flanco 0->1 dispara init VFD
-ADDR_FREQ_REQUEST  = R(4)    # FreqRequest   RW  Hz (el PLC lo multiplica x100)
-ADDR_BAND_STATUS   = R(5)    # BandStatus    RO  bitfield de estado
-ADDR_RESET_CMD     = R(6)    # ResetCmd      RW  flanco 0->1 = reset VFD manual
+# OJO: BandEnable ya NO es un registro. En el Ladder maestro nuevo es un BOOL
+# global sin direccion, que SOLO enciende el boton fisico I1 (§4) y borran el
+# boton I3 / GenStop (§3). %R1 es su ESPEJO de lectura (§16), no su mando.
+ADDR_BAND_ENABLE_REG = R(1)    # BandEnable_Reg  RO  1 = habilitacion latcheada
+ADDR_DIR_CMD         = R(2)    # DirCmd          RW  0=paro, 1=derecha, 2=izquierda
+ADDR_BAND_STATUS     = R(3)    # BandStatus      RO  0=parada, 1=derecha, 2=izquierda
+ADDR_FREQ_REQUEST    = R(4)    # FreqRequest     RW  Hz (sin escalar)
+ADDR_NEW_CFG_FLAG    = R(5)    # NewCfgFlag      RW  cambio de valor <>0 = nueva config
+ADDR_RESET_CMD       = R(6)    # ResetCmd        RW  cambio de valor <>0 = reset VFD
+ADDR_CFG_READY_REG   = R(7)    # CfgReady_Reg    RO  1 = configuracion armada
+ADDR_VFD_SPEED_DISP  = R(8)    # VFD_SpeedDisp   RO  velocidad actual (§9)
 
-# SENSOR S1 / S2  (misma estructura, bloques %R10.. y %R20..)
-ADDR_S1_ENABLE        = R(10)
-ADDR_S1_ACTION        = R(11)
-ADDR_S1_TIMER_PRESET  = R(12)
-ADDR_S1_COUNT_PRESET  = R(13)
-ADDR_S1_COUNT_ACCUM   = R(14)   # RO
-ADDR_S1_TORRETA_MASK  = R(15)
-ADDR_S1_TIMER_ACCUM   = R(16)   # RO
-ADDR_S1_COUNT_RESET   = R(17)
+# SENSOR S1 (%R20..%R26) y S2 (%R30..%R36)
+ADDR_S1_ENABLE        = R(20)
+ADDR_S1_ACTION        = R(21)
+ADDR_S1_TIMER_PRESET  = R(22)
+ADDR_S1_COUNT_PRESET  = R(23)
+ADDR_S1_TORRETA_MASK  = R(24)
+ADDR_S1_COUNT_ACCUM   = R(25)   # RO salvo para ponerlo a 0 (no hay CountReset)
+ADDR_S1_TIMER_ACCUM   = R(26)   # RO
 
-ADDR_S2_ENABLE        = R(20)
-ADDR_S2_ACTION        = R(21)
-ADDR_S2_TIMER_PRESET  = R(22)
-ADDR_S2_COUNT_PRESET  = R(23)
-ADDR_S2_COUNT_ACCUM   = R(24)   # RO
-ADDR_S2_TORRETA_MASK  = R(25)
-ADDR_S2_TIMER_ACCUM   = R(26)   # RO
-ADDR_S2_COUNT_RESET   = R(27)
+ADDR_S2_ENABLE        = R(30)
+ADDR_S2_ACTION        = R(31)
+ADDR_S2_TIMER_PRESET  = R(32)
+ADDR_S2_COUNT_PRESET  = R(33)
+ADDR_S2_TORRETA_MASK  = R(34)
+ADDR_S2_COUNT_ACCUM   = R(35)   # RO salvo para ponerlo a 0
+ADDR_S2_TIMER_ACCUM   = R(36)   # RO
 
 # Acceso por numero de sensor (1 / 2)
 ADDR_SENSOR = {
     1: {"enable": ADDR_S1_ENABLE, "action": ADDR_S1_ACTION,
         "timer_preset": ADDR_S1_TIMER_PRESET, "count_preset": ADDR_S1_COUNT_PRESET,
-        "count_accum": ADDR_S1_COUNT_ACCUM, "torreta_mask": ADDR_S1_TORRETA_MASK,
-        "timer_accum": ADDR_S1_TIMER_ACCUM, "count_reset": ADDR_S1_COUNT_RESET},
+        "torreta_mask": ADDR_S1_TORRETA_MASK, "count_accum": ADDR_S1_COUNT_ACCUM,
+        "timer_accum": ADDR_S1_TIMER_ACCUM},
     2: {"enable": ADDR_S2_ENABLE, "action": ADDR_S2_ACTION,
         "timer_preset": ADDR_S2_TIMER_PRESET, "count_preset": ADDR_S2_COUNT_PRESET,
-        "count_accum": ADDR_S2_COUNT_ACCUM, "torreta_mask": ADDR_S2_TORRETA_MASK,
-        "timer_accum": ADDR_S2_TIMER_ACCUM, "count_reset": ADDR_S2_COUNT_RESET},
+        "torreta_mask": ADDR_S2_TORRETA_MASK, "count_accum": ADDR_S2_COUNT_ACCUM,
+        "timer_accum": ADDR_S2_TIMER_ACCUM},
 }
 
 # TORRETA  (bitmask b0=Verde, b1=Amarilla, b2=Roja; valores 0..7)
-ADDR_TORRETA_RUN   = R(30)
-ADDR_TORRETA_IDLE  = R(31)
+ADDR_TORRETA_RUN   = R(40)
+ADDR_TORRETA_IDLE  = R(41)
 
-# SECUENCIA INIT VFD  (solo lectura)
-ADDR_INIT_SEQ_STATE   = R(50)
-ADDR_INIT_TIMER_ACCUM = R(51)
+# SECUENCIA INIT VFD  (solo lectura; los mueve la maquina de estados §7)
+ADDR_INIT_SEQ_STATE   = R(39)
+ADDR_INIT_TIMER_ACCUM = R(42)
+ADDR_VFD_FREQ_CALC    = R(45)
 
 # VFD (FIJOS, no modificar). Desde Python solo se LEEN: los gobierna el ladder.
-ADDR_VFD_CONTROL   = R(500)   # 18=derecha, 34=izquierda, 1=stop
-ADDR_VFD_SPEED_RAW = R(502)   # velocidad actual x100
-ADDR_VFD_FREQ_SEND = R(504)   # FreqRequest x100
-ADDR_VFD_RESET     = R(506)
-ADDR_VFD_STATUS    = R(508)
+ADDR_VFD_CONTROL   = R(500)   # 18=derecha, 34=izquierda, 1=stop  (§15)
+ADDR_VFD_SPEED_RAW = R(502)   # velocidad actual leida del variador
+ADDR_VFD_RESET     = R(506)   # 0 / 2 durante la secuencia de reset (§7)
 
 
 # ---------------------------------------------------------------------------
 # VOCABULARIO DEL LADDER
 # ---------------------------------------------------------------------------
-# DirCmd (%R2) -> comando que el ladder envia al VFD (%R500)
-DIR_DERECHA = 0
-DIR_IZQUIERDA = 1
+# DirCmd (%R2) -> §15 lo traduce a VFD_Control (%R500):
+#   DirCmd = 1 -> VFD_Control = 18 (derecha)
+#   DirCmd = 2 -> VFD_Control = 34 (izquierda)
+#   cualquier otro valor (0) -> VFD_Control = 1 (paro)
+DIR_PARO      = 0
+DIR_DERECHA   = 1
+DIR_IZQUIERDA = 2
 
 BAND_DIR = {
+    "paro": DIR_PARO, "parar": DIR_PARO, "stop": DIR_PARO, "0": DIR_PARO,
     "derecha": DIR_DERECHA, "right": DIR_DERECHA, "der": DIR_DERECHA,
-    "cw": DIR_DERECHA, "horario": DIR_DERECHA, "0": DIR_DERECHA,
+    "cw": DIR_DERECHA, "horario": DIR_DERECHA, "1": DIR_DERECHA,
     "izquierda": DIR_IZQUIERDA, "left": DIR_IZQUIERDA, "izq": DIR_IZQUIERDA,
-    "ccw": DIR_IZQUIERDA, "antihorario": DIR_IZQUIERDA, "1": DIR_IZQUIERDA,
+    "ccw": DIR_IZQUIERDA, "antihorario": DIR_IZQUIERDA, "2": DIR_IZQUIERDA,
 }
 
 VFD_CMD_DERECHA   = 18
 VFD_CMD_IZQUIERDA = 34
 VFD_CMD_PARO      = 1
 
-# S1_Action / S2_Action (%R11 / %R21), tal como los interpreta el CASE del ladder
-ACTION_NADA            = 0   # sin accion configurada
-ACTION_PARO_TEMPORIZADO = 1  # stop + timer + continua sola
-ACTION_PARO_ENCLAVADO   = 2  # stop + timer + LATCH (queda parada)
-ACTION_CONTAR           = 3   # solo cuenta los flancos del sensor
-ACTION_CONTAR_Y_PARAR   = 4   # cuenta y al llegar al preset detiene la banda
+# S1_Action / S2_Action (%R21 / %R31), tal como los interpretan §10..§14:
+#   >0  -> al flanco de subida del sensor se enclava el paro (SN_StopLatch)
+#   2/4 -> ademas arranca el timer: la banda sigue sola al vencer TimerPreset
+#   1/3 -> el paro dura mientras el sensor siga detectando la pieza
+#   3/4 -> ademas superpone la mascara de torreta mientras dura el evento
+ACTION_NADA                     = 0
+ACTION_PARO_PRESENCIA           = 1
+ACTION_PARO_TEMPORIZADO         = 2
+ACTION_PARO_PRESENCIA_TORRETA   = 3
+ACTION_PARO_TEMPORIZADO_TORRETA = 4
 
 SENSOR_ACTIONS = {
     "nada": ACTION_NADA,
+    "paro_presencia": ACTION_PARO_PRESENCIA,
+    "paro_mientras_detecta": ACTION_PARO_PRESENCIA,
     "paro_temporizado": ACTION_PARO_TEMPORIZADO,
-    "paro_enclavado": ACTION_PARO_ENCLAVADO,
-    "contar": ACTION_CONTAR,
-    "contar_y_parar": ACTION_CONTAR_Y_PARAR,
+    "paro_presencia_torreta": ACTION_PARO_PRESENCIA_TORRETA,
+    "paro_mientras_detecta_torreta": ACTION_PARO_PRESENCIA_TORRETA,
+    "paro_temporizado_torreta": ACTION_PARO_TEMPORIZADO_TORRETA,
 }
 
-# Sensores fisicos: S1 = %I0004 -> I[3] ; S2 = %I0005 -> I[4]. Ambos NC (el
-# ladder los invierte con NOT).
+# Acciones del Ladder ANTERIOR que ya no existen. Se siguen ACEPTANDO para no
+# romper programas guardados, pero se traducen a lo que el ladder nuevo si
+# puede hacer, y avisos_config() lo explica:
+#   'paro_enclavado' -> el ladder nuevo no tiene enclavamiento permanente; lo
+#                       mas parecido es el paro temporizado (§11 lo libera).
+#   'contar' / 'contar_y_parar' -> el conteo ya NO es una accion: cualquier
+#                       sensor habilitado cuenta sus flancos en SN_CountAccum
+#                       (§10), y SN_CountDone no detiene la banda.
+SENSOR_ACTIONS_OBSOLETAS = {
+    "paro_enclavado": ACTION_PARO_TEMPORIZADO,
+    "contar": ACTION_NADA,
+    "contar_y_parar": ACTION_NADA,
+}
+
+# Sensores fisicos: S1 = %I0004 -> PhIn4 ; S2 = %I0005 -> PhIn5. Ambos NC (el
+# ladder los invierte con NOT en §2).
 SENSORES = {1: "S1", 2: "S2"}
 
-# Botonera fisica del tablero (Ladder v2.0, seccion 1b). NO se controla por
-# Modbus: el ladder la lee directo y el backend solo puede OBSERVAR su efecto.
-#   %I0001 -> I[0]  I1  NA  arranque: flanco de subida pone BandEnable = 1
-#   %I0002 -> I[1]  I2  NC  RESERVADO, sin funcion asignada en el ladder
-#   %I0003 -> I[2]  I3  NC  paro: fuerza GenStop y pone BandEnable = 0
-# I3 tiene prioridad sobre todo lo demas, incluido este backend: mientras
-# este presionado el ladder borra BandEnable en cada scan, asi que un
-# habilitar() por Modbus no surte efecto (ver el aviso en habilitar()).
+# Botonera fisica del tablero (§2/§3/§4). NO se controla por Modbus: el ladder
+# la lee directo y el backend solo puede OBSERVAR su efecto en %R1/%R3.
+#   %I0001 -> PhIn1  I1  NA  arranque: flanco de subida pone BandEnable = TRUE
+#   %I0002 -> (sin uso en el Ladder maestro nuevo)
+#   %I0003 -> PhIn3  I3  NC  paro: fuerza GenStop y borra BandEnable
+# I3 tiene prioridad sobre todo. Y desde el Ladder maestro nuevo, I1 es la
+# UNICA forma de habilitar la banda: no hay registro BandEnable escribible.
 BOTONES = {
     "I1": {"addr": "%I0001", "tipo": "NA", "funcion": "arranque"},
     "I2": {"addr": "%I0002", "tipo": "NC", "funcion": None},
@@ -155,22 +186,20 @@ BOTONES = {
 # Bit de cada lampara dentro de una mascara de torreta (0..7)
 TORRETA_BIT = {"verde": 1, "amarilla": 2, "roja": 4}
 
-# Bits de BandStatus (%R5), para leer_estado()
-STATUS_BITS = [
-    (1,   "running"),        # b0 banda en movimiento
-    (2,   "resetting"),      # b1 secuencia VFD reset activa
-    (4,   "s1_wait"),        # b2 timer S1 corriendo
-    (8,   "s2_wait"),        # b3 timer S2 corriendo
-    (16,  "s1_count_done"),  # b4 contador S1 alcanzo preset
-    (32,  "s2_count_done"),  # b5 contador S2 alcanzo preset
-    (64,  "init_armed"),     # b6 secuencia init completa
-    (128, "gen_stop"),       # b7 parada general activa
-    (256, "stop_button"),    # b8 boton fisico de paro I3 presionado
-]
+# BandStatus (%R3) segun §16: ya NO es un bitfield, es un enumerado.
+BAND_STATUS = {
+    0: "parada",
+    1: "corriendo_derecha",
+    2: "corriendo_izquierda",
+}
 
+# InitSeqState (%R39) segun la maquina de estados de §7.
 INIT_SEQ_ESTADOS = {
-    0: "idle", 1: "stopping", 2: "resetting",
-    3: "waiting", 4: "loading", 5: "armed",
+    0: "idle",              # sin secuencia en curso
+    1: "arranque",          # arma la secuencia, limpia VFD_ResetReg
+    2: "pulso_reset",       # VFD_ResetReg := 2
+    3: "espera_reset",      # mantiene el reset 2 s (InitTimerAccum)
+    4: "carga_config",      # carga FreqRequest, guarda RETAIN, CfgReady := 1
 }
 
 # Rango entero admitido por los registros del ladder (INT de Cscape)
@@ -212,16 +241,48 @@ class BandaPLC:
         self.client.close()
 
     # -- primitivas --------------------------------------------------------
+    # pymodbus renombro el argumento que identifica al servidor Modbus: hasta
+    # 3.8 era slave=, desde 3.9 es device_id= (y en 3.13, que es la version
+    # instalada, slave= ya ni existe y la llamada revienta con TypeError). Se
+    # intenta el nombre moderno y se cae al antiguo, exactamente igual que
+    # plc_maestro.XL4, para que los dos PLC funcionen con cualquiera de las
+    # dos versiones de la libreria.
     def _w(self, addr: int, valor: int):
-        r = self.client.write_register(addr, int(valor), slave=self.unit)
-        if r.isError():
+        valor = int(valor) & 0xFFFF
+        try:
+            r = self.client.write_register(addr, valor, device_id=self.unit)
+        except TypeError:
+            r = self.client.write_register(addr, valor, slave=self.unit)
+        if r is None:
+            raise IOError(f"Sin respuesta escribiendo %R{addr - 2999} (Modbus {addr})")
+        if hasattr(r, "isError") and r.isError():
             raise IOError(f"Error escribiendo %R{addr - 2999} (Modbus {addr}) = {valor}")
 
     def _r(self, addr: int) -> int:
-        r = self.client.read_holding_registers(addr, count=1, slave=self.unit)
-        if r.isError():
+        try:
+            r = self.client.read_holding_registers(addr, count=1, device_id=self.unit)
+        except TypeError:
+            r = self.client.read_holding_registers(addr, count=1, slave=self.unit)
+        if r is None:
+            raise IOError(f"Sin respuesta leyendo %R{addr - 2999} (Modbus {addr})")
+        if hasattr(r, "isError") and r.isError():
             raise IOError(f"Error leyendo %R{addr - 2999} (Modbus {addr})")
         return r.registers[0]
+
+    def _pulso_valor_nuevo(self, addr: int) -> int:
+        """Escribe en 'addr' un valor <>0 DISTINTO del que ya tenia.
+
+        §5 y §6 no detectan un flanco 0->1, sino un CAMBIO DE VALOR:
+            NewCfgTrigger := (NewCfgFlag <> 0) AND (NewCfgFlag <> NewCfgPrev)
+        Escribir 0 y luego 1 solo dispara la primera vez, porque NewCfgPrev
+        se queda en 1 y el segundo 1 ya no es un valor distinto."""
+        try:
+            actual = self._r(addr)
+        except IOError:
+            actual = 0
+        nuevo = (int(actual) % INT_MAX) + 1     # 1..32767, siempre distinto
+        self._w(addr, nuevo)
+        return nuevo
 
     # -- helpers de traduccion --------------------------------------------
     @staticmethod
@@ -229,8 +290,9 @@ class BandaPLC:
         if valor is None:
             return None
         if isinstance(valor, int):
-            if valor not in (DIR_DERECHA, DIR_IZQUIERDA):
-                raise ValueError("La direccion debe ser 0 (derecha) o 1 (izquierda).")
+            if valor not in (DIR_PARO, DIR_DERECHA, DIR_IZQUIERDA):
+                raise ValueError(
+                    "DirCmd debe ser 0 (paro), 1 (derecha) o 2 (izquierda).")
             return valor
         clave = str(valor).lower()
         if clave not in BAND_DIR:
@@ -242,14 +304,16 @@ class BandaPLC:
         if valor is None:
             return None
         if isinstance(valor, int):
-            if valor not in SENSOR_ACTIONS.values():
+            if valor not in range(0, 5):
                 raise ValueError(f"Accion de sensor no valida: {valor} (0..4).")
             return valor
         clave = str(valor).lower()
-        if clave not in SENSOR_ACTIONS:
-            raise ValueError(
-                f"Accion de sensor no valida: {valor}. Usa {list(SENSOR_ACTIONS)}.")
-        return SENSOR_ACTIONS[clave]
+        if clave in SENSOR_ACTIONS:
+            return SENSOR_ACTIONS[clave]
+        if clave in SENSOR_ACTIONS_OBSOLETAS:
+            return SENSOR_ACTIONS_OBSOLETAS[clave]
+        raise ValueError(
+            f"Accion de sensor no valida: {valor}. Usa {sorted(SENSOR_ACTIONS)}.")
 
     @staticmethod
     def _entero(valor, low, high, etiqueta):
@@ -258,29 +322,36 @@ class BandaPLC:
             raise ValueError(f"{etiqueta} debe estar entre {low} y {high} (recibido {v}).")
         return v
 
-    # -- §0/§12  configuracion general ------------------------------------
+    # -- §8/§15  configuracion general ------------------------------------
     def configurar_banda(self, frecuencia_hz=None, direccion=None):
-        """Escribe FreqRequest (%R4) y DirCmd (%R2). NO arranca la banda."""
+        """Escribe FreqRequest (%R4) y DirCmd (%R2). NO habilita la banda.
+
+        La frecuencia va en Hz tal cual: §7 (estado 4) y §8 hacen
+        VFD_FreqCalc := FreqRequest, sin escalado."""
         if frecuencia_hz is not None:
             self._w(ADDR_FREQ_REQUEST,
                     self._entero(frecuencia_hz, 0, INT_MAX, "La frecuencia"))
         d = self._direccion(direccion)
         if d is not None:
             self._w(ADDR_DIR_CMD, d)
+        nombres = {DIR_PARO: "paro", DIR_DERECHA: "derecha", DIR_IZQUIERDA: "izquierda"}
         print("BANDA configurada"
               + (f" | frecuencia={frecuencia_hz} Hz" if frecuencia_hz is not None else "")
-              + (f" | direccion={'izquierda' if d == 1 else 'derecha'}" if d is not None else ""))
+              + (f" | DirCmd={d} ({nombres[d]})" if d is not None else ""))
 
-    # -- §6/§7  sensores S1 y S2 ------------------------------------------
+    # -- §10..§14  sensores S1 y S2 ---------------------------------------
     def configurar_sensor(self, n, accion=None, timer_preset=None,
                           count_preset=None, torreta_mask=None, habilitar=True):
-        """Configura el bloque completo de S1 (%R10..%R15) o S2 (%R20..%R25).
+        """Configura el bloque completo de S1 (%R20..%R24) o S2 (%R30..%R34).
 
-        accion       : 'nada' | 'paro_temporizado' | 'paro_enclavado' |
-                       'contar' | 'contar_y_parar'  (o su codigo 0..4)
-        timer_preset : segundos que la banda se detiene (acciones 1 y 2)
-        count_preset : preset del contador (acciones 3 y 4)
-        torreta_mask : bitmask 0..7 que se superpone mientras dura el evento
+        accion       : 'nada' | 'paro_presencia' | 'paro_temporizado' |
+                       'paro_presencia_torreta' | 'paro_temporizado_torreta'
+                       (o su codigo 0..4)
+        timer_preset : segundos que la banda se detiene (acciones 2 y 4)
+        count_preset : preset del contador; el conteo corre siempre que el
+                       sensor este habilitado, sea cual sea la accion (§10)
+        torreta_mask : bitmask 0..7 que se superpone durante el evento
+                       (acciones 3 y 4)
         """
         if n not in ADDR_SENSOR:
             raise ValueError(f"Sensor no valido: {n}. Solo existen S1 y S2.")
@@ -302,7 +373,7 @@ class BandaPLC:
                     self._entero(torreta_mask, 0, MASK_MAX, f"La mascara de torreta de S{n}"))
 
         print(f"S{n}: {'habilitado' if habilitar else 'deshabilitado'}"
-              + (f" | accion={accion}" if accion is not None else "")
+              + (f" | accion={accion} (SN_Action={acc})" if acc is not None else "")
               + (f" | timer={timer_preset}s" if timer_preset is not None else "")
               + (f" | conteo={count_preset}" if count_preset is not None else "")
               + (f" | torreta={torreta_mask}" if torreta_mask is not None else ""))
@@ -316,18 +387,23 @@ class BandaPLC:
         print(f"S{n}: deshabilitado")
 
     def reset_contador(self, n):
-        """Pone a 0 el acumulado del sensor (%R17 / %R27; el ladder auto-limpia)."""
+        """Pone a 0 el acumulado del sensor (%R25 / %R35).
+
+        El Ladder maestro nuevo NO tiene registro CountReset: el acumulado es
+        RETAIN y solo lo borra el paro fisico I3 (§3). Se escribe directamente
+        el acumulador, que §10 unicamente incrementa en flanco de subida."""
         if n not in ADDR_SENSOR:
             raise ValueError(f"Sensor no valido: {n}.")
-        self._w(ADDR_SENSOR[n]["count_reset"], 1)
+        self._w(ADDR_SENSOR[n]["count_accum"], 0)
         print(f"S{n}: contador reseteado")
 
-    # -- §10  torreta ------------------------------------------------------
+    # -- §14  torreta ------------------------------------------------------
     def configurar_torreta(self, mask_run=None, mask_idle=None):
-        """TorretaRun (%R30) y TorretaIdle (%R31). Bitmask 0..7 (b0=V,b1=A,b2=R).
+        """TorretaRun (%R40) y TorretaIdle (%R41). Bitmask 0..7 (b0=V,b1=A,b2=R).
 
         La torreta la gobierna el ladder; aqui solo se declara que se enciende
-        con la banda corriendo y que se enciende con la banda detenida."""
+        con la banda corriendo y que se enciende con la banda detenida. Las
+        mascaras de los sensores (acciones 3 y 4) tienen prioridad sobre estas."""
         if mask_run is not None:
             self._w(ADDR_TORRETA_RUN,
                     self._entero(mask_run, 0, MASK_MAX, "La mascara de torreta en marcha"))
@@ -338,55 +414,74 @@ class BandaPLC:
               + (f" | run={mask_run}" if mask_run is not None else "")
               + (f" | idle={mask_idle}" if mask_idle is not None else ""))
 
-    # -- §2/§3  secuencia de inicializacion del VFD ------------------------
+    # -- §5/§6/§7  secuencia de inicializacion del VFD ---------------------
     def aplicar_nueva_config(self):
-        """Flanco 0->1 en NewCfgFlag (%R3): dispara la secuencia init del VFD
-        (stop -> reset -> espera 3 s -> carga frecuencia -> armed).
+        """Cambia NewCfgFlag (%R5): dispara la secuencia init del VFD
+        (§7: VFD_ResetReg 0 -> 2 -> 2 s -> 0 -> carga FreqRequest -> CfgReady=1).
 
-        SIEMPRE debe llamarse DESPUES de escribir la configuracion y ANTES de
-        habilitar: hasta que InitArmed sea TRUE el ladder mantiene GenStop."""
-        self._w(ADDR_NEW_CFG_FLAG, 0)
-        self._w(ADDR_NEW_CFG_FLAG, 1)
-        print("Nueva configuracion aplicada (secuencia init del VFD lanzada)")
+        SIEMPRE debe llamarse DESPUES de escribir la configuracion: hasta que
+        CfgReady sea TRUE, §15 mantiene VFD_Control en paro."""
+        v = self._pulso_valor_nuevo(ADDR_NEW_CFG_FLAG)
+        print(f"Nueva configuracion aplicada (NewCfgFlag={v}; secuencia init lanzada)")
 
     def reset_vfd(self):
-        """Flanco 0->1 en ResetCmd (%R6): reset manual del VFD."""
-        self._w(ADDR_RESET_CMD, 0)
-        self._w(ADDR_RESET_CMD, 1)
-        print("Reset del VFD solicitado")
+        """Cambia ResetCmd (%R6): reset manual del VFD (§6 -> InitSeqState=1)."""
+        v = self._pulso_valor_nuevo(ADDR_RESET_CMD)
+        print(f"Reset del VFD solicitado (ResetCmd={v})")
 
-    # -- §8/§9  marcha y paro ---------------------------------------------
-    def habilitar(self, on=True):
-        """BandEnable (%R1). Con 0 el ladder fuerza GenStop y VFD en paro.
-
-        El boton fisico de paro I3 tiene prioridad sobre este registro: si
-        esta presionado, el ladder vuelve a poner BandEnable en 0 en el
-        siguiente scan y la banda no arranca. Se avisa en vez de dejar que
-        el comando se pierda en silencio."""
-        self._w(ADDR_BAND_ENABLE, 1 if on else 0)
-        print(f"BANDA {'HABILITADA' if on else 'DETENIDA'}")
-        if on and self.paro_por_boton():
-            print("AVISO: el boton fisico de paro (I3) esta presionado; "
-                  "la banda NO arrancara hasta que se libere y se pulse I1.")
-
-    def paro_por_boton(self) -> bool:
-        """True si el boton fisico de paro I3 esta presionado (BandStatus b8).
-
-        Es la unica via para distinguir un paro por botonera de los demas
-        motivos de gen_stop (sensor, secuencia init, BandEnable=0)."""
-        return bool(self._r(ADDR_BAND_STATUS) & 256)
-
+    # -- §15/§16  marcha y paro -------------------------------------------
     def parar(self):
-        self.habilitar(False)
+        """Paro por Modbus: DirCmd (%R2) = 0.
+
+        Es la UNICA via de paro que le queda al backend en el Ladder maestro
+        nuevo: con DirCmd = 0, §15 deja tmpDir = 1 y BandRunning = FALSE, o
+        sea VFD_Control = 1 (paro del variador)."""
+        self._w(ADDR_DIR_CMD, DIR_PARO)
+        print("BANDA DETENIDA (DirCmd=0 -> VFD_Control=1)")
+
+    def habilitar(self, on=True, direccion=None):
+        """Arranca (on=True) o detiene (on=False) el movimiento.
+
+        AVISO IMPORTANTE del Ladder maestro nuevo: BandEnable ya NO es un
+        registro Modbus. Es un BOOL que solo enciende el boton fisico I1 (§4)
+        y borran I3 / GenStop (§3). Desde aqui lo unico que se puede hacer es
+        dar el sentido de giro (DirCmd) y comprobar en %R1 si el operador ya
+        habilito la banda; si no lo ha hecho, se avisa en vez de dejar que el
+        comando se pierda en silencio."""
+        if not on:
+            self.parar()
+            return
+        d = self._direccion(direccion) if direccion is not None else None
+        if d is not None:
+            self._w(ADDR_DIR_CMD, d)
+        print("BANDA lista para marcha" + (f" (DirCmd={d})" if d is not None else ""))
+        if not self.band_enable():
+            print("AVISO: BandEnable esta en 0 (%R1). El Ladder maestro solo lo "
+                  "enciende con el boton fisico I1: pulsalo (y suelta I3) para "
+                  "que la banda arranque con esta configuracion.")
+
+    def band_enable(self) -> bool:
+        """True si BandEnable esta latcheado (%R1 = BandEnable_Reg, §16)."""
+        return self._r(ADDR_BAND_ENABLE_REG) == 1
+
+    def config_lista(self) -> bool:
+        """True si la secuencia init termino y CfgReady esta activo (%R7)."""
+        return self._r(ADDR_CFG_READY_REG) == 1
 
     # -- lectura de estado -------------------------------------------------
     def leer_estado(self) -> dict:
-        """Lee los registros RO del ladder (BandStatus, acumulados, VFD)."""
+        """Lee los registros RO del ladder (§16 y acumulados de §10..§13)."""
         status = self._r(ADDR_BAND_STATUS)
-        estado = {nombre: bool(status & bit) for bit, nombre in STATUS_BITS}
         seq = self._r(ADDR_INIT_SEQ_STATE)
-        estado.update({
+        return {
             "band_status": status,
+            "estado": BAND_STATUS.get(status, str(status)),
+            "running": status in (1, 2),
+            "direccion": {1: "derecha", 2: "izquierda"}.get(status),
+            "band_enable": self._r(ADDR_BAND_ENABLE_REG) == 1,
+            "cfg_ready": self._r(ADDR_CFG_READY_REG) == 1,
+            "dir_cmd": self._r(ADDR_DIR_CMD),
+            "freq_request_hz": self._r(ADDR_FREQ_REQUEST),
             "init_seq_state": seq,
             "init_seq": INIT_SEQ_ESTADOS.get(seq, str(seq)),
             "init_timer_s": self._r(ADDR_INIT_TIMER_ACCUM),
@@ -395,16 +490,17 @@ class BandaPLC:
             "s2_count": self._r(ADDR_S2_COUNT_ACCUM),
             "s2_timer_s": self._r(ADDR_S2_TIMER_ACCUM),
             "vfd_control": self._r(ADDR_VFD_CONTROL),
-            "vfd_speed_hz": self._r(ADDR_VFD_SPEED_RAW) / 100.0,
-        })
-        return estado
+            "vfd_freq_calc": self._r(ADDR_VFD_FREQ_CALC),
+            "vfd_reset": self._r(ADDR_VFD_RESET),
+            "vfd_speed": self._r(ADDR_VFD_SPEED_DISP),
+        }
 
 
 # ---------------------------------------------------------------------------
 # VALIDADOR DEL BLOQUE "band"
 # ---------------------------------------------------------------------------
 # Contrato del JSON (identico al que ya dibuja el frontend, mas campos
-# ADITIVOS opcionales que el nuevo Ladder maestro hizo posibles):
+# ADITIVOS opcionales que el Ladder maestro nuevo hizo posibles):
 #
 #   {
 #     "device": "banda",
@@ -415,9 +511,10 @@ class BandaPLC:
 #       "freq_hz": 0..32767 | null,
 #       "wait_s1_s": 0..32767 | null,      # atajo: accion 'paro_temporizado'
 #       "wait_s2_s": 0..32767 | null,
-#       "s1_action": "nada"|"paro_temporizado"|"paro_enclavado"|"contar"|"contar_y_parar",
+#       "s1_action": "nada"|"paro_presencia"|"paro_temporizado"|
+#                    "paro_presencia_torreta"|"paro_temporizado_torreta",
 #       "s2_action": ...,
-#       "count_s1": 0..32767 | null,       # preset del contador de S1
+#       "count_s1": 0..32767 | null,       # preset del contador de S1 (%R23)
 #       "count_s2": 0..32767 | null,
 #       "torreta_s1": 0..7 | null,         # mascara durante el evento de S1
 #       "torreta_s2": 0..7 | null,
@@ -427,8 +524,8 @@ class BandaPLC:
 #   }
 #
 # retrigger_s1_s / retrigger_s2_s se ACEPTAN por compatibilidad con el
-# frontend actual, pero NO se escriben: el Ladder maestro de la banda ya no
-# tiene registro de anti-retrigger (lo resuelve con flancos S1_Rising).
+# frontend actual, pero NO se escriben: el Ladder maestro de la banda no
+# tiene registro de anti-retrigger (lo resuelve con flancos SN_Rising).
 
 BAND_DIRS = set(BAND_DIR.keys())
 CAMPOS_IGNORADOS = ("retrigger_s1_s", "retrigger_s2_s")
@@ -483,9 +580,10 @@ def validar_config(cfg) -> list:
         if acc is None:
             continue
         if isinstance(acc, int):
-            if acc not in SENSOR_ACTIONS.values():
+            if acc not in range(0, 5):
                 errores.append(f"band.s{n}_action={acc} debe estar entre 0 y 4.")
-        elif str(acc).lower() not in SENSOR_ACTIONS:
+        elif (str(acc).lower() not in SENSOR_ACTIONS
+              and str(acc).lower() not in SENSOR_ACTIONS_OBSOLETAS):
             errores.append(f"band.s{n}_action='{acc}' debe ser uno de "
                            f"{sorted(SENSOR_ACTIONS)}.")
 
@@ -502,13 +600,38 @@ def avisos_config(cfg) -> list:
     """Avisos no bloqueantes (campos que el Ladder maestro nuevo ya no usa)."""
     avisos = []
     band = (cfg or {}).get("band") or {}
+
     pedidos = [c for c in CAMPOS_IGNORADOS
                if band.get(c) is not None and band.get(c) != RETRIGGER_HISTORICO[c]]
     if pedidos:
         avisos.append(
-            "El Ladder maestro de la banda ya no tiene registro de "
-            "anti-retrigger (lo resuelve por flanco de los sensores): se "
-            f"ignora {', '.join('band.' + c for c in pedidos)} al cargar al PLC.")
+            "El Ladder maestro de la banda no tiene registro de anti-retrigger "
+            "(lo resuelve por flanco de los sensores): se ignora "
+            f"{', '.join('band.' + c for c in pedidos)} al cargar al PLC.")
+
+    for n in (1, 2):
+        acc = band.get(f"s{n}_action")
+        clave = str(acc).lower() if acc is not None else ""
+        if clave == "paro_enclavado":
+            avisos.append(
+                f"band.s{n}_action='paro_enclavado' ya no existe en el Ladder "
+                f"maestro nuevo: se carga como 'paro_temporizado' (S{n}_Action=2), "
+                f"asi que la banda continua sola al vencer el tiempo.")
+        elif clave in ("contar", "contar_y_parar"):
+            avisos.append(
+                f"band.s{n}_action='{clave}' ya no es una accion del ladder: "
+                f"cualquier sensor habilitado cuenta sus flancos en "
+                f"S{n}_CountAccum. Se carga como S{n}_Action=0 (el conteo si "
+                f"funciona, pero el ladder nuevo no detiene la banda al "
+                f"alcanzar el preset).")
+
+    if band.get("enable", True) is not False:
+        avisos.append(
+            "El Ladder maestro nuevo no tiene registro BandEnable: la banda "
+            "solo queda habilitada con el boton fisico I1. El backend deja la "
+            "configuracion cargada y el sentido de giro escrito; el arranque "
+            "final lo da I1.")
+
     return avisos
 
 
@@ -519,7 +642,7 @@ def _accion_de_sensor(band, n):
     """Deduce (accion, timer_preset, count_preset) para S1 o S2 desde el JSON.
 
     'wait_sN_s' es el atajo historico del frontend: significa 'paro
-    temporizado de N segundos' (Action=1 del ladder)."""
+    temporizado de N segundos', que en el ladder NUEVO es Action = 2."""
     accion = band.get(f"s{n}_action")
     espera = band.get(f"wait_s{n}_s")
     conteo = band.get(f"count_s{n}")
@@ -528,7 +651,9 @@ def _accion_de_sensor(band, n):
         if espera is not None:
             accion = "paro_temporizado"
         elif conteo is not None:
-            accion = "contar"
+            # El conteo ya no necesita accion propia: basta habilitar el
+            # sensor con su preset (§10 cuenta siempre que Enable <> 0).
+            accion = "nada"
         else:
             return None, None, None      # sensor no mencionado: no se toca
 
@@ -538,11 +663,17 @@ def _accion_de_sensor(band, n):
 def plan_config(cfg) -> list:
     """Traduce el engine_config de banda a (metodo, args, kwargs) SIN Modbus.
 
-    Orden impuesto por el Ladder maestro:
-      1) parar (BandEnable=0)  -> estado seguro antes de reconfigurar
-      2) configuracion (frecuencia, direccion, sensores, torreta)
-      3) NewCfgFlag              -> secuencia init del VFD (deja InitArmed)
-      4) BandEnable=1            -> la banda arranca
+    Orden impuesto por el Ladder maestro nuevo:
+      1) parar (DirCmd = 0)  -> §15 deja VFD_Control = 1 antes de reconfigurar
+      2) configuracion (frecuencia, sensores, torreta)
+      3) NewCfgFlag          -> §7: reset del VFD y carga de FreqRequest; deja
+                                CfgReady = 1
+      4) DirCmd = 1 / 2      -> sentido de giro; §15 arranca en cuanto CfgReady
+                                y BandEnable (boton I1) esten activos
+
+    DirCmd se escribe DESPUES de NewCfgFlag a proposito: mientras corre la
+    secuencia init, CfgReady esta en 0 y la banda no se mueve, asi que no hay
+    ningun instante en que gire con la configuracion vieja.
     """
     plan = []
     band = cfg.get("band") or {}
@@ -551,11 +682,9 @@ def plan_config(cfg) -> list:
     # 1) Estado seguro: nada se reconfigura con la banda en marcha.
     plan.append(("parar", (), {}))
 
-    # 2) Configuracion
-    plan.append(("configurar_banda", (), {
-        "frecuencia_hz": band.get("freq_hz"),
-        "direccion": band.get("direction"),
-    }))
+    # 2) Configuracion (la direccion va en el paso 4)
+    if band.get("freq_hz") is not None:
+        plan.append(("configurar_banda", (), {"frecuencia_hz": band.get("freq_hz")}))
 
     for n in (1, 2):
         accion, espera, conteo = _accion_de_sensor(band, n)
@@ -570,7 +699,7 @@ def plan_config(cfg) -> list:
             "habilitar": True,
         }))
         # Un programa nuevo arranca con el conteo en cero.
-        if str(accion).lower() in ("contar", "contar_y_parar") or accion in (3, 4):
+        if conteo is not None:
             plan.append(("reset_contador", (n,), {}))
 
     if band.get("torreta_run") is not None or band.get("torreta_idle") is not None:
@@ -582,8 +711,12 @@ def plan_config(cfg) -> list:
     # 3) Secuencia de inicializacion del VFD (obligatoria tras reconfigurar)
     plan.append(("aplicar_nueva_config", (), {}))
 
-    # 4) Marcha
-    plan.append(("habilitar", (bool(arrancar),), {}))
+    # 4) Sentido de giro (o paro si el programa pide dejarla parada)
+    if arrancar:
+        plan.append(("habilitar", (True,), {
+            "direccion": band.get("direction") or "derecha"}))
+    else:
+        plan.append(("parar", (), {}))
 
     return plan
 
