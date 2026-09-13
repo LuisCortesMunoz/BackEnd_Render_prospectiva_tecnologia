@@ -285,6 +285,26 @@ FREQ_MAX_HZ = 327
 # La secuencia init del VFD (§8) mantiene el reset 2 s. Se da margen de sobra.
 CFG_READY_TIMEOUT_S = 8.0
 CFG_READY_POLL_S = 0.25
+# El PLC atiende Modbus entre scans: justo despues de escribir R5/R6, %R7 aun
+# puede leerse en 1 (valor de ANTES del trigger). Tras un trigger se espera
+# primero a verlo en 0, para no confirmar un "listo" que no existe. La
+# secuencia de §8 deja CfgReady en 0 al menos 1-2 s, asi que sobra margen.
+CFG_DROP_TIMEOUT_S = 2.0
+CFG_DROP_POLL_S = 0.05
+
+# ENTRADAS FISICAS (solo lectura). El ST no copia I3/I4/I5 a ningun %R, asi
+# que se leen directo como bits Modbus. La direccion de %In depende del mapa
+# Modbus del XL4 (este usa %R1 -> 3000, que no es el de fabrica) y NO esta
+# confirmada: por defecto %In -> entrada discreta n-1. Se ajusta sin tocar
+# codigo con BANDA_MODBUS_I_BASE (direccion de %I1) y BANDA_MODBUS_I_FUNC
+# ("di" = entradas discretas, "coil" = coils).
+MODBUS_I_BASE = int(os.environ.get("BANDA_MODBUS_I_BASE", "0"))
+MODBUS_I_FUNC = os.environ.get("BANDA_MODBUS_I_FUNC", "di").strip().lower()
+
+# Se pone en True la primera vez que la lectura de %I contradice al ST (I3
+# presionado con BandEnable=1, imposible por §4): desde ahi las entradas se
+# marcan como no confiables hasta reiniciar el puente.
+_ENTRADAS_INCONSISTENTES = False
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +397,22 @@ class BandaPLC:
     def read_band_register(self, addr: int) -> int:
         """Lee un registro de la banda (holding register)."""
         return self.read_band_block(addr, 1)[0]
+
+    def read_band_bits(self, addr: int, count: int) -> list:
+        """Lee 'count' bits (entradas discretas o coils) en una peticion.
+
+        Solo LECTURA: la banda no tiene ningun bit que el backend deba escribir."""
+        fn = (self.client.read_coils if MODBUS_I_FUNC == "coil"
+              else self.client.read_discrete_inputs)
+        try:
+            r = fn(addr, count=count, device_id=self.unit)
+        except TypeError:
+            r = fn(addr, count=count, slave=self.unit)
+        if r is None:
+            raise IOError(f"Sin respuesta leyendo {count} bit(s) en Modbus {addr}")
+        if hasattr(r, "isError") and r.isError():
+            raise IOError(f"Error leyendo {count} bit(s) en Modbus {addr}")
+        return [bool(b) for b in list(r.bits)[:count]]
 
     # Alias cortos de uso interno (misma funcion, nombre historico).
     _w = write_band_register
@@ -549,16 +585,23 @@ class BandaPLC:
         self._w(ADDR_SENSOR[n]["action"], ACTION_NADA)
         print(f"S{n}: deshabilitado")
 
-    def reset_contador(self, n):
+    def reset_contador(self, n) -> bool:
         """Pone a 0 el acumulado del sensor (%R25 / %R35).
 
-        El ST no tiene registro CountReset: el acumulado es RETAIN y lo borran
-        el paro fisico I3 (§4), NewCfgFlag (§6) y ResetCmd (§7). Se escribe
-        directamente el acumulador, que §11/§13 solo incrementan en flanco."""
+        El ST no tiene registro CountReset: el acumulado es RETAIN y solo lo
+        borran NewCfgFlag (§6) y ResetCmd (§7); el paro I3 NO lo toca. Se
+        escribe directamente el acumulador, que §11/§13 solo incrementan.
+
+        OJO: esto NO rearma la accion por conteo. SN_CountDone es un BOOL
+        interno que solo borran NewCfgFlag y ResetCmd; %R27/%R37 es su espejo
+        y §18 lo reescribe en cada scan, asi que escribirlo no sirve.
+        Devuelve True si CountDone seguia activo (la accion no se repetira)."""
         if n not in ADDR_SENSOR:
             raise ValueError(f"Sensor no valido: {n}.")
+        seguia = self._r(ADDR_SENSOR[n]["count_done"]) == 1
         self._w(ADDR_SENSOR[n]["count_accum"], 0)
-        print(f"S{n}: contador reseteado")
+        print(f"S{n}: contador en 0" + (" (CountDone sigue activo)" if seguia else ""))
+        return seguia
 
     # -- §15  torreta ------------------------------------------------------
     def configurar_torreta(self, mask_run=None, mask_idle=None):
@@ -627,11 +670,31 @@ class BandaPLC:
     aplicar_nueva_config = trigger_new_config
     reset_vfd = trigger_vfd_reset
 
-    def esperar_config_lista(self, timeout=CFG_READY_TIMEOUT_S) -> bool:
+    def esperar_config_lista(self, timeout=CFG_READY_TIMEOUT_S,
+                             esperar_caida=False) -> bool:
         """Espera a que CfgReady_Reg (%R7) valga 1 tras un trigger.
 
         NO se asume que el VFD este listo por haber escrito los registros: la
-        secuencia de §8 mantiene el reset 2 s. Devuelve True si quedo lista."""
+        secuencia de §8 mantiene el reset 2 s. Devuelve True si quedo lista.
+
+        esperar_caida=True (triggers que llegan con R7 posiblemente en 1, como
+        ResetCmd): primero se exige ver R7 = 0, que prueba que el PLC tomo el
+        trigger. Si nunca baja, el trigger no se proceso y se devuelve False
+        en vez de confirmar el 1 viejo."""
+        if esperar_caida:
+            limite = time.time() + CFG_DROP_TIMEOUT_S
+            bajo = False
+            while time.time() < limite:
+                try:
+                    if self._r(ADDR_CFG_READY_REG) == 0:
+                        bajo = True
+                        break
+                except IOError:
+                    pass
+                time.sleep(CFG_DROP_POLL_S)
+            if not bajo:
+                print("AVISO: CfgReady (%R7) no bajo a 0: el PLC no tomo el trigger.")
+                return False
         limite = time.time() + float(timeout)
         while time.time() < limite:
             try:
@@ -821,9 +884,53 @@ class BandaPLC:
             "vfd_freq_hz": vfd[4] / 100.0,
             "vfd_reset": vfd[6],
         }
+        # Entradas fisicas (I1, I3, S1, S2): el ST no las expone en ningun %R.
+        # Sin ellas no hay forma de distinguir "I3 presionado" de "lista, falta
+        # I1", porque en el ST vigente I3 NO baja CfgReady (§4/§8).
+        ent = self.leer_entradas(band_enable=estado["band_enable"])
+        estado["entradas"] = ent
+        usable = bool(ent.get("disponible") and ent.get("confiable"))
+        estado["i1_pulsado"] = ent["i1_arranque"] if usable else None
+        estado["i3_paro"] = ent["i3_paro"] if usable else None
+        estado["s1_detecta"] = ent["s1_detecta"] if usable else None
+        estado["s2_detecta"] = ent["s2_detecta"] if usable else None
         # Etiqueta lista para pintar en el frontend.
         estado["fase"] = _fase_visual(estado)
         return estado
+
+    def leer_entradas(self, band_enable=None) -> dict:
+        """I1..I5 fisicas, SOLO LECTURA, normalizadas como las ve §2 del ST:
+
+            i1_arranque = PhIn1        (NA)
+            i3_paro     = NOT PhIn3    (NC: 0 fisico = paro presionado)
+            s1_detecta  = NOT PhIn4    s2_detecta = NOT PhIn5
+
+        'confiable' queda en False si la lectura contradice al ST: con I3
+        presionado §4 borra BandEnable en el mismo scan, asi que I3 presionado
+        con %R1 = 1 solo puede ser un mapa Modbus de %I equivocado."""
+        global _ENTRADAS_INCONSISTENTES
+        try:
+            bits = self.read_band_bits(MODBUS_I_BASE, 5)
+        except Exception as e:
+            return {"disponible": False, "confiable": False, "motivo": str(e)}
+        ph = {n: bits[n - 1] for n in range(1, 6)}
+        salida = {
+            "disponible": True,
+            "i1_arranque": ph[1],
+            "i3_paro": not ph[3],
+            "s1_detecta": not ph[4],
+            "s2_detecta": not ph[5],
+            "crudo": {f"I{n}": int(ph[n]) for n in ph},
+            "modbus": {"base": MODBUS_I_BASE, "funcion": MODBUS_I_FUNC},
+        }
+        if salida["i3_paro"] and band_enable:
+            _ENTRADAS_INCONSISTENTES = True
+        salida["confiable"] = not _ENTRADAS_INCONSISTENTES
+        if _ENTRADAS_INCONSISTENTES:
+            salida["motivo"] = ("La lectura de %I contradice al ST (I3 presionado con "
+                                "BandEnable=1): revisa BANDA_MODBUS_I_BASE / "
+                                "BANDA_MODBUS_I_FUNC.")
+        return salida
 
     # -- verificacion post-carga ------------------------------------------
     def verificar_vfd(self) -> list:
@@ -871,6 +978,8 @@ def _fase_visual(estado: dict) -> str:
     Se decide SOLO con registros leidos del PLC, nunca con el ultimo comando
     enviado: el operador puede haber pulsado el paro fisico I3 y el frontend
     tiene que enterarse."""
+    if estado.get("i3_paro"):
+        return "paro"                  # I3 presionado (lectura de la entrada)
     if estado.get("running"):
         return "corriendo"
     if not estado.get("cfg_ready"):
@@ -881,6 +990,7 @@ def _fase_visual(estado: dict) -> str:
 
 
 FASE_TEXTO = {
+    "paro": "Paro I3 activo — suelta I3 y pulsa I1",
     "configurando": "Configurando VFD...",
     "lista": "Sistema listo — pulsa I1 para habilitar",
     "habilitada": "Banda habilitada",
@@ -1070,7 +1180,8 @@ def avisos_config(cfg) -> list:
             avisos.append(
                 f"S{n}: con count_s{n}={preset} la accion se ejecuta UNA vez, al "
                 f"llegar a {preset} detecciones (CountDone se queda en 1 hasta la "
-                f"siguiente configuracion o el paro I3). Con count_s{n}=0 se "
+                f"siguiente configuracion o un Reset del VFD; ni el paro I3 ni "
+                f"poner el conteo en 0 la rearman). Con count_s{n}=0 se "
                 f"ejecutaria en cada deteccion.")
 
     if band.get("enable", True) is not False:

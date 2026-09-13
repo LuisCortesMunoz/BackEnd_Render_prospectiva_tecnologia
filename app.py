@@ -3020,14 +3020,12 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
         return {"status": "dry-run", "enviado": False, "device": "banda",
                 "salidas": 0, "plan": plan_legible, "avisos": avisos}
 
-    # IP explicita > configurada > autodetectada; y se verifica que el PLC
-    # que responde sea de verdad el de la banda antes de escribirle.
+    # El PLC destino lo elige el USUARIO: el backend no adivina cual es la
+    # banda (sin autodeteccion) ni decide que IP pertenece a que equipo.
+    if not ((req.ip or "").strip() or plc_default_ip("banda")):
+        raise HTTPException(400, "Elige el PLC de la banda: manda su IP o configurala "
+                                 "con POST /plc/config y device='banda'.")
     ip, port, notas = _resolver_plc("banda", req)
-    if ip == plc_default_ip("maletin"):
-        raise HTTPException(409, f"La IP de la banda ({ip}) es la misma que la del "
-                                 "maletin. Son PLC independientes: corrige una de las "
-                                 "dos antes de cargar, o el programa acabaria en el "
-                                 "equipo equivocado.")
 
     try:
         plc = plc_banda.BandaPLC(ip=ip, port=port)
@@ -3038,8 +3036,14 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
     except Exception as e:
         raise HTTPException(503, f"No se pudo conectar al PLC de la banda {ip}:{port}. "
                                  f"¿Esta el backend en la misma red del PLC y encendido? Detalle: {e}")
+    cfg_ready = None
     try:
         plc_banda.aplicar_config(plc, cfg, dry_run=False)
+        # El plan ya espero CfgReady (%R7); se lee otra vez para informarlo.
+        try:
+            cfg_ready = plc.config_lista()
+        except Exception as e:
+            log.warning(f"No se pudo leer CfgReady tras la carga: {e}")
         # Verificacion post-carga: confirma que la consigna de frecuencia
         # llego ESCALADA al variador. Un ladder que asigne FreqRequest sin el
         # x100 deja la banda inmovil sin que nada falle de forma visible.
@@ -3054,9 +3058,15 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
     finally:
         plc.close()
 
+    if cfg_ready is False:
+        avisos.append("El PLC todavia no reporta CfgReady (%R7 = 1). Si no cambia "
+                      "en unos segundos, revisa que el paro I3 este suelto: con el "
+                      "paro activo el ST no completa la secuencia del VFD.")
+
     log.info(f"/aplicar-plc OK (BANDA) -> {ip}:{port}")
     return {"status": "ok", "enviado": True, "device": "banda", "plc": f"{ip}:{port}",
-            "salidas": 0, "plan": plan_legible, "avisos": avisos, "notas": notas}
+            "salidas": 0, "plan": plan_legible, "avisos": avisos, "notas": notas,
+            "cfg_ready": cfg_ready}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -3119,26 +3129,18 @@ def _banda_modulo():
         raise HTTPException(500, f"No se pudo cargar plc_banda (¿falta pymodbus?): {e}")
 
 
-def _banda_plc(req: "BandaRequestBase", autodetectar: bool = True):
+def _banda_plc(req: "BandaRequestBase"):
     """Resuelve IP/puerto de la BANDA y devuelve un BandaPLC conectado.
 
-    Misma barrera anti-mezcla que /aplicar-plc: si la IP de la banda coincide
-    con la del maletin se rechaza, porque son PLC distintos y el programa
-    acabaria en el equipo equivocado.
-
-    autodetectar=False lo usa el endpoint de POLLING: escanear la red cada vez
-    que el frontend refresca el estado seria absurdo, asi que sin IP conocida
-    se responde con un error claro en vez de ponerse a buscar."""
+    El PLC lo elige el USUARIO (IP en la peticion, o la configurada para la
+    banda). No se autodetecta ni se compara con la IP del maletin: el backend
+    no decide que IP pertenece a que equipo."""
     plc_banda = _banda_modulo()
-    if not autodetectar and not ((req.ip or "").strip() or plc_default_ip("banda")):
-        raise HTTPException(400, "No hay IP configurada para el PLC de la banda. "
-                                 "Usa POST /plc/config con device='banda' (o la "
-                                 "variable BANDA_PLC_IP) antes de leer su estado.")
+    if not ((req.ip or "").strip() or plc_default_ip("banda")):
+        raise HTTPException(400, "No hay IP para el PLC de la banda. Escribela en el "
+                                 "pop-up de la banda, eligela al pulsar Cargar o usa "
+                                 "POST /plc/config con device='banda'.")
     ip, port, notas = _resolver_plc("banda", req)
-    if ip == plc_default_ip("maletin"):
-        raise HTTPException(409, f"La IP de la banda ({ip}) es la misma que la del "
-                                 "maletin. Son PLC independientes: corrige una de las "
-                                 "dos antes de operar.")
     try:
         plc = plc_banda.BandaPLC(ip=ip, port=port)
     except ValueError as e:
@@ -3169,7 +3171,7 @@ def banda_estado(ip: str = "", port: int = 0):
     enterarse. Registros leidos: R1, R3, R7, R8, R25-R27, R35-R37, R40, R41,
     R62, R63 (+ diagnostico del VFD)."""
     plc, ip_r, port_r, notas = _banda_plc(
-        BandaRequestBase(ip=ip or None, port=port or None), autodetectar=False)
+        BandaRequestBase(ip=ip or None, port=port or None))
     try:
         estado = _banda_estado(plc)
     except Exception as e:
@@ -3350,7 +3352,9 @@ def banda_reset(req: BandaRequestBase):
     plc, ip, port, notas = _banda_plc(req)
     try:
         valor = plc.trigger_vfd_reset()
-        listo = plc.esperar_config_lista()
+        # R7 puede seguir en 1 hasta que el PLC tome el trigger: se exige verlo
+        # caer a 0 antes de aceptar el 1, o se confirmaria un "listo" viejo.
+        listo = plc.esperar_config_lista(esperar_caida=True)
         estado = _banda_estado(plc)
     except Exception as e:
         raise HTTPException(500, f"Error reseteando el VFD de la banda: {e}")
@@ -3389,11 +3393,13 @@ def banda_pluma(req: BandaPlumaRequest):
 def banda_reset_contador(req: BandaSensorRequest):
     """Pone a 0 el acumulado del sensor (R25 / R35).
 
-    El ST no tiene registro CountReset; el acumulado tambien lo borran el paro
-    fisico I3, NewCfgFlag y ResetCmd."""
+    El ST no tiene registro CountReset; el acumulado tambien lo borran
+    NewCfgFlag y ResetCmd (el paro I3 no). Poner el conteo en 0 NO rearma la
+    accion por conteo: CountDone solo se borra con una nueva configuracion o
+    un Reset del VFD, y se avisa cuando eso aplica."""
     plc, ip, port, notas = _banda_plc(req)
     try:
-        plc.reset_contador(req.sensor)
+        seguia = plc.reset_contador(req.sensor)
         estado = _banda_estado(plc)
     except ValueError as e:
         raise HTTPException(422, str(e))
@@ -3401,8 +3407,47 @@ def banda_reset_contador(req: BandaSensorRequest):
         raise HTTPException(500, f"Error reseteando el contador: {e}")
     finally:
         plc.close()
+    avisos = [f"S{req.sensor} ya habia alcanzado su conteo objetivo: el conteo "
+              f"quedo en 0, pero la accion no se repetira hasta enviar la "
+              f"configuracion otra vez o hacer un Reset del VFD."] if seguia else []
     return {"status": "ok", "device": "banda", "plc": f"{ip}:{port}",
-            "sensor": req.sensor, "notas": notas, "estado": estado}
+            "sensor": req.sensor, "count_done_activo": seguia, "avisos": avisos,
+            "notas": notas, "estado": estado}
+
+
+class BandaTorretaRequest(BandaRequestBase):
+    run: Optional[int] = None           # mascara 0..7 con la banda corriendo (R40)
+    idle: Optional[int] = None          # mascara 0..7 con la banda detenida (R41)
+
+
+@app.post("/banda/torreta")
+def banda_torreta(req: BandaTorretaRequest):
+    """Cambia EN VIVO las mascaras de torreta: R40 (corriendo) y R41 (detenida).
+
+    §15 del ST lee TorretaRun/TorretaIdle en cada scan, asi que no hace falta
+    NewCfgFlag: la banda sigue como estaba, no se reinicia el VFD y no se
+    borran conteos ni la habilitacion de I1. Las mascaras de sensor
+    (acciones 3/4) siguen teniendo prioridad sobre estas."""
+    plc_banda = _banda_modulo()
+    if req.run is None and req.idle is None:
+        raise HTTPException(422, "Manda 'run' y/o 'idle' (mascara 0..7).")
+    # Se valida todo ANTES de escribir, para no dejar una sola mascara cambiada.
+    for nombre, v in (("run", req.run), ("idle", req.idle)):
+        if v is not None and not (plc_banda.MASK_MIN <= v <= plc_banda.MASK_MAX):
+            raise HTTPException(422, f"'{nombre}'={v} fuera de rango: la mascara "
+                                     f"de torreta va de 0 a 7 (verde=1, amarilla=2, roja=4).")
+    plc, ip, port, notas = _banda_plc(req)
+    try:
+        plc.configurar_torreta(mask_run=req.run, mask_idle=req.idle)
+        estado = _banda_estado(plc)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Error cambiando la torreta: {e}")
+    finally:
+        plc.close()
+    return {"status": "ok", "device": "banda", "plc": f"{ip}:{port}",
+            "run": req.run, "idle": req.idle, "notas": notas, "estado": estado}
 
 
 @app.post("/feedback")
