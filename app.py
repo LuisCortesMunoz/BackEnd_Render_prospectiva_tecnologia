@@ -414,12 +414,24 @@ PLUMAS: la banda tiene dos plumas (barreras) motorizadas. Solo aceptan 3 comando
 en cualquier otro caso van en null. El PLC genera las salidas fisicas y evita que una
 pluma reciba los dos sentidos a la vez.
 
+INSTRUCCIONES SIN MOVIMIENTO (muy importante):
+- Si la instruccion NO pide mover la banda (solo luces, sensores, conteo o plumas), pon
+  "enable": false y rellena SOLO lo que pide. NUNCA devuelvas todos los campos en null.
+- Luz con la banda detenida / en reposo / parada -> torreta_idle con la mascara pedida.
+- Luz con la banda corriendo / en marcha -> torreta_run.
+- Luz sin decir estado y sin mover la banda -> torreta_idle.
+- Luz cuando un sensor detecta: el programa maestro solo enciende la mascara de un sensor
+  JUNTO con un paro, asi que usa "paro_presencia_torreta" (o "paro_temporizado_torreta" si
+  hay segundos) y pon la mascara en torreta_sN.
+- "Despues de N detecciones" -> count_sN = N, ademas de la accion que corresponda.
+- "Sube/baja/deten la pluma N" -> plumaN = "subir" | "bajar" | "stop".
+
 ESQUEMA EXACTO:
 {
   "name": "string",
   "device": "banda",
   "band": {
-    "enable": true,               // true = arrancar la banda ; false = dejarla parada
+    "enable": true,               // true = la instruccion pide mover la banda ; false = NO pide movimiento (solo luces, sensores, conteo o plumas)
     "direction": "derecha",       // "derecha" o "izquierda" (default "derecha")
     "freq_hz": 35,                // frecuencia del VFD en Hz SIN escalar, entero 1..327; null si no se menciona
     "s1_action": "paro_temporizado",  // accion de S1 ; null si no se menciona S1
@@ -472,6 +484,33 @@ JSON: {"name":"Conteo 10 en S2","device":"banda",
    "s1_action":null,"wait_s1_s":null,"count_s1":null,"torreta_s1":null,
    "s2_action":"paro_presencia","wait_s2_s":null,"count_s2":10,"torreta_s2":null,
    "torreta_run":1,"torreta_idle":null},
+ "outputs":[]}
+
+EJEMPLO (peticion -> JSON):
+Peticion: "Enciende la roja cuando la banda este detenida."
+JSON: {"name":"Roja con banda detenida","device":"banda",
+ "band":{"enable":false,"direction":"derecha","freq_hz":null,
+   "s1_action":null,"wait_s1_s":null,"count_s1":null,"torreta_s1":null,
+   "s2_action":null,"wait_s2_s":null,"count_s2":null,"torreta_s2":null,
+   "torreta_run":null,"torreta_idle":4,"pluma1":null,"pluma2":null},
+ "outputs":[]}
+
+EJEMPLO (peticion -> JSON):
+Peticion: "Despues de 3 detecciones de S2, enciende la roja."
+JSON: {"name":"S2 cuenta 3 y enciende roja","device":"banda",
+ "band":{"enable":false,"direction":"derecha","freq_hz":null,
+   "s1_action":null,"wait_s1_s":null,"count_s1":null,"torreta_s1":null,
+   "s2_action":"paro_presencia_torreta","wait_s2_s":null,"count_s2":3,"torreta_s2":4,
+   "torreta_run":null,"torreta_idle":null,"pluma1":null,"pluma2":null},
+ "outputs":[]}
+
+EJEMPLO (peticion -> JSON):
+Peticion: "Sube la pluma 1."
+JSON: {"name":"Subir pluma 1","device":"banda",
+ "band":{"enable":false,"direction":"derecha","freq_hz":null,
+   "s1_action":null,"wait_s1_s":null,"count_s1":null,"torreta_s1":null,
+   "s2_action":null,"wait_s2_s":null,"count_s2":null,"torreta_s2":null,
+   "torreta_run":null,"torreta_idle":null,"pluma1":"subir","pluma2":null},
  "outputs":[]}"""
 
 

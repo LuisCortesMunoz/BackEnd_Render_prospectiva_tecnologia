@@ -40,7 +40,7 @@ BANDA_TERMS = [
     r"\bbandas?\b", r"\btransportador", r"\bcintas?\b",
     r"\bvfd\b", r"\bvariador",
     r"\bs\s?[12]\b", r"\bsensor(?:es)?\s*(?:1|2|uno|dos)\b",
-    r"\btorreta\b",
+    r"\btorreta\b", r"\bplumas?\b",
     r"\bfrecuencias?\b", r"\b\d+(?:[.,]\d+)?\s*hz\b", r"\bhertz\b",
     r"\bderecha\b", r"\bizquierda\b", r"\bhorario\b", r"\bantihorario\b",
 ]
