@@ -1310,7 +1310,7 @@ def a_schema(datos: dict) -> dict:
             "project_id":     f"import_{tid}",
             "name":            datos.get("programa_nombre", "Programa importado"),
             "version":         "1.0.0",
-            "plc_target":      {"ip": "192.168.1.100", "port": 502, "unit_id": 1},
+            "plc_target":      {"ip": "", "port": 502, "unit_id": 1},   # la IP la elige el usuario
             "scan_time_ms":    100,
             "_explicacion":    datos.get("explicacion_simple", ""),
             "_implementacion": " -> ".join(datos.get("implementacion_cscape", [])),
@@ -2615,7 +2615,8 @@ def chat(req: ChatRequest):
 # pedirsela al usuario de memoria.
 
 # Override en runtime de la IP/puerto por defecto del PLC (se fija con
-# POST /plc/config; si es None se usa el valor de plc_maestro.PLC_IP).
+# POST /plc/config; si es None solo se usa MALETIN_PLC_IP / BANDA_PLC_IP, y
+# si tampoco hay, la carga pide elegir el PLC: no hay IPs de fabrica).
 # ─── PLC destino: UNA conexion por equipo ─────────────────────────
 # Maletin y banda son PLC FISICAMENTE DISTINTOS (cada uno con su Ladder
 # maestro y su mapa de registros). El override de IP/puerto se guarda por
@@ -2641,17 +2642,14 @@ def _device_valido(device) -> str:
 
 
 def plc_default_ip(device: str = DEVICE_DEFECTO) -> str:
+    """IP por defecto de un equipo: SOLO la que el usuario haya configurado
+    (POST /plc/config) o su variable de entorno (MALETIN_PLC_IP /
+    BANDA_PLC_IP). No hay IPs de fabrica: el PLC destino lo elige el usuario."""
     dev = _device_valido(device)
     if PLC_STATE[dev]["ip"]:
         return PLC_STATE[dev]["ip"]
-    try:
-        if dev == "banda":
-            import plc_banda
-            return plc_banda.PLC_IP          # "" si no se ha configurado
-        import plc_maestro
-        return plc_maestro.PLC_IP
-    except Exception:
-        return "192.168.3.12" if dev == "maletin" else ""
+    var = "BANDA_PLC_IP" if dev == "banda" else "MALETIN_PLC_IP"
+    return os.environ.get(var, "").strip()
 
 
 def plc_default_port(device: str = DEVICE_DEFECTO) -> int:
@@ -2892,22 +2890,16 @@ def _resolver_plc(device: str, req: "AplicarPLCRequest") -> tuple:
 
       1) la IP que mande el editor,
       2) la configurada para ese equipo (env / POST /plc/config),
-      3) si no hay ninguna, se busca en la red: si responde UN SOLO PLC se usa
-         ese; si hay varios, se pide elegir (no se adivina).
+      3) si no hay ninguna, se responde 400: no se busca ni se adivina el PLC.
     Devuelve (ip, port, notas)."""
     notas = []
     ip = (req.ip or "").strip() or plc_default_ip(device)
     port = req.port or plc_default_port(device)
 
+    # Sin IP elegida no se busca ni se adivina ningun PLC: se pide elegirlo.
     if not ip:
-        det = plc_detectar(port=port, timeout_ms=300)
-        if det["sugerido"]:
-            ip = det["sugerido"]
-            notas.append(f"PLC detectado automaticamente: {ip}. " + det["motivo"])
-        else:
-            raise HTTPException(400, f"No hay IP para el PLC del {device} y no se "
-                                     f"pudo elegir una sola automaticamente. "
-                                     f"{det['motivo']}")
+        raise HTTPException(400, f"No hay IP para el PLC del {device}: elige el "
+                                 f"PLC destino (IP) antes de cargar.")
 
     return ip, port, notas
 
