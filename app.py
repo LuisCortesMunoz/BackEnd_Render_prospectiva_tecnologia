@@ -364,96 +364,100 @@ salida por su duracion y avanza solo; "once" = se ejecuta una vez por cada pulsa
 
 
 # ─── Prompt del equipo BANDA TRANSPORTADORA (PLC independiente) ───
-# Espejo del Ladder maestro "Programa_Banda.txt". Describe UNICAMENTE el
-# hardware de la banda: no menciona Q10/Q11/Q12 configurables ni el
-# secuenciador, porque esos registros viven en el OTRO PLC.
-# La banda SI tiene botonera fisica propia (I1 arranque / I3 paro, ladder
-# v2.0), pero el ladder la cablea solo: no es configurable por JSON.
+# Espejo del programa maestro ST de "ladder_maestro_banda.csp". Describe
+# UNICAMENTE el hardware de la banda: no menciona Q10/Q11/Q12 configurables ni
+# el secuenciador, porque esos registros viven en el OTRO PLC.
+# La botonera fisica (I1 arranque, I2/I3 paros) la lee el ST directamente: el
+# JSON solo elige que fuentes de paro valen (stop_mode).
 SYSTEM_PROMPT_BANDA = """Eres el motor de interpretacion del PLC Horner XL4 de una BANDA TRANSPORTADORA.
 Traduces una instruccion en lenguaje natural a un JSON de CONFIGURACION (no generas geometria
 ladder ni codigo). Este PLC es INDEPENDIENTE del maletin de laboratorio: aqui NO existen
-las lamparas configurables Q10/Q11/Q12 ni el secuenciador de pasos, y tampoco los botones
-I1/I2/I7 del maletin. Si la instruccion pide algo de esos, NO lo inventes: ignora esa parte.
+las lamparas configurables Q10/Q11/Q12 ni el secuenciador de pasos. Si la instruccion pide
+algo de eso, NO lo inventes: ignora esa parte.
 
 BOTONERA FISICA DE LA BANDA:
-- I1 (NA): suelto = FALSE, presionado = TRUE. Es la UNICA forma de habilitar la banda: el
-  Ladder maestro no tiene registro BandEnable escribible. El JSON deja la configuracion y
-  el sentido de giro cargados; el arranque final lo da el operador con un pulso de I1.
-- I3 (NC): paro con prioridad sobre todo; presionado detiene la banda y apaga TODAS las
-  luces. Para rearrancar hay que pulsar I1 otra vez.
-- I2 (NC) esta reservado: hoy no hace nada.
-Lo unico configurable de los botones son las "luces que siguen a I1" (torreta_i1, abajo).
-Cualquier otra peticion sobre ellos (cambiar su funcion, agregar botones) NO va en el JSON.
-El JSON configura VFD, sensores S1/S2, torreta y plumas.
+- I1 (NA): arranque. Es la UNICA forma de habilitar la banda: el JSON deja la configuracion
+  cargada y el operador da el arranque con un pulso de I1.
+- I3 (NC): paro general PRIORITARIO. Siempre detiene; no se puede deshabilitar.
+- I2 (NC): paro auxiliar. Solo detiene si stop_mode es 1 o 3.
+- Paro software: boton del panel de la aplicacion. Solo detiene si stop_mode es 2 o 3.
+  stop_mode: 0 = solo I3 · 1 = I2 + I3 · 2 = software + I3 · 3 = I2 + software + I3.
+  Tras cualquier paro hay que volver a pulsar I1 (liberar un paro NO rearranca).
+- Luces "con I1" / "mientras I1 este presionado" -> torreta_i1 (ver abajo).
 
 HARDWARE FIJO (no inventes nada fuera de esto):
-- Motor con VFD (variador): mueve la banda hacia la "derecha" o hacia la "izquierda", a una
-  frecuencia en Hz. Solo esos dos sentidos.
+- Motor con VFD (variador): mueve la banda hacia la "derecha" (direccion 1) o hacia la
+  "izquierda" (direccion 2), a una frecuencia en Hz. Solo esos dos sentidos.
 - Sensor S1 y sensor S2: detectan una pieza sobre la banda. Son los unicos sensores.
-- Torreta de 3 luces: verde (Q3), amarilla (Q4), roja (Q5). Se declara con mascaras (ver abajo); el PLC
-  la enciende solo, nunca la pongas como "salidas".
+- Torreta de 3 luces: verde (Q3), amarilla (Q4), roja (Q5). Se declara con mascaras.
+- Pluma 1 (Q8 sube / Q9 baja) y Pluma 2 (Q6 sube / Q7 baja).
 
-ACCIONES DE CADA SENSOR (elige una por sensor):
-  - "paro_temporizado" -> al detectar, la banda se DETIENE los segundos indicados y sigue sola.
-  - "paro_presencia"   -> la banda se detiene MIENTRAS el sensor siga viendo la pieza, y
-                          sigue sola en cuanto la pieza se retira.
-  - "paro_temporizado_torreta" -> igual que "paro_temporizado" y ademas enciende la
-                          mascara de torreta indicada en torreta_sN mientras dura la espera.
-  - "paro_presencia_torreta"   -> igual que "paro_presencia" y ademas enciende torreta_sN.
-  - "nada"             -> el sensor no detiene la banda.
-CONTEO: no es una accion, es CUANDO se ejecuta la accion. Cualquier sensor habilitado
-cuenta sus piezas solo. count_sN = 0 (o null) significa "actuar en CADA deteccion";
-count_sN = N significa "actuar UNA vez, al llegar a N detecciones". Si el usuario pide
-"cuenta 10 piezas y detente", pon count_sN = 10 y ademas la accion de paro que corresponda.
-Si solo pide contar sin detener, pon count_sN = N y sN_action = "nada".
+ACCIONES DE CADA SENSOR (elige una por sensor). En TODAS la banda sigue habilitada y
+CONTINUA SOLA al terminar la pausa: no es un paro general.
+  - "nada"                     -> solo cuenta; no detiene la banda.
+  - "paro_presencia"           -> se detiene MIENTRAS el sensor ve la pieza y sigue sola al retirarla.
+  - "paro_temporizado"         -> se detiene wait_sN_s segundos y sigue sola.
+  - "paro_presencia_torreta"   -> como "paro_presencia" y ademas enciende torreta_sN.
+  - "paro_temporizado_torreta" -> como "paro_temporizado" y ademas enciende torreta_sN.
+CONTEO: count_sN = 0 (o null) = actuar en CADA deteccion; count_sN = N = actuar UNA vez al
+llegar a N detecciones. "cuenta 10 piezas y detente" -> count_sN = 10 + la accion de paro.
+"avanza hasta que S1 detecte" -> "paro_presencia" en S1 (el ST no tiene paro definitivo por
+sensor: la banda sigue al retirar la pieza).
+
+PLUMAS POR SENSOR: sN_pluma1 / sN_pluma2 = "subir" | "bajar" | "stop" (forzar stop) | null.
+El PLC SOLO las aplica mientras ese sensor tiene la banda detenida: si el usuario pide mover
+una pluma al detectar y no dice como detener la banda, usa "paro_presencia" (o
+"paro_temporizado" si da segundos). Lo mismo para las luces de un sensor (acciones _torreta).
+
+PARO AUTOMATICO POR TIEMPO: "avanza N segundos y detente" -> auto_stop_s = N y
+auto_stop_mode = 1 (cuenta solo el movimiento real; una pausa por sensor detiene el conteo).
+Si pide contar el tiempo total "aunque se detenga por el sensor" / "desde que arranca" ->
+auto_stop_mode = 2. Sin paro automatico ambos van en null.
 
 MASCARAS DE TORRETA (entero 0..7): verde=1, amarilla=2, roja=4; se suman.
   ej.: verde+roja = 5 ; las tres = 7 ; ninguna = 0.
 
-PLUMAS: la banda tiene dos plumas (barreras) motorizadas. Solo aceptan 3 comandos:
-"subir", "bajar" o "stop". Se ponen en pluma1 / pluma2 y solo si el usuario las menciona;
-en cualquier otro caso van en null. El PLC genera las salidas fisicas y evita que una
-pluma reciba los dos sentidos a la vez.
+PLUMAS MANUALES: pluma1 / pluma2 = "subir" | "bajar" | "stop". Solo si el usuario pide mover
+una pluma SIN condicion de sensor; en cualquier otro caso van en null.
 
 INSTRUCCIONES SIN MOVIMIENTO (muy importante):
-- Si la instruccion NO pide mover la banda (solo luces, sensores, conteo o plumas), pon
+- Si la instruccion NO pide mover la banda (solo luces o plumas manuales), pon
   "enable": false y rellena SOLO lo que pide. NUNCA devuelvas todos los campos en null.
-- Luz "con I1", "mientras I1 este presionado", "al presionar I1" -> torreta_i1 con la mascara
-  pedida y "enable": false (salvo que tambien pida mover la banda). La luz se enciende SOLO
-  mientras I1 este presionado, se apaga al soltarlo y el paro I3 la apaga. NO uses
-  torreta_idle ni torreta_run para esto: esas dependen de si la banda corre, no de I1.
-- Luz con la banda detenida / en reposo / parada -> torreta_idle con la mascara pedida.
-- Luz con la banda corriendo / en marcha -> torreta_run.
+  NO hace falta direccion ni frecuencia para eso.
+- Luz "con I1", "mientras I1 este presionado", "al presionar I1" -> torreta_i1.
+- Luz con la banda detenida / en reposo / parada -> torreta_idle.
+- Luz con la banda corriendo / en marcha / avanzando -> torreta_run.
 - Luz sin decir estado y sin mover la banda -> torreta_idle.
-- Luz cuando un sensor detecta: el programa maestro solo enciende la mascara de un sensor
-  JUNTO con un paro, asi que usa "paro_presencia_torreta" (o "paro_temporizado_torreta" si
-  hay segundos) y pon la mascara en torreta_sN. Esa luz solo funciona con la banda habilitada
-  por I1 (la banda arranca y se detiene al detectar). NO pongas torreta_i1 salvo que el
-  usuario mencione I1 explicitamente.
-- "Despues de N detecciones" -> count_sN = N, ademas de la accion que corresponda.
-- "Sube/baja/deten la pluma N" -> plumaN = "subir" | "bajar" | "stop".
+- Luz cuando un sensor detecta -> accion "_torreta" del sensor y la mascara en torreta_sN.
 
 ESQUEMA EXACTO:
 {
   "name": "string",
   "device": "banda",
   "band": {
-    "enable": true,               // true = la instruccion pide mover la banda ; false = NO pide movimiento (solo luces, sensores, conteo o plumas)
+    "enable": true,               // true = pide mover la banda ; false = solo luces/plumas
     "direction": "derecha",       // "derecha" o "izquierda" (default "derecha")
-    "freq_hz": 35,                // frecuencia del VFD en Hz SIN escalar, entero 1..327; null si no se menciona
+    "freq_hz": 35,                // Hz SIN escalar, entero 1..327; null si no se menciona
+    "stop_mode": null,            // 0..3 ; null = solo I3
+    "auto_stop_mode": null,       // 1 movimiento real | 2 desde START ; null si no hay paro automatico
+    "auto_stop_s": null,          // segundos del paro automatico ; null si no aplica
     "s1_action": "paro_temporizado",  // accion de S1 ; null si no se menciona S1
-    "wait_s1_s": 5,               // segundos detenida por S1 (acciones de paro); null si no aplica
-    "count_s1": null,             // piezas a contar en S1 (acciones de conteo); null si no aplica
-    "torreta_s1": null,           // mascara 0..7 mientras dura el evento de S1; null si no se menciona
+    "wait_s1_s": 5,               // segundos detenida por S1 ; null si no aplica
+    "count_s1": null,             // piezas a contar en S1 ; null si no aplica
+    "torreta_s1": null,           // mascara 0..7 durante el evento de S1
+    "s1_pluma1": null,            // "subir" | "bajar" | "stop" durante el evento de S1
+    "s1_pluma2": null,
     "s2_action": null,            // lo mismo para S2
     "wait_s2_s": null,
     "count_s2": null,
     "torreta_s2": null,
-    "torreta_run": null,          // mascara 0..7 con la banda en marcha; null si no se menciona
-    "torreta_idle": null,         // mascara 0..7 con la banda detenida; null si no se menciona
-    "torreta_i1": null,           // mascara 0..7 encendida SOLO mientras I1 este presionado; null si no se menciona
-    "pluma1": null,               // "subir" | "bajar" | "stop" ; null si no se menciona
-    "pluma2": null                // lo mismo para la pluma 2
+    "s2_pluma1": null,
+    "s2_pluma2": null,
+    "torreta_run": null,          // mascara 0..7 con la banda en marcha
+    "torreta_idle": null,         // mascara 0..7 con la banda detenida
+    "torreta_i1": null,           // mascara 0..7 encendida SOLO mientras I1 este presionado
+    "pluma1": null,               // comando manual "subir" | "bajar" | "stop"
+    "pluma2": null
   },
   "outputs": []
 }
@@ -464,70 +468,55 @@ REGLAS DE RESPUESTA:
 - Solo rellena lo que el usuario declara; lo demas va en null. No inventes sensores,
   tiempos, conteos ni sentidos de giro.
 - Los segundos, los Hz y los conteos son enteros.
-- Si el usuario solo dice "mueve la banda", pon enable y direction (mas freq_hz si menciona
-  velocidad o Hz) y deja los sensores en null: sin sensores no hay paros.
 
 EJEMPLO (peticion -> JSON):
 Peticion: "Mueve la banda hacia la derecha a 40 Hz."
 JSON: {"name":"Banda a la derecha","device":"banda",
- "band":{"enable":true,"direction":"derecha","freq_hz":40,
-   "s1_action":null,"wait_s1_s":null,"count_s1":null,"torreta_s1":null,
-   "s2_action":null,"wait_s2_s":null,"count_s2":null,"torreta_s2":null,
-   "torreta_run":null,"torreta_idle":null},
+ "band":{"enable":true,"direction":"derecha","freq_hz":40},
  "outputs":[]}
 
 EJEMPLO (peticion -> JSON):
 Peticion: "La banda avanza a 30 Hz y se detiene 5 segundos cuando S1 detecta una pieza."
 JSON: {"name":"Banda con paro por S1","device":"banda",
  "band":{"enable":true,"direction":"derecha","freq_hz":30,
-   "s1_action":"paro_temporizado","wait_s1_s":5,"count_s1":null,"torreta_s1":null,
-   "s2_action":null,"wait_s2_s":null,"count_s2":null,"torreta_s2":null,
-   "torreta_run":null,"torreta_idle":null},
+   "s1_action":"paro_temporizado","wait_s1_s":5},
  "outputs":[]}
 
 EJEMPLO (peticion -> JSON):
-Peticion: "Cuenta 10 piezas en S2 y detiene la banda; con la banda corriendo enciende la verde."
-JSON: {"name":"Conteo 10 en S2","device":"banda",
- "band":{"enable":true,"direction":"derecha","freq_hz":null,
-   "s1_action":null,"wait_s1_s":null,"count_s1":null,"torreta_s1":null,
-   "s2_action":"paro_presencia","wait_s2_s":null,"count_s2":10,"torreta_s2":null,
-   "torreta_run":1,"torreta_idle":null},
+Peticion: "Avanza 10 segundos y detente."
+JSON: {"name":"Avanzar 10 s","device":"banda",
+ "band":{"enable":true,"direction":"derecha","auto_stop_mode":1,"auto_stop_s":10},
+ "outputs":[]}
+
+EJEMPLO (peticion -> JSON):
+Peticion: "Detén la banda con I2 o con el botón de paro de la aplicación."
+JSON: {"name":"Paros I2 y software","device":"banda",
+ "band":{"enable":true,"direction":"derecha","stop_mode":3},
+ "outputs":[]}
+
+EJEMPLO (peticion -> JSON):
+Peticion: "Cuando S2 detecte, detén la banda 5 segundos, baja la pluma 2 y enciende la roja."
+JSON: {"name":"S2 pausa 5 s + pluma 2 + roja","device":"banda",
+ "band":{"enable":true,"direction":"derecha","s2_action":"paro_temporizado_torreta",
+   "wait_s2_s":5,"torreta_s2":4,"s2_pluma2":"bajar"},
  "outputs":[]}
 
 EJEMPLO (peticion -> JSON):
 Peticion: "Enciende la roja cuando la banda este detenida."
 JSON: {"name":"Roja con banda detenida","device":"banda",
- "band":{"enable":false,"direction":"derecha","freq_hz":null,
-   "s1_action":null,"wait_s1_s":null,"count_s1":null,"torreta_s1":null,
-   "s2_action":null,"wait_s2_s":null,"count_s2":null,"torreta_s2":null,
-   "torreta_run":null,"torreta_idle":4,"pluma1":null,"pluma2":null},
- "outputs":[]}
-
-EJEMPLO (peticion -> JSON):
-Peticion: "Despues de 3 detecciones de S2, enciende la roja."
-JSON: {"name":"S2 cuenta 3 y enciende roja","device":"banda",
- "band":{"enable":false,"direction":"derecha","freq_hz":null,
-   "s1_action":null,"wait_s1_s":null,"count_s1":null,"torreta_s1":null,
-   "s2_action":"paro_presencia_torreta","wait_s2_s":null,"count_s2":3,"torreta_s2":4,
-   "torreta_run":null,"torreta_idle":null,"pluma1":null,"pluma2":null},
+ "band":{"enable":false,"torreta_idle":4},
  "outputs":[]}
 
 EJEMPLO (peticion -> JSON):
 Peticion: "Enciende la lampara verde mientras I1 este presionado."
 JSON: {"name":"Verde con I1","device":"banda",
- "band":{"enable":false,"direction":"derecha","freq_hz":null,
-   "s1_action":null,"wait_s1_s":null,"count_s1":null,"torreta_s1":null,
-   "s2_action":null,"wait_s2_s":null,"count_s2":null,"torreta_s2":null,
-   "torreta_run":null,"torreta_idle":null,"torreta_i1":1,"pluma1":null,"pluma2":null},
+ "band":{"enable":false,"torreta_i1":1},
  "outputs":[]}
 
 EJEMPLO (peticion -> JSON):
 Peticion: "Sube la pluma 1."
 JSON: {"name":"Subir pluma 1","device":"banda",
- "band":{"enable":false,"direction":"derecha","freq_hz":null,
-   "s1_action":null,"wait_s1_s":null,"count_s1":null,"torreta_s1":null,
-   "s2_action":null,"wait_s2_s":null,"count_s2":null,"torreta_s2":null,
-   "torreta_run":null,"torreta_idle":null,"pluma1":"subir","pluma2":null},
+ "band":{"enable":false,"pluma1":"subir"},
  "outputs":[]}"""
 
 
@@ -757,9 +746,9 @@ def normalizar_logica_banda(cfg: dict) -> dict:
     band = cfg.setdefault("band", {})
     band.setdefault("enable", True)
     band["direction"] = str(band.get("direction") or "derecha").lower()
-    for campo in ("freq_hz",
-                  "s1_action", "wait_s1_s", "count_s1", "torreta_s1",
-                  "s2_action", "wait_s2_s", "count_s2", "torreta_s2",
+    for campo in ("freq_hz", "stop_mode", "auto_stop_mode", "auto_stop_s",
+                  "s1_action", "wait_s1_s", "count_s1", "torreta_s1", "s1_pluma1", "s1_pluma2",
+                  "s2_action", "wait_s2_s", "count_s2", "torreta_s2", "s2_pluma1", "s2_pluma2",
                   "torreta_run", "torreta_idle", "torreta_i1",
                   "pluma1", "pluma2"):
         band.setdefault(campo, None)
@@ -3096,7 +3085,7 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
         # llego ESCALADA al variador. Un ladder que asigne FreqRequest sin el
         # x100 deja la banda inmovil sin que nada falle de forma visible.
         try:
-            if not plc_banda.solo_luces_i1(cfg):
+            if not plc_banda.sin_marcha(cfg):
                 avisos = avisos + plc.verificar_vfd()
         except Exception as e:
             log.warning(f"No se pudo verificar la consigna del VFD: {e}")
@@ -3107,15 +3096,13 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
     finally:
         plc.close()
 
-    if cfg_ready is False and not plc_banda.solo_luces_i1(cfg):
-        avisos.append("El PLC todavia no reporta CfgReady (%R7 = 1). Si no cambia "
-                      "en unos segundos, revisa que el paro I3 este suelto: con el "
-                      "paro activo el ST no completa la secuencia del VFD.")
+    if cfg_ready is False and not plc_banda.sin_marcha(cfg):
+        avisos.append(AVISO_BANDA_SIN_CFG_READY)
 
     log.info(f"/aplicar-plc OK (BANDA) -> {ip}:{port}")
     return {"status": "ok", "enviado": True, "device": "banda", "plc": f"{ip}:{port}",
             "salidas": 0, "plan": plan_legible, "avisos": avisos, "notas": notas,
-            "cfg_ready": cfg_ready, "sin_marcha": plc_banda.solo_luces_i1(cfg)}
+            "cfg_ready": cfg_ready, "sin_marcha": plc_banda.sin_marcha(cfg)}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -3125,16 +3112,20 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
 # conoce: su flujo (/aplicar-plc con device='maletin') queda intacto.
 #
 # Reparto de responsabilidades, sin excepciones:
-#   Python  -> interpreta al frontend, VALIDA, escribe los registros de
-#              interfaz (R2/R4/R20..R41/R60/R61), dispara los triggers
-#              (R5/R6) y LEE el feedback (R1/R3/R7/R8/R25..R27/R35..R37/
-#              R62/R63).
-#   ST      -> toda la logica fisica: arranque, paro, direccion, frecuencia,
-#              reset del VFD, sensores, contadores, temporizadores, torreta,
-#              plumas, interlocks y los registros internos R500/R504/R506.
+#   Python  -> interpreta al frontend, VALIDA, escribe SOLO los registros de
+#              configuracion/comando de plc_banda.BAND_REGISTERS, dispara los
+#              triggers (R5/R6) y LEE feedback y monitores (R100..R127).
+#   ST      -> toda la logica fisica: arranque, paros, direccion, frecuencia,
+#              reset del VFD, sensores, contadores, temporizadores, paro
+#              automatico, torreta, plumas, prioridades y R500/R504/R506.
 #
 # Toda la comunicacion Modbus pasa por plc_banda.BandaPLC: aqui no hay ni una
 # sola llamada suelta a pymodbus.
+
+AVISO_BANDA_SIN_CFG_READY = (
+    "El PLC todavia no reporta CfgReady (%R7 = 1). Si no cambia en unos segundos, "
+    "revisa que no haya un paro activo (I3, I2 o el paro software, segun el modo de "
+    "paro): con el paro activo el ST no completa la secuencia del VFD.")
 
 class BandaRequestBase(BaseModel):
     # IP/puerto opcionales: si no vienen se usa la configurada para la banda
@@ -3276,7 +3267,7 @@ def banda_config(req: BandaConfigRequest):
         # direccion -> NewCfgFlag -> esperar CfgReady.
         plc_banda.aplicar_config(plc, cfg, dry_run=False)
         try:
-            if not plc_banda.solo_luces_i1(cfg):
+            if not plc_banda.sin_marcha(cfg):
                 avisos = avisos + plc.verificar_vfd()
         except Exception as e:
             log.warning(f"No se pudo verificar la consigna del VFD: {e}")
@@ -3290,10 +3281,8 @@ def banda_config(req: BandaConfigRequest):
     finally:
         plc.close()
 
-    if not estado.get("cfg_ready") and not plc_banda.solo_luces_i1(cfg):
-        avisos.append("El PLC todavia no reporta CfgReady (%R7 = 1). Si no cambia "
-                      "en unos segundos, revisa que el paro I3 este suelto: con el "
-                      "paro activo el ST no completa la secuencia del VFD.")
+    if not estado.get("cfg_ready") and not plc_banda.sin_marcha(cfg):
+        avisos.append(AVISO_BANDA_SIN_CFG_READY)
 
     log.info(f"/banda/config OK -> {ip}:{port}")
     return {"status": "ok", "enviado": True, "device": "banda", "plc": f"{ip}:{port}",
@@ -3468,27 +3457,29 @@ def banda_reset_contador(req: BandaSensorRequest):
 class BandaTorretaRequest(BandaRequestBase):
     run: Optional[int] = None           # mascara 0..7 con la banda corriendo (R40)
     idle: Optional[int] = None          # mascara 0..7 con la banda detenida (R41)
+    i1: Optional[int] = None            # mascara 0..7 mientras I1 esta presionado (R50)
 
 
 @app.post("/banda/torreta")
 def banda_torreta(req: BandaTorretaRequest):
-    """Cambia EN VIVO las mascaras de torreta: R40 (corriendo) y R41 (detenida).
+    """Cambia EN VIVO las mascaras de torreta: R40 (corriendo), R41 (detenida)
+    y R50 (mientras I1 esta presionado).
 
-    §15 del ST lee TorretaRun/TorretaIdle en cada scan, asi que no hace falta
-    NewCfgFlag: la banda sigue como estaba, no se reinicia el VFD y no se
-    borran conteos ni la habilitacion de I1. Las mascaras de sensor
-    (acciones 3/4) siguen teniendo prioridad sobre estas."""
+    §15/§15b del ST las leen en cada scan, asi que no hace falta NewCfgFlag:
+    la banda sigue como estaba, no se reinicia el VFD y no se borran conteos
+    ni la habilitacion de I1. Las mascaras de sensor (acciones 3/4) siguen
+    teniendo prioridad sobre estas (S2 -> S1 -> RUN -> IDLE)."""
     plc_banda = _banda_modulo()
-    if req.run is None and req.idle is None:
-        raise HTTPException(422, "Manda 'run' y/o 'idle' (mascara 0..7).")
+    if req.run is None and req.idle is None and req.i1 is None:
+        raise HTTPException(422, "Manda 'run', 'idle' y/o 'i1' (mascara 0..7).")
     # Se valida todo ANTES de escribir, para no dejar una sola mascara cambiada.
-    for nombre, v in (("run", req.run), ("idle", req.idle)):
+    for nombre, v in (("run", req.run), ("idle", req.idle), ("i1", req.i1)):
         if v is not None and not (plc_banda.MASK_MIN <= v <= plc_banda.MASK_MAX):
             raise HTTPException(422, f"'{nombre}'={v} fuera de rango: la mascara "
                                      f"de torreta va de 0 a 7 (verde=1, amarilla=2, roja=4).")
     plc, ip, port, notas = _banda_plc(req)
     try:
-        plc.configurar_torreta(mask_run=req.run, mask_idle=req.idle)
+        plc.configurar_torreta(mask_run=req.run, mask_idle=req.idle, mask_i1=req.i1)
         estado = _banda_estado(plc)
     except ValueError as e:
         raise HTTPException(422, str(e))
@@ -3497,7 +3488,50 @@ def banda_torreta(req: BandaTorretaRequest):
     finally:
         plc.close()
     return {"status": "ok", "device": "banda", "plc": f"{ip}:{port}",
-            "run": req.run, "idle": req.idle, "notas": notas, "estado": estado}
+            "run": req.run, "idle": req.idle, "i1": req.i1, "notas": notas, "estado": estado}
+
+
+class BandaParosRequest(BandaRequestBase):
+    stop_mode: Optional[int] = None     # R9: 0 I3 · 1 I2+I3 · 2 software+I3 · 3 I2+software+I3
+    soft_stop: Optional[bool] = None    # R10: True enclava el paro software, False lo libera
+
+
+@app.post("/banda/paros")
+def banda_paros(req: BandaParosRequest):
+    """Modo de paro (R9) y paro software (R10), EN VIVO.
+
+    §4 del ST lee StopMode y SoftStopCmd en cada scan: no hace falta
+    NewCfgFlag. El paro software solo detiene con StopMode 2 o 3, e I3 sigue
+    siendo prioritario con cualquier modo. Liberar el paro software NO
+    rearranca la banda: el paro borro BandEnable y hace falta un nuevo I1."""
+    if req.stop_mode is None and req.soft_stop is None:
+        raise HTTPException(422, "Manda 'stop_mode' (0..3) y/o 'soft_stop' (true/false).")
+    if req.stop_mode is not None and not (0 <= req.stop_mode <= 3):
+        raise HTTPException(422, f"stop_mode={req.stop_mode} fuera de rango: 0 (I3), "
+                                 f"1 (I2+I3), 2 (software+I3) o 3 (I2+software+I3).")
+    plc, ip, port, notas = _banda_plc(req)
+    avisos = []
+    try:
+        if req.stop_mode is not None:
+            plc.configurar_paros(req.stop_mode)
+        if req.soft_stop is not None:
+            plc.paro_software(req.soft_stop)
+        estado = _banda_estado(plc)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Error configurando los paros de la banda: {e}")
+    finally:
+        plc.close()
+    if req.soft_stop and estado.get("stop_mode") not in (2, 3):
+        avisos.append("El paro software quedo enclavado (%R10 = 1), pero el modo de paro "
+                      "actual no lo incluye: el PLC no detendra la banda hasta elegir el "
+                      "modo 'Software + I3' o 'I2 + Software + I3'.")
+    if req.soft_stop is False:
+        avisos.append("Paro software liberado. La banda NO rearranca sola: pulsa I1.")
+    return {"status": "ok", "device": "banda", "plc": f"{ip}:{port}",
+            "stop_mode": estado.get("stop_mode"), "soft_stop_cmd": estado.get("soft_stop_cmd"),
+            "avisos": avisos, "notas": notas, "estado": estado}
 
 
 @app.post("/feedback")

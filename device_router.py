@@ -43,7 +43,12 @@ BANDA_TERMS = [
     r"\btorreta\b", r"\bplumas?\b",
     r"\bfrecuencias?\b", r"\b\d+(?:[.,]\d+)?\s*hz\b", r"\bhertz\b",
     r"\bderecha\b", r"\bizquierda\b", r"\bhorario\b", r"\bantihorario\b",
+    r"\bavanz", r"\bparo automatico\b", r"\bparo (?:por )?software\b",
 ]
+
+# Nombre explicito del equipo (regla prioritaria de detectar_dispositivo).
+_NOMBRE_BANDA_RE = re.compile(r"\bbandas?\b|\btransportadora?s?\b")
+_NOMBRE_MALETIN_RE = re.compile(r"\bmaletin(?:es)?\b")
 
 # EXCLUSIVO del maletin: si aparece, la instruccion es del maletin.
 MALETIN_TERMS = [
@@ -83,6 +88,18 @@ def detectar_dispositivo(texto: str) -> dict:
     Devuelve {"device": "maletin"|"banda"|None, "motivo": str}.
     device None significa AMBIGUA: hay que preguntarle al usuario."""
     t = normalizar(texto)
+
+    # REGLA PRIORITARIA: nombrar el equipo decide. "banda" (o "transportadora")
+    # sin "maletin" es SIEMPRE la banda, aunque la frase traiga I1/I2 u otras
+    # palabras que por si solas apuntarian al maletin ("banda prende la verde
+    # con I1", "deten la banda con I2"). Con los dos nombres se pregunta.
+    nombra_banda = bool(_NOMBRE_BANDA_RE.search(t))
+    nombra_maletin = bool(_NOMBRE_MALETIN_RE.search(t))
+    if nombra_banda and nombra_maletin:
+        return {"device": None, "motivo": "nombra la banda y el maletin"}
+    if nombra_banda:
+        return {"device": BANDA, "motivo": "la instruccion nombra la banda"}
+
     banda = _aciertos(t, _BANDA_RE)
     maletin = _aciertos(t, _MALETIN_RE)
 

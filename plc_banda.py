@@ -7,28 +7,30 @@ Espejo EXACTO del programa maestro en TEXTO ESTRUCTURADO (ST) de la banda:
     Archivos Cscape/ladder_maestro_banda.csp   (ST + tabla de tags vigente)
 
 Las direcciones NO se deducen del texto del programa (el ST usa solo nombres
-simbolicos): salen de la tabla de tags del .csp, que es la que el compilador
-de Cscape descargo al PLC. Verificadas contra ese archivo:
+simbolicos): salen de la tabla de tags del .csp (lineas V-NOMBRE=%Rn), que es
+la que el compilador de Cscape descargo al PLC. Verificadas contra ese archivo:
 
-    R1  BandEnable_Reg    R20..R27  Sensor S1      R40 TorretaRun
-    R2  DirCmd            R30..R37  Sensor S2      R41 TorretaIdle
-    R3  BandStatus        R60 Pluma1Cmd            R62 Pluma1Status
-    R4  FreqRequest       R61 Pluma2Cmd            R63 Pluma2Status
-    R5  NewCfgFlag        R500/R502/R504/R506  registros internos del VFD
-    R6  ResetCmd
-    R7  CfgReady_Reg
-    R8  VFD_SpeedDisp     R50 I1_LampMask (lamparas que siguen a I1, §15b)
+    R1..R8     control general         R20..R29  sensor S1 (+ plumas R28/R29)
+    R9  StopMode · R10 SoftStopCmd     R30..R39  sensor S2 (+ plumas R38/R39)
+    R11..R15   paro automatico         R40/R41   TorretaRun / TorretaIdle
+    R50        I1_LampMask             R60..R63  plumas (comando / estado)
+    R100..R127 monitoreo (solo lectura)
+    R500/R502/R504/R506  registros internos del VFD (solo lectura)
+
+El mapa completo vive en BAND_REGISTERS (UNA sola tabla): de ahi salen las
+direcciones, el conjunto de registros escribibles y la lectura de estado.
 
 REPARTO DE RESPONSABILIDADES (no negociable)
 
-    Python  -> interpreta al usuario, valida, escribe R2/R4/R20..R41/R50/R60..R61,
-               dispara R5/R6 y LEE R1/R3/R7/R8/R25..R27/R35..R37/R62/R63.
-    ST      -> arranque, paro, direccion, frecuencia, reset del VFD, sensores,
-               contadores, temporizadores, torreta, plumas, interlocks y todo
-               el control fisico (R500/R502/R504/R506, Q3..Q9).
+    Python  -> interpreta al usuario, valida, escribe SOLO los registros de
+               configuracion/comando de BAND_REGISTERS, dispara R5/R6 y LEE
+               el feedback y los monitores.
+    ST      -> arranque, paros, direccion, frecuencia, reset del VFD, sensores,
+               contadores, temporizadores, paro automatico, torreta, plumas,
+               prioridades y todo el control fisico (R500/R504/R506, Q3..Q9).
 
-Python NUNCA escribe R500 / R504 / R506: son del ST y este los reescribe en
-cada scan. Aqui solo se LEEN, como diagnostico.
+Python NUNCA escribe R500 / R504 / R506 ni los monitores R100..R127: son del
+ST y este los reescribe en cada scan. Aqui solo se LEEN, como diagnostico.
 
 Este modulo es GEMELO e INDEPENDIENTE de plc_maestro.py:
 
@@ -68,90 +70,158 @@ def R(n: int) -> int:
 # ---------------------------------------------------------------------------
 # MAPA DE REGISTROS  (tabla de tags de ladder_maestro_banda.csp)
 # ---------------------------------------------------------------------------
-# CONTROL GENERAL
-# OJO: BandEnable NO es un registro escribible. En el ST es un BOOL global que
-# SOLO enciende el boton fisico I1 (§5, y unicamente si CfgReady AND CfgValid)
-# y borran el boton I3 (§4), NewCfgFlag (§6) y ResetCmd (§7). %R1 es su ESPEJO
-# de lectura (§18), no su mando.
-ADDR_BAND_ENABLE_REG = R(1)    # BandEnable_Reg  RO  1 = habilitacion latcheada
-ADDR_DIR_CMD         = R(2)    # DirCmd          RW  1=dir 1, 2=dir 2 (0=invalida)
-ADDR_BAND_STATUS     = R(3)    # BandStatus      RO  0=parada, 1=dir 1, 2=dir 2
-ADDR_FREQ_REQUEST    = R(4)    # FreqRequest     RW  Hz SIN escalar (1..327)
-ADDR_NEW_CFG_FLAG    = R(5)    # NewCfgFlag      RW  cambio de valor <>0 = nueva config
-ADDR_RESET_CMD       = R(6)    # ResetCmd        RW  cambio de valor <>0 = reset VFD
-ADDR_CFG_READY_REG   = R(7)    # CfgReady_Reg    RO  1 = configuracion armada
-ADDR_VFD_SPEED_DISP  = R(8)    # VFD_SpeedDisp   RO  velocidad real en Hz (§10)
+# Unica fuente de direcciones de la banda. Cada entrada:
+#     clave: (%R, acceso, simbolo en el ST)
+# Acceso:
+#   CFG   configuracion o comando que escribe el backend
+#   TRIG  trigger por CAMBIO DE VALOR (NewCfgFlag / ResetCmd)
+#   FB    feedback que escribe el ST: solo lectura
+#   MON   monitoreo / diagnostico (§19): solo lectura
+#   VFD   registro interno del variador (§8/§9/§10/§16): solo lectura
+# OJO: BandEnable NO es escribible. Es un BOOL que SOLO engancha el boton
+# fisico I1 (§5, y unicamente si CfgReady AND CfgValid AND NOT GenStop) y
+# %R1 es su espejo de lectura (§18), no su mando.
+CFG, TRIG, FB, MON, VFD = "cfg", "trig", "fb", "mon", "vfd"
 
-# SENSOR S1 (%R20..%R27) y S2 (%R30..%R37)
-ADDR_S1_ENABLE        = R(20)
-ADDR_S1_ACTION        = R(21)
-ADDR_S1_TIMER_PRESET  = R(22)
-ADDR_S1_COUNT_PRESET  = R(23)
-ADDR_S1_TORRETA_MASK  = R(24)
-ADDR_S1_COUNT_ACCUM   = R(25)   # RO salvo para ponerlo a 0 (no hay CountReset)
-ADDR_S1_TIMER_ACCUM   = R(26)   # RO
-ADDR_S1_COUNT_DONE    = R(27)   # RO  1 = CountPreset alcanzado
+BAND_REGISTERS = {
+    # -- control general (§3..§10, §18)
+    "band_enable":       (1,   FB,   "BandEnable_Reg"),    # 1 = habilitacion latcheada por I1
+    "dir_cmd":           (2,   CFG,  "DirCmd"),            # 1 = dir 1 (VFD 18) · 2 = dir 2 (VFD 34)
+    "band_status":       (3,   FB,   "BandStatus"),        # 0 detenida · 1 dir 1 · 2 dir 2
+    "freq_request":      (4,   CFG,  "FreqRequest"),       # Hz SIN escalar (1..327)
+    "new_cfg_flag":      (5,   TRIG, "NewCfgFlag"),        # cambio de valor <>0 = nueva config
+    "reset_cmd":         (6,   TRIG, "ResetCmd"),          # cambio de valor <>0 = reset VFD
+    "cfg_ready":         (7,   FB,   "CfgReady_Reg"),      # 1 = configuracion armada
+    "vfd_speed_disp":    (8,   FB,   "VFD_SpeedDisp"),     # velocidad real en Hz (R502 / 100)
+    # -- paros (§4)
+    "stop_mode":         (9,   CFG,  "StopMode"),          # 0 I3 · 1 I2+I3 · 2 SW+I3 · 3 I2+SW+I3
+    "soft_stop_cmd":     (10,  CFG,  "SoftStopCmd"),       # 0 liberado · 1 paro software
+    # -- paro automatico por tiempo (§14b)
+    "auto_stop_preset":  (11,  CFG,  "AutoStopPreset"),    # segundos hasta el paro automatico
+    "auto_stop_accum":   (12,  FB,   "AutoStopAccum"),
+    "auto_stop_done":    (13,  FB,   "AutoStopDone_Reg"),  # 1 = paro automatico completado
+    "stop_reason":       (14,  FB,   "StopReason"),        # ver STOP_REASON_TEXTO
+    "auto_stop_mode":    (15,  CFG,  "AutoStopMode"),      # 0 off · 1 movimiento real · 2 desde START
+    # -- sensor S1 (§11/§12)
+    "s1_enable":         (20,  CFG,  "S1_Enable"),
+    "s1_action":         (21,  CFG,  "S1_Action"),
+    "s1_timer_preset":   (22,  CFG,  "S1_TimerPreset"),
+    "s1_count_preset":   (23,  CFG,  "S1_CountPreset"),
+    "s1_torreta_mask":   (24,  CFG,  "S1_TorretaMask"),
+    "s1_count_accum":    (25,  CFG,  "S1_CountAccum"),     # solo para ponerlo a 0 (no hay CountReset)
+    "s1_timer_accum":    (26,  FB,   "S1_TimerAccum"),
+    "s1_count_done":     (27,  FB,   "S1_CountDone_Reg"),
+    "s1_pluma1":         (28,  CFG,  "S1_Pluma1Cmd"),      # 0 nada · 1 subir · 2 bajar · 3 forzar stop
+    "s1_pluma2":         (29,  CFG,  "S1_Pluma2Cmd"),
+    # -- sensor S2 (§13/§14)
+    "s2_enable":         (30,  CFG,  "S2_Enable"),
+    "s2_action":         (31,  CFG,  "S2_Action"),
+    "s2_timer_preset":   (32,  CFG,  "S2_TimerPreset"),
+    "s2_count_preset":   (33,  CFG,  "S2_CountPreset"),
+    "s2_torreta_mask":   (34,  CFG,  "S2_TorretaMask"),
+    "s2_count_accum":    (35,  CFG,  "S2_CountAccum"),
+    "s2_timer_accum":    (36,  FB,   "S2_TimerAccum"),
+    "s2_count_done":     (37,  FB,   "S2_CountDone_Reg"),
+    "s2_pluma1":         (38,  CFG,  "S2_Pluma1Cmd"),
+    "s2_pluma2":         (39,  CFG,  "S2_Pluma2Cmd"),
+    # -- torreta (§15 / §15b). Bitmask b0 verde · b1 amarilla · b2 roja.
+    "torreta_run":       (40,  CFG,  "TorretaRun"),
+    "torreta_idle":      (41,  CFG,  "TorretaIdle"),
+    "torreta_i1":        (50,  CFG,  "I1_LampMask"),       # lamparas mientras I1 esta presionado
+    # -- plumas (§17). Pluma 1: Q8 sube / Q9 baja · Pluma 2: Q6 sube / Q7 baja
+    "pluma1_cmd":        (60,  CFG,  "Pluma1Cmd"),         # 0 stop · 1 subir · 2 bajar
+    "pluma2_cmd":        (61,  CFG,  "Pluma2Cmd"),
+    "pluma1_status":     (62,  FB,   "Pluma1Status"),
+    "pluma2_status":     (63,  FB,   "Pluma2Status"),
+    # -- monitoreo §19 (1 = activo)
+    "mon_i1_raw":        (100, MON,  "Mon_I1_Raw"),
+    "mon_i2_raw":        (101, MON,  "Mon_I2_Raw"),
+    "mon_i3_raw":        (102, MON,  "Mon_I3_Raw"),
+    "mon_i4_raw":        (103, MON,  "Mon_I4_Raw"),
+    "mon_i5_raw":        (104, MON,  "Mon_I5_Raw"),
+    "mon_btn_start":     (105, MON,  "Mon_BtnStart"),
+    "mon_btn_aux":       (106, MON,  "Mon_BtnAux"),
+    "mon_btn_stop":      (107, MON,  "Mon_BtnStop"),
+    "mon_s1_det":        (108, MON,  "Mon_S1_Det"),
+    "mon_s2_det":        (109, MON,  "Mon_S2_Det"),
+    "mon_q3":            (110, MON,  "Mon_Q3"),
+    "mon_q4":            (111, MON,  "Mon_Q4"),
+    "mon_q5":            (112, MON,  "Mon_Q5"),
+    "mon_q6":            (113, MON,  "Mon_Q6"),
+    "mon_q7":            (114, MON,  "Mon_Q7"),
+    "mon_q8":            (115, MON,  "Mon_Q8"),
+    "mon_q9":            (116, MON,  "Mon_Q9"),
+    "mon_gen_stop":      (117, MON,  "Mon_GenStop"),
+    "mon_band_enable":   (118, MON,  "Mon_BandEnable"),
+    "mon_band_running":  (119, MON,  "Mon_BandRunning"),
+    "mon_cfg_valid":     (120, MON,  "Mon_CfgValid"),
+    "mon_cfg_ready":     (121, MON,  "Mon_CfgReady"),
+    "mon_hard_stop":     (122, MON,  "Mon_HardStop"),
+    "mon_aux_stop":      (123, MON,  "Mon_AuxStop"),
+    "mon_soft_stop":     (124, MON,  "Mon_SoftStop"),
+    "mon_auto_stop_done": (125, MON, "Mon_AutoStopDone"),
+    "mon_stop_reason":   (126, MON,  "Mon_StopReason"),
+    "mon_auto_stop_accum": (127, MON, "Mon_AutoStopAccum"),
+    # -- VFD (FIJOS). Desde Python solo se LEEN: los gobierna el ST.
+    "vfd_control":       (500, VFD,  "VFD_Control"),       # 18 dir 1 · 34 dir 2 · 1 stop (§16)
+    "vfd_speed_raw":     (502, VFD,  "VFD_SpeedRaw"),      # velocidad leida del variador (x100)
+    "vfd_freq_calc":     (504, VFD,  "VFD_FreqCalc"),      # consigna = FreqRequest * 100
+    "vfd_reset":         (506, VFD,  "VFD_ResetReg"),      # 0 / 2 durante la secuencia de reset
+}
 
-ADDR_S2_ENABLE        = R(30)
-ADDR_S2_ACTION        = R(31)
-ADDR_S2_TIMER_PRESET  = R(32)
-ADDR_S2_COUNT_PRESET  = R(33)
-ADDR_S2_TORRETA_MASK  = R(34)
-ADDR_S2_COUNT_ACCUM   = R(35)   # RO salvo para ponerlo a 0
-ADDR_S2_TIMER_ACCUM   = R(36)   # RO
-ADDR_S2_COUNT_DONE    = R(37)   # RO
+
+def _addr(clave: str) -> int:
+    return R(BAND_REGISTERS[clave][0])
+
+
+# Registros que el backend puede escribir. TODO lo demas se rechaza: no es
+# una lista negra de registros prohibidos sino una lista blanca.
+ADDR_ESCRIBIBLES = frozenset(R(n) for n, acc, _ in BAND_REGISTERS.values() if acc in (CFG, TRIG))
+ADDR_SOLO_LECTURA = frozenset(R(n) for n, acc, _ in BAND_REGISTERS.values() if acc not in (CFG, TRIG))
+
+# Bloques contiguos que lee leer_estado(): 6 peticiones Modbus en total.
+LECTURA_BLOQUES = ((1, 15), (20, 22), (50, 1), (60, 4), (100, 28), (500, 7))
+
+# Nombres historicos (los usan los metodos y app.py).
+ADDR_BAND_ENABLE_REG = _addr("band_enable")
+ADDR_DIR_CMD         = _addr("dir_cmd")
+ADDR_BAND_STATUS     = _addr("band_status")
+ADDR_FREQ_REQUEST    = _addr("freq_request")
+ADDR_NEW_CFG_FLAG    = _addr("new_cfg_flag")
+ADDR_RESET_CMD       = _addr("reset_cmd")
+ADDR_CFG_READY_REG   = _addr("cfg_ready")
+ADDR_VFD_SPEED_DISP  = _addr("vfd_speed_disp")
+ADDR_STOP_MODE       = _addr("stop_mode")
+ADDR_SOFT_STOP_CMD   = _addr("soft_stop_cmd")
+ADDR_AUTO_STOP_PRESET = _addr("auto_stop_preset")
+ADDR_AUTO_STOP_MODE  = _addr("auto_stop_mode")
 
 # Acceso por numero de sensor (1 / 2)
 ADDR_SENSOR = {
-    1: {"enable": ADDR_S1_ENABLE, "action": ADDR_S1_ACTION,
-        "timer_preset": ADDR_S1_TIMER_PRESET, "count_preset": ADDR_S1_COUNT_PRESET,
-        "torreta_mask": ADDR_S1_TORRETA_MASK, "count_accum": ADDR_S1_COUNT_ACCUM,
-        "timer_accum": ADDR_S1_TIMER_ACCUM, "count_done": ADDR_S1_COUNT_DONE},
-    2: {"enable": ADDR_S2_ENABLE, "action": ADDR_S2_ACTION,
-        "timer_preset": ADDR_S2_TIMER_PRESET, "count_preset": ADDR_S2_COUNT_PRESET,
-        "torreta_mask": ADDR_S2_TORRETA_MASK, "count_accum": ADDR_S2_COUNT_ACCUM,
-        "timer_accum": ADDR_S2_TIMER_ACCUM, "count_done": ADDR_S2_COUNT_DONE},
+    n: {campo: _addr(f"s{n}_{campo}") for campo in (
+        "enable", "action", "timer_preset", "count_preset", "torreta_mask",
+        "count_accum", "timer_accum", "count_done", "pluma1", "pluma2")}
+    for n in (1, 2)
 }
 
-# TORRETA  (bitmask b0=Verde, b1=Amarilla, b2=Roja; valores 0..7).
-# Salidas fisicas Q3/Q4/Q5: las genera el ST (§15). Python solo da mascaras.
-ADDR_TORRETA_RUN   = R(40)
-ADDR_TORRETA_IDLE  = R(41)
-# I1_LampMask (§15b): lamparas que siguen a I1 MIENTRAS este presionado, sin
-# enclavar y con I3 por encima. Requiere el tag fijo %R50 y el bloque §15b del
-# parche Archivos Cscape/ST_parche_lamparas_I1_banda.txt.
-ADDR_TORRETA_I1    = R(50)
+ADDR_TORRETA_RUN   = _addr("torreta_run")
+ADDR_TORRETA_IDLE  = _addr("torreta_idle")
+ADDR_TORRETA_I1    = _addr("torreta_i1")
 
-# PLUMAS  (§17). Salidas fisicas Q6/Q7/Q8/Q9: las genera el ST, que ademas
-# impide activar los dos sentidos de una misma pluma a la vez. Python solo
-# escribe el comando 0/1/2 y lee el estado.
-# ATENCION (documentado en el propio ST): "Pluma 2 UP usa Q9 provisionalmente".
-# Es una inconsistencia PENDIENTE DE CONFIRMAR FISICAMENTE y NO se corrige
-# desde software: aqui no se toca ninguna Q.
-ADDR_PLUMA1_CMD    = R(60)
-ADDR_PLUMA2_CMD    = R(61)
-ADDR_PLUMA1_STATUS = R(62)
-ADDR_PLUMA2_STATUS = R(63)
+ADDR_PLUMA1_CMD    = _addr("pluma1_cmd")
+ADDR_PLUMA2_CMD    = _addr("pluma2_cmd")
+ADDR_PLUMA1_STATUS = _addr("pluma1_status")
+ADDR_PLUMA2_STATUS = _addr("pluma2_status")
 
 ADDR_PLUMA = {
     1: {"cmd": ADDR_PLUMA1_CMD, "status": ADDR_PLUMA1_STATUS},
     2: {"cmd": ADDR_PLUMA2_CMD, "status": ADDR_PLUMA2_STATUS},
 }
 
-# VFD (FIJOS, no modificar). Desde Python solo se LEEN: los gobierna el ST.
-ADDR_VFD_CONTROL   = R(500)   # 18=dir 1, 34=dir 2, 1=stop  (§16)
-ADDR_VFD_SPEED_RAW = R(502)   # velocidad leida del variador (escala x100)
-ADDR_VFD_FREQ_CALC = R(504)   # consigna enviada al variador = FreqRequest*100
-ADDR_VFD_RESET     = R(506)   # 0 / 2 durante la secuencia de reset (§8)
-
-# Registros que el backend NUNCA debe escribir (son del ST).
-ADDR_SOLO_LECTURA = {
-    ADDR_BAND_ENABLE_REG, ADDR_BAND_STATUS, ADDR_CFG_READY_REG,
-    ADDR_VFD_SPEED_DISP, ADDR_S1_TIMER_ACCUM, ADDR_S1_COUNT_DONE,
-    ADDR_S2_TIMER_ACCUM, ADDR_S2_COUNT_DONE,
-    ADDR_PLUMA1_STATUS, ADDR_PLUMA2_STATUS,
-    ADDR_VFD_CONTROL, ADDR_VFD_SPEED_RAW, ADDR_VFD_FREQ_CALC, ADDR_VFD_RESET,
-}
+ADDR_VFD_CONTROL   = _addr("vfd_control")
+ADDR_VFD_SPEED_RAW = _addr("vfd_speed_raw")
+ADDR_VFD_FREQ_CALC = _addr("vfd_freq_calc")
+ADDR_VFD_RESET     = _addr("vfd_reset")
 
 
 # ---------------------------------------------------------------------------
@@ -187,12 +257,51 @@ VFD_CMD_DIR1 = 18
 VFD_CMD_DIR2 = 34
 VFD_CMD_PARO = 1
 
+# StopMode (%R9) segun §4. I3 SIEMPRE detiene: no se puede deshabilitar.
+STOP_MODE_I3, STOP_MODE_I2, STOP_MODE_SW, STOP_MODE_I2_SW = 0, 1, 2, 3
+STOP_MODE_NOMBRE = {
+    STOP_MODE_I3: "I3", STOP_MODE_I2: "I2 + I3",
+    STOP_MODE_SW: "Software + I3", STOP_MODE_I2_SW: "I2 + Software + I3",
+}
+STOP_MODES = {
+    "i3": 0, "solo_i3": 0,
+    "i2": 1, "i2_i3": 1,
+    "software": 2, "sw": 2, "software_i3": 2,
+    "i2_software": 3, "i2_software_i3": 3, "todos": 3,
+}
+
+# AutoStopMode (%R15) segun §14b.
+AUTO_STOP_OFF, AUTO_STOP_MOVIMIENTO, AUTO_STOP_TOTAL = 0, 1, 2
+AUTO_STOP_NOMBRE = {
+    AUTO_STOP_OFF: "deshabilitado",
+    AUTO_STOP_MOVIMIENTO: "cuenta solo el tiempo de movimiento real",
+    AUTO_STOP_TOTAL: "cuenta desde START aunque un sensor pause la banda",
+}
+AUTO_STOP_MODES = {
+    "off": 0, "no": 0, "deshabilitado": 0,
+    "movimiento": 1, "real": 1,
+    "total": 2, "desde_start": 2,
+}
+
+# StopReason (%R14) segun §4 y §14b.
+STOP_REASON_TEXTO = {
+    0: "Sin paro",
+    1: "Detenida por I3",
+    2: "Detenida por I2",
+    3: "Detenida por paro software",
+    4: "Paro automatico completado",
+    5: "Detenida por Sensor 1",
+    6: "Detenida por Sensor 2",
+}
+
 # S1_Action / S2_Action (%R21 / %R31), tal como los interpretan §11..§14:
 #   0 -> el sensor solo detecta y cuenta; no detiene la banda
 #   1 -> detiene MIENTRAS el sensor siga detectando
 #   2 -> detiene durante TimerPreset segundos
 #   3 -> como 1, ademas superpone la mascara de torreta del sensor
 #   4 -> como 2, ademas superpone la mascara de torreta del sensor
+# En los cinco casos BandEnable sigue activo: al terminar la pausa la banda
+# CONTINUA SOLA. No es un paro general ni pide un nuevo START.
 ACTION_NADA                     = 0
 ACTION_PARO_PRESENCIA           = 1
 ACTION_PARO_TEMPORIZADO         = 2
@@ -212,11 +321,11 @@ SENSOR_ACTIONS = {
 }
 
 ACTION_NOMBRE = {
-    ACTION_NADA: "solo detectar y contar",
+    ACTION_NADA: "solo contar",
     ACTION_PARO_PRESENCIA: "detener mientras detecta",
-    ACTION_PARO_TEMPORIZADO: "detener un tiempo",
-    ACTION_PARO_PRESENCIA_TORRETA: "detener mientras detecta + torreta",
-    ACTION_PARO_TEMPORIZADO_TORRETA: "detener un tiempo + torreta",
+    ACTION_PARO_TEMPORIZADO: "detener por tiempo",
+    ACTION_PARO_PRESENCIA_TORRETA: "detener + torreta mientras detecta",
+    ACTION_PARO_TEMPORIZADO_TORRETA: "detener por tiempo + torreta",
 }
 
 # Acciones del Ladder ANTERIOR que ya no existen. Se siguen ACEPTANDO para no
@@ -228,23 +337,29 @@ SENSOR_ACTIONS_OBSOLETAS = {
     "contar_y_parar": ACTION_NADA,
 }
 
-# Sensores fisicos: S1 = %I4 -> PhIn4 ; S2 = %I5 -> PhIn5. Ambos NC (el ST los
-# invierte con NOT en §2). Python NO los lee ni los controla: configura que
-# debe hacer el PLC cuando cada uno se active.
+# Comando de pluma que aplica un sensor (%R28/%R29/%R38/%R39, §17). Solo se
+# aplica MIENTRAS ese sensor tiene la banda detenida (SN_StopLatch); al
+# reanudar, la pluma vuelve al comando manual (%R60/%R61).
+SENSOR_PLUMA_NADA, SENSOR_PLUMA_SUBIR, SENSOR_PLUMA_BAJAR, SENSOR_PLUMA_STOP = 0, 1, 2, 3
+SENSOR_PLUMA_CMDS = {
+    "nada": 0, "ninguno": 0, "sin_intervenir": 0,
+    "subir": 1, "arriba": 1, "up": 1,
+    "bajar": 2, "abajo": 2, "down": 2,
+    "stop": 3, "parar": 3, "detener": 3, "forzar_stop": 3,
+}
+SENSOR_PLUMA_NOMBRE = {0: "sin intervenir", 1: "subir", 2: "bajar", 3: "forzar stop"}
+
+# Sensores fisicos: S1 = %I4 -> PhIn4 ; S2 = %I5 -> PhIn5. Ambos activos en
+# bajo (el ST los invierte con NOT en §2). Python NO los controla: configura
+# que debe hacer el PLC cuando cada uno se active y lee Mon_S1_Det/Mon_S2_Det.
 SENSORES = {1: "S1", 2: "S2"}
 
 # Botonera fisica del tablero (§2/§4/§5). NO se controla por Modbus: el ST la
-# lee directo y el backend solo puede OBSERVAR su efecto en %R1/%R3.
-#   %I1 -> PhIn1  I1  NA  arranque: flanco de subida engancha BandEnable, y
-#                         SOLO si CfgReady AND CfgValid (§5)
-#   %I2 -> PhIn2  I2  NC  entrada auxiliar disponible (BtnAux). Sin funcion
-#                         asignada en el ST: no se inventa ninguna aqui.
-#   %I3 -> PhIn3  I3  NC  paro general PRIORITARIO: borra BandEnable, para el
-#                         VFD y deja las plumas en 0 (§4)
+# lee directo y el backend solo OBSERVA su efecto en los monitores R105..R107.
 BOTONES = {
     "I1": {"addr": "%I1", "tipo": "NA", "funcion": "arranque (latch de habilitacion)"},
-    "I2": {"addr": "%I2", "tipo": "NC", "funcion": "auxiliar disponible (sin uso en el ST)"},
-    "I3": {"addr": "%I3", "tipo": "NC", "funcion": "paro general prioritario"},
+    "I2": {"addr": "%I2", "tipo": "NC", "funcion": "paro auxiliar si StopMode = 1 o 3"},
+    "I3": {"addr": "%I3", "tipo": "NC", "funcion": "paro general prioritario (siempre)"},
 }
 
 # Bit de cada lampara dentro de una mascara de torreta (0..7)
@@ -264,6 +379,7 @@ BAND_STATUS = {
 }
 
 # PlumaNCmd (%R60/%R61) y PlumaNStatus (%R62/%R63) segun §17.
+# Mapeo fisico confirmado: Pluma 1 Q8 sube / Q9 baja · Pluma 2 Q6 sube / Q7 baja.
 PLUMA_STOP  = 0
 PLUMA_SUBIR = 1
 PLUMA_BAJAR = 2
@@ -276,6 +392,7 @@ PLUMA_CMDS = {
 }
 
 PLUMA_ESTADO = {0: "detenida", 1: "subiendo", 2: "bajando"}
+PLUMA_SALIDAS = {1: {"subir": "Q8", "bajar": "Q9"}, 2: {"subir": "Q6", "bajar": "Q7"}}
 
 # Rango entero admitido por los registros del ST (INT de Cscape)
 INT_MAX = 32767
@@ -296,19 +413,25 @@ CFG_READY_POLL_S = 0.25
 CFG_DROP_TIMEOUT_S = 2.0
 CFG_DROP_POLL_S = 0.05
 
-# ENTRADAS FISICAS (solo lectura). El ST no copia I3/I4/I5 a ningun %R, asi
-# que se leen directo como bits Modbus. La direccion de %In depende del mapa
-# Modbus del XL4 (este usa %R1 -> 3000, que no es el de fabrica) y NO esta
-# confirmada: por defecto %In -> entrada discreta n-1. Se ajusta sin tocar
-# codigo con BANDA_MODBUS_I_BASE (direccion de %I1) y BANDA_MODBUS_I_FUNC
-# ("di" = entradas discretas, "coil" = coils).
-MODBUS_I_BASE = int(os.environ.get("BANDA_MODBUS_I_BASE", "0"))
-MODBUS_I_FUNC = os.environ.get("BANDA_MODBUS_I_FUNC", "di").strip().lower()
 
-# Se pone en True la primera vez que la lectura de %I contradice al ST (I3
-# presionado con BandEnable=1, imposible por §4): desde ahi las entradas se
-# marcan como no confiables hasta reiniciar el puente.
-_ENTRADAS_INCONSISTENTES = False
+def _codigo(valor, tabla, low, high):
+    """Codigo entero low..high de un valor numerico o de su nombre en 'tabla'.
+    None si no se reconoce (o si viene None)."""
+    if valor is None or isinstance(valor, bool):
+        return None
+    if isinstance(valor, int):
+        return valor if low <= valor <= high else None
+    clave = str(valor).strip().lower().replace("+", "_").replace(" ", "_")
+    if clave.lstrip("-").isdigit():
+        n = int(clave)
+        return n if low <= n <= high else None
+    return tabla.get(clave)
+
+
+def _con_signo(v: int) -> int:
+    """Modbus entrega 0..65535; los tags del ST son INT de 16 bits con signo."""
+    v = int(v) & 0xFFFF
+    return v - 0x10000 if v > INT_MAX else v
 
 
 # ---------------------------------------------------------------------------
@@ -321,11 +444,11 @@ class BandaPLC:
     llamadas sueltas repartidas por otros archivos. Las primitivas publicas
     son read_band_register / write_band_register y, encima de ellas, las
     operaciones de alto nivel (write_band_config, trigger_new_config,
-    trigger_vfd_reset, read_band_status, read_sensor_status,
-    read_tower_status, command_gate).
+    trigger_vfd_reset, configurar_paros, paro_software, configurar_autostop,
+    leer_estado, command_gate).
 
-    Ningun metodo escribe un registro fuera del mapa documentado arriba, y
-    ninguno escribe R500/R502/R504/R506."""
+    Ningun metodo escribe un registro fuera de ADDR_ESCRIBIBLES, y ninguno
+    escribe R500/R502/R504/R506 ni los monitores R100..R127."""
 
     def __init__(self, ip=None, port=None, unit=UNIT_ID):
         ip = (ip or PLC_IP or "").strip()
@@ -367,11 +490,13 @@ class BandaPLC:
     # plc_maestro.XL4, para que los dos PLC funcionen con cualquiera de las
     # dos versiones de la libreria SIN cambiar la version instalada.
     def write_band_register(self, addr: int, valor: int):
-        """Escribe un registro de la banda. Rechaza los que son del ST."""
-        if addr in ADDR_SOLO_LECTURA:
+        """Escribe un registro de la banda. Solo acepta registros de
+        configuracion/comando (lista blanca ADDR_ESCRIBIBLES)."""
+        if addr not in ADDR_ESCRIBIBLES:
+            motivo = ("lo gobierna el programa maestro ST (feedback/monitoreo/VFD)"
+                      if addr in ADDR_SOLO_LECTURA else "no existe en el mapa de la banda")
             raise ValueError(
-                f"%R{addr - 2999} es de SOLO LECTURA: lo gobierna el programa "
-                f"maestro ST. El backend no debe escribirlo.")
+                f"%R{addr - 2999} no es escribible: {motivo}. El backend no debe escribirlo.")
         valor = int(valor) & 0xFFFF
         try:
             r = self.client.write_register(addr, valor, device_id=self.unit)
@@ -385,9 +510,9 @@ class BandaPLC:
     def read_band_block(self, addr: int, count: int) -> list:
         """Lee 'count' registros consecutivos en una sola peticion Modbus.
 
-        El feedback de la banda vive en bloques contiguos (R1-R8, R20-R27,
-        R30-R37, R40-R41, R60-R63), asi que el sondeo del frontend cabe en
-        unas pocas peticiones en vez de una por registro: el PLC no se satura."""
+        El feedback de la banda vive en bloques contiguos (LECTURA_BLOQUES),
+        asi que el sondeo del frontend cabe en unas pocas peticiones en vez de
+        una por registro: el PLC no se satura."""
         try:
             r = self.client.read_holding_registers(addr, count=count, device_id=self.unit)
         except TypeError:
@@ -401,22 +526,6 @@ class BandaPLC:
     def read_band_register(self, addr: int) -> int:
         """Lee un registro de la banda (holding register)."""
         return self.read_band_block(addr, 1)[0]
-
-    def read_band_bits(self, addr: int, count: int) -> list:
-        """Lee 'count' bits (entradas discretas o coils) en una peticion.
-
-        Solo LECTURA: la banda no tiene ningun bit que el backend deba escribir."""
-        fn = (self.client.read_coils if MODBUS_I_FUNC == "coil"
-              else self.client.read_discrete_inputs)
-        try:
-            r = fn(addr, count=count, device_id=self.unit)
-        except TypeError:
-            r = fn(addr, count=count, slave=self.unit)
-        if r is None:
-            raise IOError(f"Sin respuesta leyendo {count} bit(s) en Modbus {addr}")
-        if hasattr(r, "isError") and r.isError():
-            raise IOError(f"Error leyendo {count} bit(s) en Modbus {addr}")
-        return [bool(b) for b in list(r.bits)[:count]]
 
     # Alias cortos de uso interno (misma funcion, nombre historico).
     _w = write_band_register
@@ -470,6 +579,8 @@ class BandaPLC:
                     f"Accion de sensor no valida: {valor} ({ACTION_MIN}..{ACTION_MAX}).")
             return valor
         clave = str(valor).strip().lower()
+        if clave.isdigit():
+            return BandaPLC._accion(int(clave))
         if clave in SENSOR_ACTIONS:
             return SENSOR_ACTIONS[clave]
         if clave in SENSOR_ACTIONS_OBSOLETAS:
@@ -492,6 +603,13 @@ class BandaPLC:
         if cmd < PLUMA_CMD_MIN or cmd > PLUMA_CMD_MAX:
             raise ValueError(f"Comando de pluma {cmd} fuera de [0, 2] (0=stop, 1=subir, 2=bajar).")
         return cmd
+
+    @staticmethod
+    def _enum(valor, tabla, low, high, etiqueta):
+        codigo = _codigo(valor, tabla, low, high)
+        if codigo is None:
+            raise ValueError(f"{etiqueta}: '{valor}' no es valido ({low}..{high} o {sorted(tabla)}).")
+        return codigo
 
     @staticmethod
     def _entero(valor, low, high, etiqueta):
@@ -531,10 +649,50 @@ class BandaPLC:
         print(f"BANDA: DirCmd={d} ({DIR_NOMBRE[d]})")
         return d
 
+    # -- §4  paros ---------------------------------------------------------
+    def configurar_paros(self, stop_mode=STOP_MODE_I3):
+        """StopMode (%R9): que fuentes, ademas de I3, generan el paro general.
+
+        0 = solo I3 · 1 = I2 + I3 · 2 = software + I3 · 3 = I2 + software + I3.
+        I3 SIEMPRE detiene: ningun valor lo deshabilita. El ST lo lee en cada
+        scan, asi que no necesita NewCfgFlag."""
+        modo = self._enum(stop_mode, STOP_MODES, 0, 3, "StopMode")
+        self._w(ADDR_STOP_MODE, modo)
+        print(f"Paros: StopMode={modo} ({STOP_MODE_NOMBRE[modo]})")
+        return modo
+
+    def paro_software(self, activo: bool):
+        """SoftStopCmd (%R10): 1 = enclava el paro software, 0 = lo libera.
+
+        Solo tiene efecto con StopMode 2 o 3 (§4). Liberarlo NO rearranca la
+        banda: el paro borro BandEnable y hace falta un nuevo flanco de I1."""
+        valor = 1 if activo else 0
+        self._w(ADDR_SOFT_STOP_CMD, valor)
+        print(f"Paro software {'ACTIVADO' if valor else 'liberado'} (SoftStopCmd={valor})")
+        return valor
+
+    # -- §14b  paro automatico ---------------------------------------------
+    def configurar_autostop(self, modo=AUTO_STOP_OFF, preset_s=0):
+        """AutoStopPreset (%R11) y AutoStopMode (%R15).
+
+        modo 1 cuenta solo los segundos de movimiento real (una pausa por
+        sensor detiene el conteo); modo 2 cuenta desde START aunque un sensor
+        pause la banda. El ST invalida la configuracion si modo > 0 con
+        preset <= 0, asi que se rechaza aqui antes de escribir."""
+        m = self._enum(modo, AUTO_STOP_MODES, 0, 2, "AutoStopMode")
+        p = self._entero(preset_s or 0, 0, INT_MAX, "AutoStopPreset (s)")
+        if m and p <= 0:
+            raise ValueError("El paro automatico necesita un tiempo mayor que 0 segundos.")
+        self._w(ADDR_AUTO_STOP_PRESET, p)
+        self._w(ADDR_AUTO_STOP_MODE, m)
+        print(f"Paro automatico: modo={m} ({AUTO_STOP_NOMBRE[m]}) | preset={p}s")
+        return m, p
+
     # -- §11..§14  sensores S1 y S2 ---------------------------------------
     def configurar_sensor(self, n, accion=None, timer_preset=None,
-                          count_preset=None, torreta_mask=None, habilitar=True):
-        """Configura el bloque completo de S1 (%R20..%R24) o S2 (%R30..%R34).
+                          count_preset=None, torreta_mask=None, habilitar=True,
+                          pluma1=None, pluma2=None):
+        """Configura el bloque completo de S1 (%R20..%R29) o S2 (%R30..%R39).
 
         accion       : 0..4 o su nombre ('nada', 'paro_presencia',
                        'paro_temporizado', 'paro_presencia_torreta',
@@ -545,6 +703,8 @@ class BandaPLC:
                        N detecciones (y entonces CountDone se queda en 1).
         torreta_mask : bitmask 0..7 que se superpone durante el evento
                        (acciones 3 y 4)
+        pluma1/pluma2: 0 nada · 1 subir · 2 bajar · 3 forzar stop, aplicado
+                       MIENTRAS el sensor tiene la banda detenida (§17)
         """
         if n not in ADDR_SENSOR:
             raise ValueError(f"Sensor no valido: {n}. Solo existen S1 y S2.")
@@ -574,19 +734,27 @@ class BandaPLC:
             self._w(a["torreta_mask"],
                     self._entero(torreta_mask, MASK_MIN, MASK_MAX,
                                  f"La mascara de torreta de S{n}"))
+        for m, valor in ((1, pluma1), (2, pluma2)):
+            if valor is not None:
+                self._w(a[f"pluma{m}"],
+                        self._enum(valor, SENSOR_PLUMA_CMDS, 0, 3, f"S{n} pluma {m}"))
 
         print(f"S{n}: {'habilitado' if habilitar else 'deshabilitado'}"
               + (f" | accion={accion} (S{n}_Action={acc})" if acc is not None else "")
               + (f" | timer={timer_preset}s" if timer_preset is not None else "")
               + (f" | conteo={count_preset}" if count_preset is not None else "")
-              + (f" | torreta={torreta_mask}" if torreta_mask is not None else ""))
+              + (f" | torreta={torreta_mask}" if torreta_mask is not None else "")
+              + (f" | plumas={pluma1}/{pluma2}" if (pluma1, pluma2) != (None, None) else ""))
 
     def apagar_sensor(self, n):
-        """Deja el sensor sin efecto (Enable=0, Action=0)."""
+        """Deja el sensor sin efecto (Enable=0, Action=0, sin plumas)."""
         if n not in ADDR_SENSOR:
             raise ValueError(f"Sensor no valido: {n}.")
-        self._w(ADDR_SENSOR[n]["enable"], 0)
-        self._w(ADDR_SENSOR[n]["action"], ACTION_NADA)
+        a = ADDR_SENSOR[n]
+        self._w(a["enable"], 0)
+        self._w(a["action"], ACTION_NADA)
+        self._w(a["pluma1"], SENSOR_PLUMA_NADA)
+        self._w(a["pluma2"], SENSOR_PLUMA_NADA)
         print(f"S{n}: deshabilitado")
 
     def reset_contador(self, n) -> bool:
@@ -613,12 +781,11 @@ class BandaPLC:
         Bitmask 0..7 (b0=V,b1=A,b2=R).
 
         mask_i1: lamparas que el ST (§15b) enciende SOLO mientras I1 esta
-        presionado; se apagan al soltarlo y el paro I3 las apaga.
+        presionado; se apagan al soltarlo y el paro general las apaga.
 
         La torreta la gobierna el ST (Q3/Q4/Q5); aqui solo se declara que se
         enciende con la banda corriendo y que se enciende con la banda
-        detenida. Las mascaras de los sensores (acciones 3 y 4) tienen
-        prioridad sobre estas."""
+        detenida. Prioridad del ST: S2 -> S1 -> RUN -> IDLE."""
         if mask_run is not None:
             self._w(ADDR_TORRETA_RUN,
                     self._entero(mask_run, MASK_MIN, MASK_MAX,
@@ -641,7 +808,8 @@ class BandaPLC:
         """Manda un comando a la pluma n (1 o 2): 0=stop, 1=subir, 2=bajar.
 
         Escribe SOLO Pluma1Cmd (%R60) o Pluma2Cmd (%R61). Las salidas fisicas
-        (Q6/Q7/Q8/Q9) y el enclavamiento entre sentidos son del ST (§17)."""
+        (Pluma 1: Q8/Q9 · Pluma 2: Q6/Q7), el enclavamiento entre sentidos y
+        la prioridad paro > S2 > S1 > manual son del ST (§17)."""
         if n not in ADDR_PLUMA:
             raise ValueError(f"Pluma no valida: {n}. Solo existen la 1 y la 2.")
         cmd = self._pluma_cmd(comando)
@@ -722,14 +890,14 @@ class BandaPLC:
 
     # -- §16/§18  marcha y paro -------------------------------------------
     def parar(self):
-        """Paro por Modbus: DirCmd (%R2) = 0.
+        """Paro por Modbus que DESARMA la configuracion: DirCmd (%R2) = 0.
 
         Para el ST, DirCmd=0 no es un modo de marcha sino CONFIGURACION
         INVALIDA (§3): §8 responde con CfgReady=0, VFD_Control=1 y
-        VFD_FreqCalc=0, o sea paro inmediato del variador. Es la via de paro
-        mas rapida que le queda al backend, pero deja el sistema en 'no
-        listo': para volver a operar hay que reconfigurar (DirCmd 1/2 +
-        NewCfgFlag) y pulsar otra vez I1."""
+        VFD_FreqCalc=0, o sea paro inmediato del variador. Funciona con
+        cualquier StopMode, pero deja el sistema en 'no listo': para volver a
+        operar hay que reconfigurar (DirCmd 1/2 + NewCfgFlag) y pulsar I1.
+        El paro que conserva la configuracion es paro_software() (StopMode 2/3)."""
         self._w(ADDR_DIR_CMD, DIR_PARO)
         print("BANDA DETENIDA (DirCmd=0 -> configuracion invalida -> VFD_Control=1)")
 
@@ -738,10 +906,10 @@ class BandaPLC:
 
         AVISO IMPORTANTE del programa maestro ST: BandEnable NO es un registro
         Modbus. Es un BOOL que solo engancha el boton fisico I1 (§5), y solo
-        si CfgReady AND CfgValid. Ademas, cada NewCfgFlag lo borra (§6): tras
-        cargar una configuracion SIEMPRE hay que volver a pulsar I1. Desde
-        aqui lo unico que se puede hacer es dejar el sentido de giro escrito y
-        comprobar en %R1 si el operador ya habilito la banda."""
+        si CfgReady AND CfgValid AND NOT GenStop. Ademas, cada NewCfgFlag lo
+        borra (§6): tras cargar una configuracion SIEMPRE hay que volver a
+        pulsar I1. Desde aqui lo unico que se puede hacer es dejar el sentido
+        de giro escrito y comprobar en %R1 si el operador ya habilito la banda."""
         if not on:
             self.parar()
             return
@@ -751,8 +919,8 @@ class BandaPLC:
         print("BANDA lista para marcha" + (f" (DirCmd={d})" if d is not None else ""))
         if not self.band_enable():
             print("AVISO: BandEnable esta en 0 (%R1). El programa maestro solo lo "
-                  "enciende con el boton fisico I1: pulsalo (y suelta I3) para "
-                  "que la banda arranque con esta configuracion.")
+                  "enciende con el boton fisico I1: pulsalo (sin paro I3/I2/software "
+                  "activo) para que la banda arranque con esta configuracion.")
 
     def band_enable(self) -> bool:
         """True si BandEnable esta latcheado (%R1 = BandEnable_Reg, §18)."""
@@ -767,13 +935,13 @@ class BandaPLC:
                           sensores=None, torreta=None):
         """Escribe TODA la configuracion de la banda SIN disparar el trigger.
 
-        Orden: R2/R4 -> R20..R24 / R30..R34 -> R40/R41. El trigger (R5) va
+        Orden: R2/R4 -> R20..R29 / R30..R39 -> R40/R41/R50. El trigger (R5) va
         aparte y SIEMPRE despues, para que el PLC no lea una configuracion a
         medias.
 
         sensores : {1: {...}, 2: {...}} con claves accion / timer_preset /
-                   count_preset / torreta_mask / habilitar
-        torreta  : {"run": 0..7, "idle": 0..7}
+                   count_preset / torreta_mask / habilitar / pluma1 / pluma2
+        torreta  : {"run": 0..7, "idle": 0..7, "i1": 0..7}
         """
         self.configurar_banda(frecuencia_hz=frecuencia_hz, direccion=direccion)
 
@@ -789,11 +957,14 @@ class BandaPLC:
                 count_preset=datos.get("count_preset"),
                 torreta_mask=datos.get("torreta_mask"),
                 habilitar=datos.get("habilitar", True),
+                pluma1=datos.get("pluma1"),
+                pluma2=datos.get("pluma2"),
             )
 
         if torreta:
             self.configurar_torreta(mask_run=torreta.get("run"),
-                                    mask_idle=torreta.get("idle"))
+                                    mask_idle=torreta.get("idle"),
+                                    mask_i1=torreta.get("i1"))
 
     # -- LECTURA DE ESTADO / FEEDBACK --------------------------------------
     def read_band_status(self) -> dict:
@@ -830,14 +1001,14 @@ class BandaPLC:
         return salida
 
     def read_tower_status(self) -> dict:
-        """Mascaras de torreta cargadas en el PLC (R40 / R41).
-
-        Q3/Q4/Q5 no se leen: son salidas del ST, no registros de interfaz."""
+        """Mascaras de torreta cargadas en el PLC (R40 / R41 / R50)."""
         run = self._r(ADDR_TORRETA_RUN)
         idle = self._r(ADDR_TORRETA_IDLE)
+        i1 = self._r(ADDR_TORRETA_I1)
         return {
             "run": run, "run_nombre": TORRETA_NOMBRE.get(run, str(run)),
             "idle": idle, "idle_nombre": TORRETA_NOMBRE.get(idle, str(idle)),
+            "i1": i1, "i1_nombre": TORRETA_NOMBRE.get(i1, str(i1)),
         }
 
     def read_gate_status(self) -> dict:
@@ -853,99 +1024,17 @@ class BandaPLC:
         return salida
 
     def leer_estado(self) -> dict:
-        """Estado COMPLETO para el frontend (una sola tanda de lecturas).
+        """Estado COMPLETO para el frontend (6 lecturas por bloque).
 
-        Incluye los registros internos del VFD SOLO como diagnostico: se leen,
-        nunca se escriben. InitSeqState e InitTimerAccum NO aparecen: en el
-        .csp vigente no tienen $tag, asi que Cscape les asigna la direccion y
-        puede moverlas en cualquier recompilacion; el estado de la secuencia
-        se deduce de CfgReady (%R7), que si es un tag fijo."""
-        # 5 lecturas por bloque en vez de ~20 sueltas.
-        gen = self.read_band_block(ADDR_BAND_ENABLE_REG, 8)     # R1..R8
-        s1 = self.read_band_block(ADDR_S1_ENABLE, 8)            # R20..R27
-        s2 = self.read_band_block(ADDR_S2_ENABLE, 8)            # R30..R37
-        tor = self.read_band_block(ADDR_TORRETA_RUN, 2)         # R40..R41
-        tor_i1 = self.read_band_register(ADDR_TORRETA_I1)       # R50
-        plu = self.read_band_block(ADDR_PLUMA1_CMD, 4)          # R60..R63
-        vfd = self.read_band_block(ADDR_VFD_CONTROL, 7)         # R500..R506
-
-        status = gen[2]
-        estado = {
-            "band_status": status,
-            "estado": BAND_STATUS.get(status, str(status)),
-            "running": status in (1, 2),
-            "direccion": {1: 1, 2: 2}.get(status),
-            "band_enable": gen[0] == 1,
-            "cfg_ready": gen[6] == 1,
-            "dir_cmd": gen[1],
-            "freq_request_hz": gen[3],
-            # %R8 ya viene escalado por el ST (§10): no se vuelve a dividir.
-            "vfd_speed_hz": gen[7],
-            "s1_count": s1[5], "s1_timer_s": s1[6], "s1_count_done": s1[7] == 1,
-            "s2_count": s2[5], "s2_timer_s": s2[6], "s2_count_done": s2[7] == 1,
-            "torreta": {
-                "run": tor[0], "run_nombre": TORRETA_NOMBRE.get(tor[0], str(tor[0])),
-                "idle": tor[1], "idle_nombre": TORRETA_NOMBRE.get(tor[1], str(tor[1])),
-                "i1": tor_i1, "i1_nombre": TORRETA_NOMBRE.get(tor_i1, str(tor_i1)),
-            },
-            "pluma1": {"status": plu[2], "estado": PLUMA_ESTADO.get(plu[2], str(plu[2])),
-                       "cmd": plu[0]},
-            "pluma2": {"status": plu[3], "estado": PLUMA_ESTADO.get(plu[3], str(plu[3])),
-                       "cmd": plu[1]},
-            # Diagnostico del VFD (solo lectura).
-            "vfd_control": vfd[0],
-            "vfd_speed_raw": vfd[2],
-            "vfd_freq_raw": vfd[4],
-            "vfd_freq_hz": vfd[4] / 100.0,
-            "vfd_reset": vfd[6],
-        }
-        # Entradas fisicas (I1, I3, S1, S2): el ST no las expone en ningun %R.
-        # Sin ellas no hay forma de distinguir "I3 presionado" de "lista, falta
-        # I1", porque en el ST vigente I3 NO baja CfgReady (§4/§8).
-        ent = self.leer_entradas(band_enable=estado["band_enable"])
-        estado["entradas"] = ent
-        usable = bool(ent.get("disponible") and ent.get("confiable"))
-        estado["i1_pulsado"] = ent["i1_arranque"] if usable else None
-        estado["i3_paro"] = ent["i3_paro"] if usable else None
-        estado["s1_detecta"] = ent["s1_detecta"] if usable else None
-        estado["s2_detecta"] = ent["s2_detecta"] if usable else None
-        # Etiqueta lista para pintar en el frontend.
-        estado["fase"] = _fase_visual(estado)
-        return estado
-
-    def leer_entradas(self, band_enable=None) -> dict:
-        """I1..I5 fisicas, SOLO LECTURA, normalizadas como las ve §2 del ST:
-
-            i1_arranque = PhIn1        (NA)
-            i3_paro     = NOT PhIn3    (NC: 0 fisico = paro presionado)
-            s1_detecta  = NOT PhIn4    s2_detecta = NOT PhIn5
-
-        'confiable' queda en False si la lectura contradice al ST: con I3
-        presionado §4 borra BandEnable en el mismo scan, asi que I3 presionado
-        con %R1 = 1 solo puede ser un mapa Modbus de %I equivocado."""
-        global _ENTRADAS_INCONSISTENTES
-        try:
-            bits = self.read_band_bits(MODBUS_I_BASE, 5)
-        except Exception as e:
-            return {"disponible": False, "confiable": False, "motivo": str(e)}
-        ph = {n: bits[n - 1] for n in range(1, 6)}
-        salida = {
-            "disponible": True,
-            "i1_arranque": ph[1],
-            "i3_paro": not ph[3],
-            "s1_detecta": not ph[4],
-            "s2_detecta": not ph[5],
-            "crudo": {f"I{n}": int(ph[n]) for n in ph},
-            "modbus": {"base": MODBUS_I_BASE, "funcion": MODBUS_I_FUNC},
-        }
-        if salida["i3_paro"] and band_enable:
-            _ENTRADAS_INCONSISTENTES = True
-        salida["confiable"] = not _ENTRADAS_INCONSISTENTES
-        if _ENTRADAS_INCONSISTENTES:
-            salida["motivo"] = ("La lectura de %I contradice al ST (I3 presionado con "
-                                "BandEnable=1): revisa BANDA_MODBUS_I_BASE / "
-                                "BANDA_MODBUS_I_FUNC.")
-        return salida
+        Todo sale de registros del ST: control y paros (R1..R15), sensores y
+        torreta (R20..R41), I1_LampMask (R50), plumas (R60..R63), monitoreo §19
+        (R100..R127) y VFD (R500..R506, solo diagnostico). Las entradas y
+        salidas fisicas se toman de los monitores, que el ST ya normaliza."""
+        reg = {}
+        for inicio, cuantos in LECTURA_BLOQUES:
+            for i, v in enumerate(self.read_band_block(R(inicio), cuantos)):
+                reg[inicio + i] = _con_signo(v)
+        return estado_desde_registros(reg)
 
     # -- verificacion post-carga ------------------------------------------
     def verificar_vfd(self) -> list:
@@ -987,34 +1076,147 @@ class BandaPLC:
         return avisos
 
 
+def estado_desde_registros(reg: dict) -> dict:
+    """Traduce {numero %R: valor} al estado que pinta el frontend.
+
+    Separado de BandaPLC para poder probarlo sin PLC. Todo sale de registros
+    LEIDOS: nunca del ultimo comando enviado."""
+    def g(clave):
+        return reg.get(BAND_REGISTERS[clave][0], 0)
+
+    def si(clave):
+        return g(clave) == 1
+
+    status = g("band_status")
+    razon = g("stop_reason")
+    estado = {
+        "band_status": status,
+        "estado": BAND_STATUS.get(status, str(status)),
+        "running": status in (1, 2),
+        "direccion": {1: 1, 2: 2}.get(status),
+        "band_enable": si("band_enable"),
+        "cfg_ready": si("cfg_ready"),
+        "cfg_valid": si("mon_cfg_valid"),
+        "gen_stop": si("mon_gen_stop"),
+        "dir_cmd": g("dir_cmd"),
+        "freq_request_hz": g("freq_request"),
+        # %R8 ya viene escalado por el ST (§10): no se vuelve a dividir.
+        "vfd_speed_hz": g("vfd_speed_disp"),
+        # Paros (§4)
+        "stop_mode": g("stop_mode"),
+        "stop_mode_nombre": STOP_MODE_NOMBRE.get(g("stop_mode"), str(g("stop_mode"))),
+        "soft_stop_cmd": g("soft_stop_cmd"),
+        "hard_stop": si("mon_hard_stop"),
+        "aux_stop": si("mon_aux_stop"),
+        "soft_stop": si("mon_soft_stop"),
+        "stop_reason": razon,
+        "stop_reason_texto": STOP_REASON_TEXTO.get(razon, f"Causa desconocida ({razon})"),
+        # Paro automatico (§14b)
+        "auto_stop_mode": g("auto_stop_mode"),
+        "auto_stop_mode_nombre": AUTO_STOP_NOMBRE.get(g("auto_stop_mode"), str(g("auto_stop_mode"))),
+        "auto_stop_preset": g("auto_stop_preset"),
+        "auto_stop_accum": g("auto_stop_accum"),
+        "auto_stop_done": si("auto_stop_done"),
+        # Entradas tal como las normaliza §2 (1 = activo)
+        "i1_pulsado": si("mon_btn_start"),
+        "i2_activo": si("mon_btn_aux"),
+        "i3_paro": si("mon_btn_stop"),
+        "s1_detecta": si("mon_s1_det"),
+        "s2_detecta": si("mon_s2_det"),
+        "entradas": {f"I{n}": g(f"mon_i{n}_raw") for n in range(1, 6)},
+        "salidas": {f"Q{n}": g(f"mon_q{n}") for n in range(3, 10)},
+        "lamparas": {"verde": si("mon_q3"), "amarilla": si("mon_q4"), "roja": si("mon_q5")},
+        "torreta": {
+            "run": g("torreta_run"), "run_nombre": TORRETA_NOMBRE.get(g("torreta_run"), ""),
+            "idle": g("torreta_idle"), "idle_nombre": TORRETA_NOMBRE.get(g("torreta_idle"), ""),
+            "i1": g("torreta_i1"), "i1_nombre": TORRETA_NOMBRE.get(g("torreta_i1"), ""),
+        },
+        # Diagnostico del VFD (solo lectura).
+        "vfd_control": g("vfd_control"),
+        "vfd_speed_raw": g("vfd_speed_raw"),
+        "vfd_freq_raw": g("vfd_freq_calc"),
+        "vfd_freq_hz": g("vfd_freq_calc") / 100.0,
+        "vfd_reset": g("vfd_reset"),
+    }
+    for n in (1, 2):
+        st = g(f"pluma{n}_status")
+        q = PLUMA_SALIDAS[n]
+        estado[f"pluma{n}"] = {
+            "status": st, "estado": PLUMA_ESTADO.get(st, str(st)),
+            "cmd": g(f"pluma{n}_cmd"),
+            "subir": g(f"mon_q{q['subir'][1:]}") == 1, "bajar": g(f"mon_q{q['bajar'][1:]}") == 1,
+            "salidas": q,
+        }
+    estado["sensores"] = {}
+    for n in (1, 2):
+        acc = g(f"s{n}_action")
+        estado[f"s{n}_count"] = g(f"s{n}_count_accum")
+        estado[f"s{n}_timer_s"] = g(f"s{n}_timer_accum")
+        estado[f"s{n}_count_done"] = si(f"s{n}_count_done")
+        estado["sensores"][f"s{n}"] = {
+            "enable": g(f"s{n}_enable") != 0,
+            "action": acc, "action_nombre": ACTION_NOMBRE.get(acc, str(acc)),
+            "timer_preset": g(f"s{n}_timer_preset"),
+            "count_preset": g(f"s{n}_count_preset"),
+            "torreta": g(f"s{n}_torreta_mask"),
+            "pluma1": g(f"s{n}_pluma1"), "pluma2": g(f"s{n}_pluma2"),
+            "count": g(f"s{n}_count_accum"), "timer_s": g(f"s{n}_timer_accum"),
+            "count_done": si(f"s{n}_count_done"),
+            "detecta": si(f"mon_s{n}_det"),
+        }
+    # Tabla de diagnostico: todos los registros leidos, con su acceso.
+    estado["registros"] = [
+        {"r": n, "simbolo": simbolo, "acceso": acc, "valor": reg[n]}
+        for n, acc, simbolo in sorted(BAND_REGISTERS.values())
+        if n in reg
+    ]
+    estado["fase"] = _fase_visual(estado)
+    return estado
+
+
 def _fase_visual(estado: dict) -> str:
     """Traduce el feedback del PLC a la etiqueta que pinta el frontend.
 
     Se decide SOLO con registros leidos del PLC, nunca con el ultimo comando
-    enviado: el operador puede haber pulsado el paro fisico I3 y el frontend
-    tiene que enterarse."""
-    if estado.get("i3_paro"):
-        return "paro"                  # I3 presionado (lectura de la entrada)
-    if (not estado.get("cfg_ready") and estado.get("dir_cmd") == DIR_PARO
-            and (estado.get("torreta") or {}).get("i1")):
-        return "sin_marcha"            # programa de lamparas con I1 (§15b)
+    enviado: el operador puede haber pulsado un paro fisico y el frontend
+    tiene que enterarse. Distingue PARO GENERAL (borra BandEnable) de PAUSA
+    POR SENSOR (BandEnable sigue activo y la banda continua sola)."""
+    if estado.get("hard_stop"):
+        return "paro_i3"
+    if estado.get("aux_stop"):
+        return "paro_i2"
+    if estado.get("soft_stop"):
+        return "paro_software"
     if estado.get("running"):
         return "corriendo"
-    if not estado.get("cfg_ready"):
-        return "configurando"          # secuencia init en curso o cfg invalida
     if estado.get("band_enable"):
-        return "habilitada"            # lista y habilitada, pero detenida
+        return "pausa_sensor" if estado.get("stop_reason") in (5, 6) else "habilitada"
+    if estado.get("auto_stop_done"):
+        return "auto_completado"
+    if not estado.get("cfg_valid"):
+        tor = estado.get("torreta") or {}
+        plumas = [(estado.get(f"pluma{n}") or {}).get("cmd") for n in (1, 2)]
+        if estado.get("dir_cmd") == DIR_PARO and (tor.get("run") or tor.get("idle")
+                                                  or tor.get("i1") or any(plumas)):
+            return "sin_marcha"        # programa de lamparas/plumas sin movimiento
+        return "esperando_config"
+    if not estado.get("cfg_ready"):
+        return "configurando"          # secuencia init del VFD en curso
     return "lista"                     # configurada; falta pulsar I1
 
 
 FASE_TEXTO = {
-    "paro": "Paro I3 activo — suelta I3 y pulsa I1",
-    "sin_marcha": "Sin marcha — las lamparas siguen a I1 mientras este presionado",
+    "paro_i3": "Paro I3 activo — suelta I3 y pulsa I1",
+    "paro_i2": "Paro I2 activo — suelta I2 y pulsa I1",
+    "paro_software": "Paro software activo — liberalo y pulsa I1",
+    "esperando_config": "Esperando configuracion",
+    "sin_marcha": "Sin marcha — solo lamparas o plumas",
     "configurando": "Configurando VFD...",
-    "lista": "Sistema listo — pulsa I1 para habilitar",
+    "lista": "Lista — esperando I1",
     "habilitada": "Banda habilitada",
+    "pausa_sensor": "Pausada por sensor — continua sola",
+    "auto_completado": "Secuencia terminada (paro automatico) — pulsa I1 para repetir",
     "corriendo": "Banda corriendo",
-    "detenida": "Banda detenida",
 }
 
 
@@ -1028,22 +1230,25 @@ FASE_TEXTO = {
 #     "device": "banda",
 #     "name": "...",
 #     "band": {
-#       "enable": true,
+#       "enable": true,                    # false = la instruccion no pide movimiento
 #       "direction": "derecha" | "izquierda" | 1 | 2,
 #       "freq_hz": 1..327 | null,
-#       "wait_s1_s": 0..32767 | null,      # atajo: accion 'paro_temporizado'
-#       "wait_s2_s": 0..32767 | null,
-#       "s1_action": "nada"|"paro_presencia"|"paro_temporizado"|
+#       "stop_mode": 0..3 | null,          # %R9  (0 I3 · 1 I2+I3 · 2 SW+I3 · 3 I2+SW+I3)
+#       "auto_stop_mode": 0..2 | null,     # %R15 (0 off · 1 movimiento real · 2 desde START)
+#       "auto_stop_s": 0..32767 | null,    # %R11
+#       "s1_action": 0..4 | "nada"|"paro_presencia"|"paro_temporizado"|
 #                    "paro_presencia_torreta"|"paro_temporizado_torreta",
-#       "s2_action": ...,
-#       "count_s1": 0..32767 | null,       # preset del contador de S1 (%R23)
-#       "count_s2": 0..32767 | null,
-#       "torreta_s1": 0..7 | null,         # mascara durante el evento de S1
-#       "torreta_s2": 0..7 | null,
-#       "torreta_run": 0..7 | null,        # mascara con la banda en marcha
-#       "torreta_idle": 0..7 | null,       # mascara con la banda detenida
-#       "pluma1": 0..2 | "subir"|"bajar"|"stop" | null,
-#       "pluma2": ...
+#       "wait_s1_s": 0..32767 | null,      # %R22 (acciones 2 y 4)
+#       "count_s1": 0..32767 | null,       # %R23 preset del contador
+#       "torreta_s1": 0..7 | null,         # %R24 mascara durante el evento
+#       "s1_pluma1": 0..3 | "subir"|"bajar"|"stop" | null,   # %R28
+#       "s1_pluma2": ...                                     # %R29
+#       ... lo mismo para s2 (%R30..%R39)
+#       "torreta_run": 0..7 | null,        # %R40 mascara con la banda en marcha
+#       "torreta_idle": 0..7 | null,       # %R41 mascara con la banda detenida
+#       "torreta_i1": 0..7 | null,         # %R50 mascara mientras I1 esta presionado
+#       "pluma1": 0..2 | "subir"|"bajar"|"stop" | null,      # %R60 manual
+#       "pluma2": ...                                        # %R61
 #     }
 #   }
 #
@@ -1074,9 +1279,25 @@ def _accion_codigo(valor):
     if isinstance(valor, int) and not isinstance(valor, bool):
         return valor if ACTION_MIN <= valor <= ACTION_MAX else None
     clave = str(valor).strip().lower()
+    if clave.isdigit():
+        return _accion_codigo(int(clave))
     if clave in SENSOR_ACTIONS:
         return SENSOR_ACTIONS[clave]
     return SENSOR_ACTIONS_OBSOLETAS.get(clave)
+
+
+def _auto_stop(band) -> tuple:
+    """(modo, preset_s) del paro automatico. Un tiempo sin modo explicito se
+    entiende como modo 1 (solo tiempo de movimiento real)."""
+    preset = band.get("auto_stop_s")
+    try:
+        preset = int(preset) if preset is not None else 0
+    except (TypeError, ValueError):
+        preset = 0
+    modo = _codigo(band.get("auto_stop_mode"), AUTO_STOP_MODES, 0, 2)
+    if modo is None:
+        modo = AUTO_STOP_MOVIMIENTO if preset > 0 else AUTO_STOP_OFF
+    return modo, preset
 
 
 def validar_config(cfg) -> list:
@@ -1109,7 +1330,7 @@ def validar_config(cfg) -> list:
         _entero_en_rango(band["freq_hz"], FREQ_MIN_HZ, FREQ_MAX_HZ,
                          "band.freq_hz (Hz)", errores)
 
-    for campo in ("wait_s1_s", "wait_s2_s", "count_s1", "count_s2"):
+    for campo in ("wait_s1_s", "wait_s2_s", "count_s1", "count_s2", "auto_stop_s"):
         if band.get(campo) is not None:
             _entero_en_rango(band[campo], 0, INT_MAX, f"band.{campo}", errores)
 
@@ -1127,23 +1348,43 @@ def validar_config(cfg) -> list:
             errores.append("band.direction=0 no es una direccion valida: el ST "
                            "necesita 1 o 2 para dar por buena la configuracion.")
 
+    # Paros (§3: StopMode 0..3).
+    if band.get("stop_mode") is not None and _codigo(band["stop_mode"], STOP_MODES, 0, 3) is None:
+        errores.append(f"band.stop_mode='{band['stop_mode']}' debe ser 0 (I3), 1 (I2+I3), "
+                       f"2 (software+I3) o 3 (I2+software+I3).")
+
+    # Paro automatico (§3: AutoStopMode 0..2 y preset > 0 si esta activo).
+    am = band.get("auto_stop_mode")
+    if am is not None and _codigo(am, AUTO_STOP_MODES, 0, 2) is None:
+        errores.append(f"band.auto_stop_mode='{am}' debe ser 0 (off), 1 (movimiento real) "
+                       f"o 2 (desde START).")
+    else:
+        modo, preset = _auto_stop(band)
+        if modo and preset <= 0:
+            errores.append("band.auto_stop_mode activo necesita band.auto_stop_s mayor que "
+                           "0 segundos (el ST invalida la configuracion).")
+
     for n in (1, 2):
         acc = band.get(f"s{n}_action")
-        if acc is None:
-            continue
-        codigo = _accion_codigo(acc)
-        if codigo is None:
-            errores.append(f"band.s{n}_action='{acc}' debe ser un codigo 0..4 o "
-                           f"uno de {sorted(SENSOR_ACTIONS)}.")
-            continue
-        # Acciones temporizadas sin tiempo: el ST invalida TODA la config.
-        if codigo in (ACTION_PARO_TEMPORIZADO, ACTION_PARO_TEMPORIZADO_TORRETA):
-            espera = band.get(f"wait_s{n}_s")
-            if espera is None or _entero_en_rango(espera, 1, INT_MAX,
-                                                  f"band.wait_s{n}_s", []) is None:
-                errores.append(
-                    f"band.s{n}_action='{acc}' detiene la banda por tiempo, asi "
-                    f"que band.wait_s{n}_s debe ser mayor que 0 segundos.")
+        if acc is not None:
+            codigo = _accion_codigo(acc)
+            if codigo is None:
+                errores.append(f"band.s{n}_action='{acc}' debe ser un codigo 0..4 o "
+                               f"uno de {sorted(SENSOR_ACTIONS)}.")
+            # Acciones temporizadas sin tiempo: el ST invalida TODA la config.
+            elif codigo in (ACTION_PARO_TEMPORIZADO, ACTION_PARO_TEMPORIZADO_TORRETA):
+                espera = band.get(f"wait_s{n}_s")
+                if espera is None or _entero_en_rango(espera, 1, INT_MAX,
+                                                      f"band.wait_s{n}_s", []) is None:
+                    errores.append(
+                        f"band.s{n}_action='{acc}' detiene la banda por tiempo, asi "
+                        f"que band.wait_s{n}_s debe ser mayor que 0 segundos.")
+        # Plumas por sensor (§3: 0..3).
+        for m in (1, 2):
+            v = band.get(f"s{n}_pluma{m}")
+            if v is not None and _codigo(v, SENSOR_PLUMA_CMDS, 0, 3) is None:
+                errores.append(f"band.s{n}_pluma{m}='{v}' debe ser 0 (nada), 1 (subir), "
+                               f"2 (bajar) o 3 (forzar stop).")
 
     for n in (1, 2):
         p = band.get(f"pluma{n}")
@@ -1192,49 +1433,84 @@ def avisos_config(cfg) -> list:
                 f"S{n}_Action=0; si quieres que el conteo detenga la banda, usa "
                 f"una accion de paro junto con count_s{n}.")
 
+        codigo, _, _ = _accion_de_sensor(band, n)
+        codigo = _accion_codigo(codigo)
         # El conteo cambio de significado con el ST nuevo: conviene decirlo.
         preset = band.get(f"count_s{n}")
-        codigo = _accion_codigo(acc)
         if preset and codigo:
             avisos.append(
                 f"S{n}: con count_s{n}={preset} la accion se ejecuta UNA vez, al "
                 f"llegar a {preset} detecciones (CountDone se queda en 1 hasta la "
-                f"siguiente configuracion o un Reset del VFD; ni el paro I3 ni "
+                f"siguiente configuracion o un Reset del VFD; ni un paro ni "
                 f"poner el conteo en 0 la rearman). Con count_s{n}=0 se "
                 f"ejecutaria en cada deteccion.")
+
+        # Torreta y plumas de un sensor solo se aplican mientras detiene la banda.
+        mascara = band.get(f"torreta_s{n}")
+        plumas = [_codigo(band.get(f"s{n}_pluma{m}"), SENSOR_PLUMA_CMDS, 0, 3) for m in (1, 2)]
+        if mascara and codigo in (ACTION_NADA, ACTION_PARO_PRESENCIA, ACTION_PARO_TEMPORIZADO):
+            avisos.append(
+                f"S{n}: la torreta del sensor (torreta_s{n}) solo se enciende con "
+                f"las acciones 3 o 4 (detener + torreta); con la accion {codigo} el "
+                f"ST no la usa.")
+        if any(plumas):
+            if codigo == ACTION_NADA:
+                avisos.append(
+                    f"S{n}: el ST solo mueve las plumas de un sensor MIENTRAS ese "
+                    f"sensor detiene la banda; con 'solo contar' no se aplican.")
+            else:
+                avisos.append(
+                    f"S{n}: la pluma se mueve solo durante la pausa del sensor; al "
+                    f"reanudar, cada pluma vuelve a su comando manual (%R60/%R61).")
+
+    modo, preset = _auto_stop(band)
+    if modo:
+        avisos.append(
+            f"Paro automatico a los {preset} s ({AUTO_STOP_NOMBRE[modo]}). Al "
+            f"completarse la banda queda detenida (causa 'paro automatico'); pulsa "
+            f"I1 para repetir la secuencia.")
+
+    stop_mode = _codigo(band.get("stop_mode"), STOP_MODES, 0, 3) or 0
+    if stop_mode in (STOP_MODE_I2, STOP_MODE_I2_SW):
+        avisos.append("I2 (NC) tambien detiene la banda; I3 sigue siendo el paro prioritario.")
+    if stop_mode in (STOP_MODE_SW, STOP_MODE_I2_SW):
+        avisos.append(
+            "Paro software habilitado: se activa y se libera desde el panel de la "
+            "banda (%R10). Liberarlo NO rearranca la banda: hay que pulsar I1. Con "
+            "el paro software activo el VFD no termina su configuracion.")
 
     if band.get("torreta_i1"):
         i1 = band.get("torreta_i1")
         avisos.append(
             f"Lamparas con I1 ({TORRETA_NOMBRE.get(i1, i1)}): se encienden SOLO "
-            f"mientras I1 este presionado, se apagan al soltarlo y el paro I3 las "
-            f"apaga. Requiere el bloque §15b y el tag I1_LampMask (%R50) en el ST "
-            f"(Archivos Cscape/ST_parche_lamparas_I1_banda.txt).")
-    if solo_luces_i1(cfg):
+            f"mientras I1 este presionado, se apagan al soltarlo y el paro general "
+            f"las apaga.")
+    if sin_marcha(cfg):
         avisos.append(
             "Programa sin marcha: DirCmd queda en 0, asi que pulsar I1 NO arranca "
-            "la banda (CfgReady se queda en 0 a proposito).")
+            "la banda (CfgReady se queda en 0 a proposito). Las lamparas y plumas "
+            "configuradas funcionan igual.")
     elif band.get("enable") is False and _usa_sensores(band):
         avisos.append(
-            "Los sensores (y sus lamparas) solo actuan con la banda habilitada: el "
-            "ST (§11/§13) exige BandEnable, que solo da el boton I1 con la "
-            "configuracion lista. Al pulsar I1 la banda ARRANCA y se detiene "
-            "cuando el sensor detecta; ahi se enciende la lampara del sensor.")
+            "Los sensores (y sus lamparas y plumas) solo actuan con la banda "
+            "habilitada: el ST (§11/§13) exige BandEnable, que solo da el boton I1 "
+            "con la configuracion lista. Al pulsar I1 la banda ARRANCA y se detiene "
+            "cuando el sensor detecta.")
         if band.get("freq_hz") is None:
             avisos.append(
                 "No se pidio frecuencia: la banda usara la que ya tiene el PLC "
                 "(%R4). Si vale 0, el ST da la configuracion por invalida.")
-    if band.get("torreta_i1") and _usa_sensores(band):
+    if band.get("torreta_i1") and not sin_marcha(cfg):
         avisos.append(
             "I1 es a la vez el arranque de la banda y el boton de las lamparas con "
             "I1: al pulsarlo se encienden esas lamparas y la banda arranca.")
 
-    if band.get("enable", True) is not False:
+    if not sin_marcha(cfg):
         avisos.append(
             "El programa maestro no tiene registro BandEnable: tras cargar la "
             "configuracion la banda queda LISTA pero no habilitada. Cada nueva "
             "configuracion borra la habilitacion, asi que hay que pulsar el "
-            "boton fisico I1 (con I3 suelto) para que arranque.")
+            "boton fisico I1 (sin paro activo) para que arranque.")
 
     return avisos
 
@@ -1246,14 +1522,19 @@ def _accion_de_sensor(band, n):
     """Deduce (accion, timer_preset, count_preset) para S1 o S2 desde el JSON.
 
     'wait_sN_s' es el atajo historico del frontend: significa 'paro
-    temporizado de N segundos', que en el ST es Action = 2."""
+    temporizado de N segundos', que en el ST es Action = 2. Una pluma de
+    sensor sin accion se entiende como 'detener mientras detecta', porque el
+    ST solo mueve la pluma durante la pausa del sensor."""
     accion = band.get(f"s{n}_action")
     espera = band.get(f"wait_s{n}_s")
     conteo = band.get(f"count_s{n}")
+    plumas = [_codigo(band.get(f"s{n}_pluma{m}"), SENSOR_PLUMA_CMDS, 0, 3) for m in (1, 2)]
 
     if accion is None:
         if espera is not None:
             accion = "paro_temporizado"
+        elif any(plumas):
+            accion = "paro_presencia"
         elif conteo is not None:
             # El conteo no necesita accion propia: basta habilitar el sensor
             # con su preset (§11 cuenta siempre que Enable <> 0).
@@ -1264,17 +1545,16 @@ def _accion_de_sensor(band, n):
     return accion, espera, conteo
 
 
-def solo_luces_i1(cfg) -> bool:
-    """True si el programa NO pide mover la banda, usa lamparas con I1 (§15b)
-    y NO configura sensores.
+def sin_marcha(cfg) -> bool:
+    """True si el programa NO pide mover la banda y no usa nada que exija
+    BandEnable (sensores o paro automatico): solo lamparas y/o plumas.
 
-    En ese modo I1 tiene que encender lamparas, no arrancar la banda: se deja
-    DirCmd en 0 para que §5 nunca enclave BandEnable. Con sensores no se puede:
-    §11/§13 solo evaluan S1/S2 con BandEnable, que exige CfgValid (DirCmd 1/2)
-    y CfgReady; con DirCmd = 0 el sensor nunca encenderia su lampara."""
+    En ese modo se deja DirCmd en 0 para que §5 nunca enclave BandEnable al
+    pulsar I1, y no se espera CfgReady (no llega nunca, a proposito). La
+    torreta (§15/§15b) y las plumas manuales (§17) no dependen de CfgValid."""
     band = (cfg or {}).get("band") or {}
-    return (band.get("enable") is False and bool(band.get("torreta_i1"))
-            and not _usa_sensores(band))
+    return (band.get("enable") is False and not _usa_sensores(band)
+            and not _auto_stop(band)[0])
 
 
 def _usa_sensores(band) -> bool:
@@ -1290,20 +1570,22 @@ def plan_config(cfg) -> list:
       1) parar()              -> DirCmd = 0: el ST lo lee como configuracion
                                  invalida y detiene el VFD en el acto. Nada se
                                  reconfigura con la banda en movimiento.
-      2) configuracion        -> frecuencia, sensores, torreta y, al final,
-                                 el sentido de giro (DirCmd = 1/2)
+      2) configuracion        -> frecuencia, paros, paro automatico, sensores
+                                 (con sus plumas), torreta y, al final, el
+                                 sentido de giro (DirCmd = 1/2)
       3) trigger_new_config() -> NewCfgFlag: SIEMPRE lo ultimo, para que el PLC
                                  no lea una configuracion a medias. Dispara el
                                  reset del VFD y la carga de FreqRequest*100.
       4) esperar_config_lista -> se espera CfgReady (%R7) = 1 antes de dar el
                                  sistema por listo.
-      5) plumas               -> comandos independientes, si el programa los
-                                 pidio.
+      5) plumas               -> comandos manuales, si el programa los pidio.
 
     El arranque NO esta en el plan: BandEnable solo lo enciende el boton
-    fisico I1, y cada NewCfgFlag lo borra."""
+    fisico I1, y cada NewCfgFlag lo borra. SoftStopCmd tampoco: es un mando en
+    vivo del panel, no parte del programa."""
     plan = []
     band = cfg.get("band") or {}
+    marcha = not sin_marcha(cfg)
 
     # 1) Estado seguro: nada se reconfigura con la banda en marcha.
     plan.append(("parar", (), {}))
@@ -1312,22 +1594,31 @@ def plan_config(cfg) -> list:
     if band.get("freq_hz") is not None:
         plan.append(("configurar_banda", (), {"frecuencia_hz": band.get("freq_hz")}))
 
+    # Paros y paro automatico SIEMPRE (null -> 0): son RETAIN en el PLC y un
+    # valor de un programa anterior seguiria decidiendo como para la banda.
+    plan.append(("configurar_paros", (), {
+        "stop_mode": _codigo(band.get("stop_mode"), STOP_MODES, 0, 3) or STOP_MODE_I3}))
+    modo, preset = _auto_stop(band)
+    plan.append(("configurar_autostop", (), {"modo": modo, "preset_s": preset if modo else 0}))
+
     for n in (1, 2):
         accion, espera, conteo = _accion_de_sensor(band, n)
         if accion is None:
             plan.append(("apagar_sensor", (n,), {}))
             continue
-        # count_preset y torreta_mask se escriben SIEMPRE que el sensor se
-        # configure, aunque el programa no los mencione: esos registros son
-        # RETAIN en el PLC y, sin escribirlos, un preset viejo seguiria
-        # decidiendo cuando actua el sensor. 0 = comportamiento por defecto
-        # (actuar en cada deteccion / sin lamparas).
+        # count_preset, torreta_mask y plumas se escriben SIEMPRE que el sensor
+        # se configure, aunque el programa no los mencione: esos registros son
+        # RETAIN en el PLC y, sin escribirlos, un valor viejo seguiria
+        # decidiendo cuando y como actua el sensor. 0 = comportamiento por
+        # defecto (actuar en cada deteccion / sin lamparas / sin plumas).
         plan.append(("configurar_sensor", (n,), {
             "accion": accion,
             "timer_preset": espera,
             "count_preset": conteo if conteo is not None else 0,
             "torreta_mask": band.get(f"torreta_s{n}") or 0,
             "habilitar": True,
+            "pluma1": band.get(f"s{n}_pluma1") or 0,
+            "pluma2": band.get(f"s{n}_pluma2") or 0,
         }))
 
     # Torreta: las tres mascaras SIEMPRE (null -> 0). Son registros que el PLC
@@ -1339,7 +1630,7 @@ def plan_config(cfg) -> list:
         "mask_i1": band.get("torreta_i1") or 0,
     }))
 
-    if not solo_luces_i1(cfg):
+    if marcha:
         # Sentido de giro: ultimo parametro antes del trigger. El ST exige 1 o
         # 2 para dar la configuracion por valida, asi que un programa sin
         # direccion explicita se carga en direccion 1.
@@ -1350,12 +1641,10 @@ def plan_config(cfg) -> list:
 
         # 4) Confirmacion real del PLC
         plan.append(("esperar_config_lista", (), {}))
-    # Programa sin marcha con lamparas que siguen a I1: DirCmd se queda en 0
-    # (paso 1), asi §3 deja CfgValid = FALSE y §5 no enclava BandEnable al
-    # pulsar I1. Sin trigger ni espera: en este modo CfgReady no llega nunca, a
-    # proposito. §15/§15b no dependen de CfgValid.
+    # Programa sin marcha: DirCmd se queda en 0 (paso 1), asi §3 deja CfgValid
+    # = FALSE y §5 no enclava BandEnable al pulsar I1. Sin trigger ni espera.
 
-    # 5) Plumas (independientes de la secuencia del VFD)
+    # 5) Plumas manuales (independientes de la secuencia del VFD)
     for n in (1, 2):
         if band.get(f"pluma{n}") is not None:
             plan.append(("command_gate", (n, band.get(f"pluma{n}")), {}))
