@@ -1214,11 +1214,20 @@ def avisos_config(cfg) -> list:
         avisos.append(
             "Programa sin marcha: DirCmd queda en 0, asi que pulsar I1 NO arranca "
             "la banda (CfgReady se queda en 0 a proposito).")
-        if any(band.get(f"s{n}_action") is not None or band.get(f"wait_s{n}_s") is not None
-               or band.get(f"count_s{n}") is not None for n in (1, 2)):
+    elif band.get("enable") is False and _usa_sensores(band):
+        avisos.append(
+            "Los sensores (y sus lamparas) solo actuan con la banda habilitada: el "
+            "ST (§11/§13) exige BandEnable, que solo da el boton I1 con la "
+            "configuracion lista. Al pulsar I1 la banda ARRANCA y se detiene "
+            "cuando el sensor detecta; ahi se enciende la lampara del sensor.")
+        if band.get("freq_hz") is None:
             avisos.append(
-                "Los sensores solo actuan con la banda habilitada por I1: en un "
-                "programa sin marcha no haran nada.")
+                "No se pidio frecuencia: la banda usara la que ya tiene el PLC "
+                "(%R4). Si vale 0, el ST da la configuracion por invalida.")
+    if band.get("torreta_i1") and _usa_sensores(band):
+        avisos.append(
+            "I1 es a la vez el arranque de la banda y el boton de las lamparas con "
+            "I1: al pulsarlo se encienden esas lamparas y la banda arranca.")
 
     if band.get("enable", True) is not False:
         avisos.append(
@@ -1256,12 +1265,21 @@ def _accion_de_sensor(band, n):
 
 
 def solo_luces_i1(cfg) -> bool:
-    """True si el programa NO pide mover la banda y usa lamparas con I1 (§15b).
+    """True si el programa NO pide mover la banda, usa lamparas con I1 (§15b)
+    y NO configura sensores.
 
     En ese modo I1 tiene que encender lamparas, no arrancar la banda: se deja
-    DirCmd en 0 para que §5 nunca enclave BandEnable."""
+    DirCmd en 0 para que §5 nunca enclave BandEnable. Con sensores no se puede:
+    §11/§13 solo evaluan S1/S2 con BandEnable, que exige CfgValid (DirCmd 1/2)
+    y CfgReady; con DirCmd = 0 el sensor nunca encenderia su lampara."""
     band = (cfg or {}).get("band") or {}
-    return band.get("enable") is False and bool(band.get("torreta_i1"))
+    return (band.get("enable") is False and bool(band.get("torreta_i1"))
+            and not _usa_sensores(band))
+
+
+def _usa_sensores(band) -> bool:
+    """True si el bloque 'band' configura S1 o S2 (misma regla que el plan)."""
+    return any(_accion_de_sensor(band, n)[0] is not None for n in (1, 2))
 
 
 def plan_config(cfg) -> list:

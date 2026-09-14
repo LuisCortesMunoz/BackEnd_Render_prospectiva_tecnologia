@@ -427,7 +427,9 @@ INSTRUCCIONES SIN MOVIMIENTO (muy importante):
 - Luz sin decir estado y sin mover la banda -> torreta_idle.
 - Luz cuando un sensor detecta: el programa maestro solo enciende la mascara de un sensor
   JUNTO con un paro, asi que usa "paro_presencia_torreta" (o "paro_temporizado_torreta" si
-  hay segundos) y pon la mascara en torreta_sN.
+  hay segundos) y pon la mascara en torreta_sN. Esa luz solo funciona con la banda habilitada
+  por I1 (la banda arranca y se detiene al detectar). NO pongas torreta_i1 salvo que el
+  usuario mencione I1 explicitamente.
 - "Despues de N detecciones" -> count_sN = N, ademas de la accion que corresponda.
 - "Sube/baja/deten la pluma N" -> plumaN = "subir" | "bajar" | "stop".
 
@@ -3094,7 +3096,8 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
         # llego ESCALADA al variador. Un ladder que asigne FreqRequest sin el
         # x100 deja la banda inmovil sin que nada falle de forma visible.
         try:
-            avisos = avisos + plc.verificar_vfd()
+            if not plc_banda.solo_luces_i1(cfg):
+                avisos = avisos + plc.verificar_vfd()
         except Exception as e:
             log.warning(f"No se pudo verificar la consigna del VFD: {e}")
     except HTTPException:
@@ -3112,7 +3115,7 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
     log.info(f"/aplicar-plc OK (BANDA) -> {ip}:{port}")
     return {"status": "ok", "enviado": True, "device": "banda", "plc": f"{ip}:{port}",
             "salidas": 0, "plan": plan_legible, "avisos": avisos, "notas": notas,
-            "cfg_ready": cfg_ready}
+            "cfg_ready": cfg_ready, "sin_marcha": plc_banda.solo_luces_i1(cfg)}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -3273,7 +3276,8 @@ def banda_config(req: BandaConfigRequest):
         # direccion -> NewCfgFlag -> esperar CfgReady.
         plc_banda.aplicar_config(plc, cfg, dry_run=False)
         try:
-            avisos = avisos + plc.verificar_vfd()
+            if not plc_banda.solo_luces_i1(cfg):
+                avisos = avisos + plc.verificar_vfd()
         except Exception as e:
             log.warning(f"No se pudo verificar la consigna del VFD: {e}")
         estado = _banda_estado(plc)
