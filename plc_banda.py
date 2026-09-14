@@ -780,12 +780,20 @@ class BandaPLC:
               + (f" | plumas={pluma1}/{pluma2}" if (pluma1, pluma2) != (None, None) else ""))
 
     def apagar_sensor(self, n):
-        """Deja el sensor sin efecto (Enable=0, Action=0, sin plumas)."""
+        """Deja el sensor sin efecto y con TODOS sus campos en valores validos.
+
+        §3 del ST valida accion, tiempo, conteo, mascara, plumas y BandMode
+        aunque el sensor este deshabilitado, y esos registros son RETAIN: un
+        valor viejo fuera de rango (p. ej. S1_TorretaMask = 15) dejaria
+        CfgValid = FALSE y la configuracion nunca llegaria a CfgReady."""
         if n not in ADDR_SENSOR:
             raise ValueError(f"Sensor no valido: {n}.")
         a = ADDR_SENSOR[n]
         self._w(a["enable"], 0)
         self._w(a["action"], ACTION_NADA)
+        self._w(a["timer_preset"], 0)
+        self._w(a["count_preset"], 0)
+        self._w(a["torreta_mask"], 0)
         self._w(a["pluma1"], SENSOR_PLUMA_NADA)
         self._w(a["pluma2"], SENSOR_PLUMA_NADA)
         self._w(a["band_mode"], BAND_MODE_PAUSA)
@@ -1203,6 +1211,8 @@ def estado_desde_registros(reg: dict) -> dict:
             "band_mode": g(f"s{n}_band_mode"),
             "event_active": si(f"s{n}_event_active"),
         }
+    # Por que el PLC rechaza la configuracion (vacio si CfgValid = 1).
+    estado["motivos_cfg_invalida"] = [] if estado["cfg_valid"] else motivos_config_invalida(reg)
     # Tabla de diagnostico: todos los registros leidos, con su acceso.
     estado["registros"] = [
         {"r": n, "simbolo": simbolo, "acceso": acc, "valor": reg[n]}
@@ -1211,6 +1221,64 @@ def estado_desde_registros(reg: dict) -> dict:
     ]
     estado["fase"] = _fase_visual(estado)
     return estado
+
+
+def motivos_config_invalida(reg: dict) -> list:
+    """Reproduce §3 del ST (CfgValid) sobre los registros LEIDOS y devuelve,
+    en texto, cada regla que falla. Sirve para decirle al operador por que el
+    PLC no llega a CfgReady en vez de un aviso generico."""
+    def g(clave):
+        return reg.get(BAND_REGISTERS[clave][0], 0)
+
+    def r(clave):
+        n, _, simbolo = BAND_REGISTERS[clave]
+        return f"{simbolo} (%R{n})"
+
+    m = []
+    dir_cmd, freq = g("dir_cmd"), g("freq_request")
+    movimiento = dir_cmd != 0 or freq != 0
+    if movimiento:
+        if dir_cmd not in (DIR_1, DIR_2):
+            m.append(f"{r('dir_cmd')} = {dir_cmd}: con movimiento debe ser 1 o 2.")
+        if not FREQ_MIN_HZ <= freq <= FREQ_MAX_HZ:
+            m.append(f"{r('freq_request')} = {freq}: con movimiento debe estar entre "
+                     f"{FREQ_MIN_HZ} y {FREQ_MAX_HZ} Hz.")
+    if not 0 <= g("stop_mode") <= 3:
+        m.append(f"{r('stop_mode')} = {g('stop_mode')}: debe estar entre 0 y 3.")
+    am, ap = g("auto_stop_mode"), g("auto_stop_preset")
+    if not 0 <= am <= 2:
+        m.append(f"{r('auto_stop_mode')} = {am}: debe estar entre 0 y 2.")
+    if ap < 0:
+        m.append(f"{r('auto_stop_preset')} = {ap}: no puede ser negativo.")
+    if am > 0 and ap <= 0:
+        m.append(f"{r('auto_stop_mode')} = {am} necesita {r('auto_stop_preset')} mayor que 0.")
+    if am > 0 and not movimiento:
+        m.append(f"{r('auto_stop_mode')} = {am} necesita movimiento (DirCmd y FreqRequest).")
+    for n in (1, 2):
+        s = f"s{n}_"
+        if not 0 <= g(s + "band_mode") <= 1:
+            m.append(f"{r(s + 'band_mode')} = {g(s + 'band_mode')}: debe ser 0 o 1.")
+        acc = g(s + "action")
+        if not ACTION_MIN <= acc <= ACTION_MAX:
+            m.append(f"{r(s + 'action')} = {acc}: debe estar entre 0 y 4.")
+        if g(s + "timer_preset") < 0:
+            m.append(f"{r(s + 'timer_preset')} = {g(s + 'timer_preset')}: no puede ser negativo.")
+        if acc in (ACTION_PARO_TEMPORIZADO, ACTION_PARO_TEMPORIZADO_TORRETA) and g(s + "timer_preset") <= 0:
+            m.append(f"{r(s + 'action')} = {acc} necesita {r(s + 'timer_preset')} mayor que 0.")
+        if g(s + "count_preset") < 0:
+            m.append(f"{r(s + 'count_preset')} = {g(s + 'count_preset')}: no puede ser negativo.")
+        if not MASK_MIN <= g(s + "torreta_mask") <= MASK_MAX:
+            m.append(f"{r(s + 'torreta_mask')} = {g(s + 'torreta_mask')}: debe estar entre 0 y 7.")
+        for p in ("pluma1", "pluma2"):
+            if not 0 <= g(s + p) <= 3:
+                m.append(f"{r(s + p)} = {g(s + p)}: debe estar entre 0 y 3.")
+    for clave in ("torreta_run", "torreta_idle", "torreta_i1"):
+        if not MASK_MIN <= g(clave) <= MASK_MAX:
+            m.append(f"{r(clave)} = {g(clave)}: debe estar entre 0 y 7.")
+    for clave in ("pluma1_cmd", "pluma2_cmd"):
+        if not PLUMA_CMD_MIN <= g(clave) <= PLUMA_CMD_MAX:
+            m.append(f"{r(clave)} = {g(clave)}: debe estar entre 0 y 2.")
+    return m
 
 
 def _fase_visual(estado: dict) -> str:

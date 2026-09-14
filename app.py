@@ -3046,11 +3046,15 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
         raise HTTPException(503, f"No se pudo conectar al PLC de la banda {ip}:{port}. "
                                  f"¿Esta el backend en la misma red del PLC y encendido? Detalle: {e}")
     cfg_ready = None
+    motivos = []
     try:
         plc_banda.aplicar_config(plc, cfg, dry_run=False)
-        # El plan ya espero CfgReady (%R7); se lee otra vez para informarlo.
+        # El plan ya espero CfgReady (%R7); se lee otra vez para informarlo y,
+        # si no llego, se lee por que el PLC rechaza la configuracion (§3).
         try:
             cfg_ready = plc.config_lista()
+            if cfg_ready is False:
+                motivos = plc.leer_estado().get("motivos_cfg_invalida") or []
         except Exception as e:
             log.warning(f"No se pudo leer CfgReady tras la carga: {e}")
         # Verificacion post-carga: confirma que la consigna de frecuencia
@@ -3069,7 +3073,7 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
         plc.close()
 
     if cfg_ready is False:
-        avisos.append(AVISO_BANDA_SIN_CFG_READY)
+        avisos.extend(_avisos_cfg_invalida(motivos))
 
     log.info(f"/aplicar-plc OK (BANDA) -> {ip}:{port}")
     return {"status": "ok", "enviado": True, "device": "banda", "plc": f"{ip}:{port}",
@@ -3095,6 +3099,14 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
 #
 # Toda la comunicacion Modbus pasa por plc_banda.BandaPLC: aqui no hay ni una
 # sola llamada suelta a pymodbus.
+
+def _avisos_cfg_invalida(motivos: list) -> list:
+    """Aviso cuando CfgReady no llega: la regla exacta de §3 que falla o, si
+    CfgValid = 1, el aviso de paro activo."""
+    if motivos:
+        return ["El PLC rechaza la configuracion (CfgValid = 0): " + m for m in motivos]
+    return [AVISO_BANDA_SIN_CFG_READY]
+
 
 AVISO_BANDA_SIN_CFG_READY = (
     "El PLC todavia no reporta CfgReady (%R7 = 1). Si no cambia en unos segundos, "
@@ -3262,7 +3274,7 @@ def banda_config(req: BandaConfigRequest):
         plc.close()
 
     if not estado.get("cfg_ready"):
-        avisos.append(AVISO_BANDA_SIN_CFG_READY)
+        avisos.extend(_avisos_cfg_invalida(estado.get("motivos_cfg_invalida") or []))
 
     log.info(f"/banda/config OK -> {ip}:{port}")
     return {"status": "ok", "enviado": True, "device": "banda", "plc": f"{ip}:{port}",
