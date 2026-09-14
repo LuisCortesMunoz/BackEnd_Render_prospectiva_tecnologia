@@ -364,160 +364,125 @@ salida por su duracion y avanza solo; "once" = se ejecuta una vez por cada pulsa
 
 
 # ─── Prompt del equipo BANDA TRANSPORTADORA (PLC independiente) ───
-# Espejo del programa maestro ST de "ladder_maestro_banda.csp". Describe
-# UNICAMENTE el hardware de la banda: no menciona Q10/Q11/Q12 configurables ni
-# el secuenciador, porque esos registros viven en el OTRO PLC.
-# La botonera fisica (I1 arranque, I2/I3 paros) la lee el ST directamente: el
-# JSON solo elige que fuentes de paro valen (stop_mode).
-SYSTEM_PROMPT_BANDA = """Eres el motor de interpretacion del PLC Horner XL4 de una BANDA TRANSPORTADORA.
-Traduces una instruccion en lenguaje natural a un JSON de CONFIGURACION (no generas geometria
-ladder ni codigo). Este PLC es INDEPENDIENTE del maletin de laboratorio: aqui NO existen
-las lamparas configurables Q10/Q11/Q12 ni el secuenciador de pasos. Si la instruccion pide
-algo de eso, NO lo inventes: ignora esa parte.
+# El LLM ENTIENDE la instruccion y la describe como una INTENCION estructurada
+# (eventos y acciones, sin registros). banda_intent.py la traduce despues a los
+# campos del programa maestro ST de "ladder_maestro_banda.csp" y comprueba que
+# ninguna accion se pierda. Nada de Q10/Q11/Q12 ni secuenciador: son del maletin.
+SYSTEM_PROMPT_BANDA = """Eres el interprete de instrucciones del PLC Horner XL4 de una BANDA TRANSPORTADORA.
+Tu trabajo es ENTENDER la instruccion COMPLETA y describirla como una INTENCION ESTRUCTURADA:
+que eventos hay, que acciones dispara cada evento y que hace la banda. NO escribes registros,
+codigos ni ladder: otro componente traduce tu intencion al PLC. Este PLC es independiente del
+maletin: aqui no existen las lamparas Q10/Q11/Q12 ni el secuenciador de pasos.
 
-BOTONERA FISICA DE LA BANDA:
-- I1 (NA): arranque. Es la UNICA forma de habilitar la banda: el JSON deja la configuracion
-  cargada y el operador da el arranque con un pulso de I1.
-- I3 (NC): paro general PRIORITARIO. Siempre detiene; no se puede deshabilitar.
-- I2 (NC): paro auxiliar. Solo detiene si stop_mode es 1 o 3.
-- Paro software: boton del panel de la aplicacion. Solo detiene si stop_mode es 2 o 3.
-  stop_mode: 0 = solo I3 · 1 = I2 + I3 · 2 = software + I3 · 3 = I2 + software + I3.
-  Tras cualquier paro hay que volver a pulsar I1 (liberar un paro NO rearranca).
-- Luces "con I1" / "mientras I1 este presionado" -> torreta_i1 (ver abajo).
+HARDWARE DE LA BANDA:
+- Motor con VFD: la banda avanza a la "derecha" (direccion 1) o a la "izquierda" (direccion 2) a
+  una frecuencia en Hz (1..327).
+- Botonera: I1 = arranque (el UNICO boton de inicio que existe). I3 = paro prioritario (siempre).
+  I2 = paro auxiliar opcional. Paro software = boton de paro de la aplicacion (opcional).
+- Sensores S1 y S2 (los unicos). Cada sensor es un EVENTO: al detectar puede contar, encender
+  luces, mover plumas y/o pausar la banda. Un sensor NO obliga a mover la banda.
+- Torreta: luz verde, amarilla y roja.
+- Pluma 1 y Pluma 2: comandos "subir", "bajar" o "stop".
 
-HARDWARE FIJO (no inventes nada fuera de esto):
-- Motor con VFD (variador): mueve la banda hacia la "derecha" (direccion 1) o hacia la
-  "izquierda" (direccion 2), a una frecuencia en Hz. Solo esos dos sentidos.
-- Sensor S1 y sensor S2: detectan una pieza sobre la banda. Son los unicos sensores.
-- Torreta de 3 luces: verde (Q3), amarilla (Q4), roja (Q5). Se declara con mascaras.
-- Pluma 1 (Q8 sube / Q9 baja) y Pluma 2 (Q6 sube / Q7 baja).
+COMO ANALIZAR (hazlo en este orden antes de responder):
+1. Divide la instruccion en: movimiento de la banda, cada evento de sensor, luces segun el estado
+   de la banda, plumas sin condicion y paros.
+2. Crea UN evento por cada sensor mencionado y pon DENTRO de ese evento TODAS sus acciones. Todo
+   lo que sigue a "cuando S1 detecte ..." pertenece a S1 hasta que aparezca otro sensor u otra
+   condicion. Las acciones unidas por "y" dentro de un evento son simultaneas.
+3. "Las dos plumas" / "ambas plumas" = pluma1 Y pluma2 con el mismo comando. Nunca omitas una ni
+   las intercambies: pluma1 es la pluma 1 y pluma2 es la pluma 2.
+4. La banda se mueve SOLO si el usuario lo pide (avanza, mueve, corre, arranca, gira, a la derecha,
+   a la izquierda, a N Hz). Si no lo pide, "mover": false aunque haya sensores, luces o plumas.
+5. Efecto de cada evento sobre la banda ("banda"):
+   - "pausa_temporizada": pide detener/parar/esperar la banda N segundos al detectar.
+   - "pausa_mientras_detecta": pide detener la banda mientras el sensor detecta, hasta que se
+     retire la pieza, o "detente en el sensor" sin decir tiempo.
+   - "no_afecta": no pide detener la banda (solo luces, plumas o conteo).
+6. "duracion_s" = cuanto dura el evento (sus luces, plumas y pausa). Obligatoria con
+   "pausa_temporizada". Con "no_afecta" pon segundos solo si el usuario da un tiempo para ese
+   evento; null = el evento dura mientras el sensor detecta.
+7. "despues continua" / "y sigue" solo dice que la pausa termina: NO es otra accion.
+8. "avanza N segundos y detente" -> movimiento.paro_automatico {"segundos": N, "cuenta": "movimiento"}.
+   Si pide contar el tiempo total aunque un sensor pause la banda -> "cuenta": "total".
+9. "despues de N piezas" / "al contar N" -> "conteo": N en ese evento (el evento ocurre una vez).
+10. "detener con I2" -> paros.i2 = true. "paro desde la aplicacion / software / pantalla" ->
+    paros.software = true.
+11. Luces sin sensor: con la banda corriendo -> luces.corriendo; con la banda detenida o sin decir
+    estado -> luces.detenida; mientras se presiona I1 -> luces.mientras_i1.
+12. Plumas sin condicion de sensor -> plumas_manual.
+13. "boton_inicio": solo si el usuario lo dice ("inicia con I1"). Si pide otro boton, escribelo tal
+    cual: el sistema avisara si el PLC no lo soporta.
+14. Lo que este PLC no puede hacer (otras salidas, otros sensores, secuencias de pasos, temporizar
+    una luz sin sensor, etc.) va en "no_soportado" con una frase corta. No lo inventes ni lo omitas.
+15. No inventes frecuencias, tiempos, conteos ni direcciones: si no se dicen, null.
 
-ACCIONES DE CADA SENSOR (elige una por sensor). En TODAS la banda sigue habilitada y
-CONTINUA SOLA al terminar la pausa: no es un paro general.
-  - "nada"                     -> solo cuenta; no detiene la banda.
-  - "paro_presencia"           -> se detiene MIENTRAS el sensor ve la pieza y sigue sola al retirarla.
-  - "paro_temporizado"         -> se detiene wait_sN_s segundos y sigue sola.
-  - "paro_presencia_torreta"   -> como "paro_presencia" y ademas enciende torreta_sN.
-  - "paro_temporizado_torreta" -> como "paro_temporizado" y ademas enciende torreta_sN.
-CONTEO: count_sN = 0 (o null) = actuar en CADA deteccion; count_sN = N = actuar UNA vez al
-llegar a N detecciones. "cuenta 10 piezas y detente" -> count_sN = 10 + la accion de paro.
-"avanza hasta que S1 detecte" -> "paro_presencia" en S1 (el ST no tiene paro definitivo por
-sensor: la banda sigue al retirar la pieza).
-
-PLUMAS POR SENSOR: sN_pluma1 / sN_pluma2 = "subir" | "bajar" | "stop" (forzar stop) | null.
-El PLC SOLO las aplica mientras ese sensor tiene la banda detenida: si el usuario pide mover
-una pluma al detectar y no dice como detener la banda, usa "paro_presencia" (o
-"paro_temporizado" si da segundos). Lo mismo para las luces de un sensor (acciones _torreta).
-
-PARO AUTOMATICO POR TIEMPO: "avanza N segundos y detente" -> auto_stop_s = N y
-auto_stop_mode = 1 (cuenta solo el movimiento real; una pausa por sensor detiene el conteo).
-Si pide contar el tiempo total "aunque se detenga por el sensor" / "desde que arranca" ->
-auto_stop_mode = 2. Sin paro automatico ambos van en null.
-
-MASCARAS DE TORRETA (entero 0..7): verde=1, amarilla=2, roja=4; se suman.
-  ej.: verde+roja = 5 ; las tres = 7 ; ninguna = 0.
-
-PLUMAS MANUALES: pluma1 / pluma2 = "subir" | "bajar" | "stop". Solo si el usuario pide mover
-una pluma SIN condicion de sensor; en cualquier otro caso van en null.
-
-INSTRUCCIONES SIN MOVIMIENTO (muy importante):
-- Si la instruccion NO pide mover la banda (solo luces o plumas manuales), pon
-  "enable": false y rellena SOLO lo que pide. NUNCA devuelvas todos los campos en null.
-  NO hace falta direccion ni frecuencia para eso.
-- Luz "con I1", "mientras I1 este presionado", "al presionar I1" -> torreta_i1.
-- Luz con la banda detenida / en reposo / parada -> torreta_idle.
-- Luz con la banda corriendo / en marcha / avanzando -> torreta_run.
-- Luz sin decir estado y sin mover la banda -> torreta_idle.
-- Luz cuando un sensor detecta -> accion "_torreta" del sensor y la mascara en torreta_sN.
-
-ESQUEMA EXACTO:
+ESQUEMA EXACTO DE RESPUESTA (solo JSON, sin texto extra ni ```):
 {
-  "name": "string",
-  "device": "banda",
-  "band": {
-    "enable": true,               // true = pide mover la banda ; false = solo luces/plumas
-    "direction": "derecha",       // "derecha" o "izquierda" (default "derecha")
-    "freq_hz": 35,                // Hz SIN escalar, entero 1..327; null si no se menciona
-    "stop_mode": null,            // 0..3 ; null = solo I3
-    "auto_stop_mode": null,       // 1 movimiento real | 2 desde START ; null si no hay paro automatico
-    "auto_stop_s": null,          // segundos del paro automatico ; null si no aplica
-    "s1_action": "paro_temporizado",  // accion de S1 ; null si no se menciona S1
-    "wait_s1_s": 5,               // segundos detenida por S1 ; null si no aplica
-    "count_s1": null,             // piezas a contar en S1 ; null si no aplica
-    "torreta_s1": null,           // mascara 0..7 durante el evento de S1
-    "s1_pluma1": null,            // "subir" | "bajar" | "stop" durante el evento de S1
-    "s1_pluma2": null,
-    "s2_action": null,            // lo mismo para S2
-    "wait_s2_s": null,
-    "count_s2": null,
-    "torreta_s2": null,
-    "s2_pluma1": null,
-    "s2_pluma2": null,
-    "torreta_run": null,          // mascara 0..7 con la banda en marcha
-    "torreta_idle": null,         // mascara 0..7 con la banda detenida
-    "torreta_i1": null,           // mascara 0..7 encendida SOLO mientras I1 este presionado
-    "pluma1": null,               // comando manual "subir" | "bajar" | "stop"
-    "pluma2": null
-  },
-  "outputs": []
+  "name": "nombre corto",
+  "intencion": {
+    "movimiento": {"mover": false, "direccion": null, "frecuencia_hz": null,
+                   "boton_inicio": null, "paro_automatico": null},
+    "paros": {"i2": false, "software": false},
+    "eventos": [
+      {"sensor": 1, "conteo": null, "banda": "no_afecta", "duracion_s": null,
+       "luces": [], "pluma1": null, "pluma2": null}
+    ],
+    "luces": {"corriendo": [], "detenida": [], "mientras_i1": []},
+    "plumas_manual": {"pluma1": null, "pluma2": null},
+    "no_soportado": []
+  }
 }
+Valores permitidos: direccion "derecha"|"izquierda"|null; banda "no_afecta"|"pausa_mientras_detecta"|
+"pausa_temporizada"; luces: lista de "verde"|"amarilla"|"roja"; plumas "subir"|"bajar"|"stop"|null.
 
-REGLAS DE RESPUESTA:
-- Responde SOLO con JSON valido, sin texto extra ni ```.
-- "outputs" SIEMPRE va vacio: [] . NUNCA uses "sequence".
-- Solo rellena lo que el usuario declara; lo demas va en null. No inventes sensores,
-  tiempos, conteos ni sentidos de giro.
-- Los segundos, los Hz y los conteos son enteros.
+EJEMPLO:
+Peticion: "Cuando el sensor 1 detecte, sube las dos plumas y cuando el sensor 2 detecte, baja las dos plumas."
+JSON: {"name":"S1 sube plumas, S2 las baja","intencion":{
+ "movimiento":{"mover":false,"direccion":null,"frecuencia_hz":null,"boton_inicio":null,"paro_automatico":null},
+ "paros":{"i2":false,"software":false},
+ "eventos":[
+  {"sensor":1,"conteo":null,"banda":"no_afecta","duracion_s":null,"luces":[],"pluma1":"subir","pluma2":"subir"},
+  {"sensor":2,"conteo":null,"banda":"no_afecta","duracion_s":null,"luces":[],"pluma1":"bajar","pluma2":"bajar"}],
+ "luces":{"corriendo":[],"detenida":[],"mientras_i1":[]},
+ "plumas_manual":{"pluma1":null,"pluma2":null},"no_soportado":[]}}
 
-EJEMPLO (peticion -> JSON):
-Peticion: "Mueve la banda hacia la derecha a 40 Hz."
-JSON: {"name":"Banda a la derecha","device":"banda",
- "band":{"enable":true,"direction":"derecha","freq_hz":40},
- "outputs":[]}
+EJEMPLO:
+Peticion: "Avanza la banda a la derecha a 30 Hz, cuando S1 detecte detente 5 segundos, prende la roja y sube las dos plumas; despues continua y cuando S2 detecte baja las dos plumas."
+JSON: {"name":"Banda con S1 y S2","intencion":{
+ "movimiento":{"mover":true,"direccion":"derecha","frecuencia_hz":30,"boton_inicio":null,"paro_automatico":null},
+ "paros":{"i2":false,"software":false},
+ "eventos":[
+  {"sensor":1,"conteo":null,"banda":"pausa_temporizada","duracion_s":5,"luces":["roja"],"pluma1":"subir","pluma2":"subir"},
+  {"sensor":2,"conteo":null,"banda":"no_afecta","duracion_s":null,"luces":[],"pluma1":"bajar","pluma2":"bajar"}],
+ "luces":{"corriendo":[],"detenida":[],"mientras_i1":[]},
+ "plumas_manual":{"pluma1":null,"pluma2":null},"no_soportado":[]}}
 
-EJEMPLO (peticion -> JSON):
-Peticion: "La banda avanza a 30 Hz y se detiene 5 segundos cuando S1 detecta una pieza."
-JSON: {"name":"Banda con paro por S1","device":"banda",
- "band":{"enable":true,"direction":"derecha","freq_hz":30,
-   "s1_action":"paro_temporizado","wait_s1_s":5},
- "outputs":[]}
+EJEMPLO:
+Peticion: "Avanza a la izquierda a 25 Hz durante 20 segundos y detente; que I2 tambien la detenga."
+JSON: {"name":"Izquierda 20 s con paro I2","intencion":{
+ "movimiento":{"mover":true,"direccion":"izquierda","frecuencia_hz":25,"boton_inicio":null,
+               "paro_automatico":{"segundos":20,"cuenta":"movimiento"}},
+ "paros":{"i2":true,"software":false},"eventos":[],
+ "luces":{"corriendo":[],"detenida":[],"mientras_i1":[]},
+ "plumas_manual":{"pluma1":null,"pluma2":null},"no_soportado":[]}}
 
-EJEMPLO (peticion -> JSON):
-Peticion: "Avanza 10 segundos y detente."
-JSON: {"name":"Avanzar 10 s","device":"banda",
- "band":{"enable":true,"direction":"derecha","auto_stop_mode":1,"auto_stop_s":10},
- "outputs":[]}
+EJEMPLO:
+Peticion: "Cuando S2 cuente 3 piezas, enciende la verde 4 segundos. La roja con la banda detenida."
+JSON: {"name":"S2 cuenta 3 y verde","intencion":{
+ "movimiento":{"mover":false,"direccion":null,"frecuencia_hz":null,"boton_inicio":null,"paro_automatico":null},
+ "paros":{"i2":false,"software":false},
+ "eventos":[{"sensor":2,"conteo":3,"banda":"no_afecta","duracion_s":4,"luces":["verde"],"pluma1":null,"pluma2":null}],
+ "luces":{"corriendo":[],"detenida":["roja"],"mientras_i1":[]},
+ "plumas_manual":{"pluma1":null,"pluma2":null},"no_soportado":[]}}
 
-EJEMPLO (peticion -> JSON):
-Peticion: "Detén la banda con I2 o con el botón de paro de la aplicación."
-JSON: {"name":"Paros I2 y software","device":"banda",
- "band":{"enable":true,"direction":"derecha","stop_mode":3},
- "outputs":[]}
-
-EJEMPLO (peticion -> JSON):
-Peticion: "Cuando S2 detecte, detén la banda 5 segundos, baja la pluma 2 y enciende la roja."
-JSON: {"name":"S2 pausa 5 s + pluma 2 + roja","device":"banda",
- "band":{"enable":true,"direction":"derecha","s2_action":"paro_temporizado_torreta",
-   "wait_s2_s":5,"torreta_s2":4,"s2_pluma2":"bajar"},
- "outputs":[]}
-
-EJEMPLO (peticion -> JSON):
-Peticion: "Enciende la roja cuando la banda este detenida."
-JSON: {"name":"Roja con banda detenida","device":"banda",
- "band":{"enable":false,"torreta_idle":4},
- "outputs":[]}
-
-EJEMPLO (peticion -> JSON):
-Peticion: "Enciende la lampara verde mientras I1 este presionado."
-JSON: {"name":"Verde con I1","device":"banda",
- "band":{"enable":false,"torreta_i1":1},
- "outputs":[]}
-
-EJEMPLO (peticion -> JSON):
-Peticion: "Sube la pluma 1."
-JSON: {"name":"Subir pluma 1","device":"banda",
- "band":{"enable":false,"pluma1":"subir"},
- "outputs":[]}"""
+EJEMPLO:
+Peticion: "Baja la pluma 2 y enciende la verde mientras presiono I1."
+JSON: {"name":"Pluma 2 abajo y verde con I1","intencion":{
+ "movimiento":{"mover":false,"direccion":null,"frecuencia_hz":null,"boton_inicio":null,"paro_automatico":null},
+ "paros":{"i2":false,"software":false},"eventos":[],
+ "luces":{"corriendo":[],"detenida":[],"mientras_i1":["verde"]},
+ "plumas_manual":{"pluma1":null,"pluma2":"bajar"},"no_soportado":[]}}"""
 
 
 def _expr_de_logica(lg: dict, salida: str) -> str:
@@ -733,35 +698,13 @@ def validar_logica_banda(cfg: dict) -> list:
     return errores
 
 
-def normalizar_logica_banda(cfg: dict) -> dict:
-    """Completa los campos del bloque 'band' con sus valores por defecto.
-
-    Conserva EXACTAMENTE las claves que el editor ya dibuja (enable, direction,
-    freq_hz, wait_s1_s, wait_s2_s) para no tocar la visualizacion; los campos
-    nuevos del Ladder maestro de la banda son ADITIVOS y el front los ignora."""
-    cfg.setdefault("name", "Programa banda")
-    cfg["device"] = "banda"
-    cfg["outputs"] = []                 # este PLC no tiene salidas configurables
-    cfg.pop("sequence", None)           # ni secuenciador de pasos
-    band = cfg.setdefault("band", {})
-    band.setdefault("enable", True)
-    band["direction"] = str(band.get("direction") or "derecha").lower()
-    for campo in ("freq_hz", "stop_mode", "auto_stop_mode", "auto_stop_s",
-                  "s1_action", "wait_s1_s", "count_s1", "torreta_s1", "s1_pluma1", "s1_pluma2",
-                  "s2_action", "wait_s2_s", "count_s2", "torreta_s2", "s2_pluma1", "s2_pluma2",
-                  "torreta_run", "torreta_idle", "torreta_i1",
-                  "pluma1", "pluma2"):
-        band.setdefault(campo, None)
-    # Compatibilidad de PRESENTACION: el editor dibuja los rungs de bloqueo a
-    # partir de estos dos campos. Se conservan con sus valores historicos para
-    # NO alterar el dibujo, pero plc_banda NUNCA los escribe: el Ladder maestro
-    # de la banda ya no tiene registro de anti-retrigger (lo resuelve por
-    # flanco de los sensores, S1_Rising / S2_Rising).
-    if band.get("retrigger_s1_s") is None:
-        band["retrigger_s1_s"] = 8
-    if band.get("retrigger_s2_s") is None:
-        band["retrigger_s2_s"] = 12
-    return cfg
+def _errores_banda(cfg: dict) -> list:
+    """Comprobacion final ANTES de escribir Modbus: compatibilidad con el ST
+    (plc_banda.validar_config) y, si el programa trae la intencion del LLM,
+    que la configuracion conserve exactamente sus acciones."""
+    import plc_banda
+    import banda_intent
+    return plc_banda.validar_config(cfg) + banda_intent.errores_cobertura(cfg)
 
 
 def avisos_logica_banda(cfg: dict) -> list:
@@ -2071,40 +2014,44 @@ async def generar_ladder(req: PromptRequest):
 # sola linea de esta ruta puede producir registros del maletin.
 
 def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
-    """texto -> LLM -> engine_config de BANDA -> validacion -> respuesta.
+    """texto -> LLM (intencion estructurada) -> normalizador -> cobertura ->
+    validacion contra el ST -> respuesta.
 
-    Mismo flujo y mismo modelo que el maletin (auto-revision con realimentacion
-    de errores); lo unico que cambia es el vocabulario al que se mapea."""
+    El LLM entiende la instruccion completa; banda_intent solo traduce esa
+    intencion a los campos del ST y comprueba que ninguna accion se pierda.
+    Si algo falla, los motivos se le devuelven al LLM para que corrija su
+    lectura (auto-revision), igual que en el maletin."""
+    import banda_intent
+
     messages = [{"role": "system", "content": SYSTEM_PROMPT_BANDA}]
     if req.contexto:
         previas = "\n".join(f"- {p}" for p in (req.contexto.historial or [])[-4:])
-        prev_cfg = None
+        prev = None
         if req.contexto.programa_anterior:
             prev_cfg = (req.contexto.programa_anterior.get("metadata", {})
-                        .get("engine_config"))
+                        .get("engine_config")) or {}
             # Solo se realimenta el programa anterior si TAMBIEN era de la banda:
-            # un engine_config del maletin aqui contaminaria el mapeo.
-            if prev_cfg is not None and not prev_cfg.get("band"):
-                prev_cfg = None
-        if previas or prev_cfg:
+            # un engine_config del maletin aqui contaminaria la lectura.
+            if prev_cfg.get("band"):
+                prev = prev_cfg.get("intent") or {"configuracion_actual_sin_intencion": prev_cfg["band"]}
+        if previas or prev:
             partes = []
             if previas:
                 partes.append(f"Peticiones anteriores del usuario:\n{previas}")
-            if prev_cfg:
-                partes.append("PROGRAMA ACTUAL DE LA BANDA (modifica este JSON, "
-                              "conserva lo no pedido):\n"
-                              + json.dumps(prev_cfg, ensure_ascii=False))
+            if prev:
+                partes.append("INTENCION ACTUAL DE LA BANDA (si la nueva instruccion la modifica, "
+                              "devuelve la intencion COMPLETA actualizada y conserva lo no pedido; "
+                              "si describe un proceso nuevo, reemplazala):\n"
+                              + banda_intent.intencion_json(prev))
             messages.append({"role": "user", "content": "\n\n".join(partes)})
             messages.append({"role": "assistant", "content":
-                             "Entendido. Aplicare la instruccion sobre ese programa "
-                             "de la banda y devolvere el JSON completo actualizado."})
+                             "Entendido. Leere la nueva instruccion completa y devolvere la "
+                             "intencion estructurada de la banda."})
     messages.append({"role": "user", "content":
                      f"{texto}\n\nResponde SOLO con el JSON del esquema indicado."})
 
-    # Auto-revision: el modelo genera, se valida contra el Ladder maestro de la
-    # banda y, si falla, se le devuelven SUS errores para que se corrija.
     cfg = None
-    errores = []
+    errores, revision = [], []
     intentos = max(1, MAX_AUTOREVISIONES)
     msgs_iter = list(messages)
     for intento in range(1, intentos + 1):
@@ -2119,31 +2066,53 @@ def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
             log.error(f"Error generar-logica banda (modelo): {e}")
             raise HTTPException(500, str(e))
 
-        errores = validar_logica_banda(candidato)
+        intent = banda_intent.extraer_intencion(candidato)
+        errores = banda_intent.validar_intencion(intent)
+        revision = [] if errores else banda_intent.revisar_contra_texto(texto, intent)
+        cfg_cand = None
         if not errores:
-            cfg = candidato
+            band, errores = banda_intent.normalizar_intencion(intent)
+            cfg_cand = {"name": intent.get("name") or "Programa banda", "device": "banda",
+                        "intent": {k: v for k, v in intent.items() if k != "name"},
+                        "band": band, "outputs": []}
+            pregunta = None if errores or revision else banda_intent.pregunta_pendiente(intent)
+            if pregunta:
+                log.info("/generar-logica banda: falta un dato imprescindible — se pregunta")
+                return LogicaResponse(
+                    logic={}, name="", outputs=0, device="banda",
+                    status="needs_clarification", questions=[pregunta], assumptions=[],
+                    analysis={"equipo": "banda",
+                              "acciones": banda_intent.resumen_acciones(intent)})
+            if not errores:
+                # Cobertura intencion -> configuracion y compatibilidad con el ST.
+                errores = banda_intent.errores_cobertura(cfg_cand) + validar_logica_banda(cfg_cand)
+
+        # La revision contra el texto solo bloquea mientras quedan intentos: es
+        # una heuristica para que el LLM relea la instruccion, no una regla.
+        bloqueo = errores + (revision if intento < intentos else [])
+        if not bloqueo:
+            cfg = cfg_cand
             if intento > 1:
                 log.info(f"Banda: auto-revision exitosa en el intento {intento}/{intentos}.")
             break
 
-        log.warning(f"Banda auto-revision {intento}/{intentos}: {errores}")
+        log.warning(f"Banda auto-revision {intento}/{intentos}: {bloqueo}")
         if intento < intentos:
             msgs_iter = list(messages)
             msgs_iter.append({"role": "assistant",
                               "content": json.dumps(candidato, ensure_ascii=False)})
             msgs_iter.append({"role": "user", "content": (
-                "El JSON anterior es INVALIDO por estos motivos:\n- "
-                + "\n- ".join(errores)
-                + "\nCorrige SOLO esos errores y devuelve el JSON COMPLETO del "
-                  "esquema de la banda, sin texto extra.")})
+                "La intencion anterior tiene estos problemas:\n- "
+                + "\n- ".join(bloqueo)
+                + "\nRelee la instruccion original COMPLETA, corrige la intencion sin perder "
+                  "ninguna accion y devuelve el JSON COMPLETO del esquema, sin texto extra.")})
 
     if cfg is None:
         raise HTTPException(
-            422, "El JSON de la banda no es valido tras varios intentos:\n- "
-            + "\n- ".join(errores))
+            422, "No se pudo generar una configuracion valida para la banda:\n- "
+            + "\n- ".join(errores or revision))
 
-    cfg = normalizar_logica_banda(cfg)
-    warnings = avisos_logica_banda(cfg)
+    warnings = avisos_logica_banda(cfg) + [f"Revisa la interpretacion: {a}" for a in revision]
 
     try:
         guardar_historial(texto, json.dumps(cfg, ensure_ascii=False)[:1500])
@@ -2160,6 +2129,7 @@ def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
         warnings=warnings,
         ejemplo_id="",
         program={"metadata": {"name": nombre_prog, "engine_config": cfg}},
+        analysis={"acciones": banda_intent.resumen_acciones(cfg["intent"])},
     )
 
 
@@ -3040,7 +3010,7 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
     except Exception as e:
         raise HTTPException(500, f"No se pudo cargar plc_banda (¿falta pymodbus?): {e}")
 
-    errores = plc_banda.validar_config(cfg)
+    errores = _errores_banda(cfg)
     if errores:
         raise HTTPException(422, "El programa no es valido para el PLC de la banda:\n- "
                             + "\n- ".join(errores))
@@ -3055,7 +3025,9 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
 
     if req.dry_run:
         return {"status": "dry-run", "enviado": False, "device": "banda",
-                "salidas": 0, "plan": plan_legible, "avisos": avisos}
+                "salidas": 0, "plan": plan_legible, "avisos": avisos,
+                "requiere_start": plc_banda.requiere_start(cfg),
+                "boton_start": plc_banda.boton_start(cfg)}
 
     # El PLC destino lo elige el USUARIO: el backend no adivina cual es la
     # banda (sin autodeteccion) ni decide que IP pertenece a que equipo.
@@ -3096,13 +3068,15 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
     finally:
         plc.close()
 
-    if cfg_ready is False and not plc_banda.sin_marcha(cfg):
+    if cfg_ready is False:
         avisos.append(AVISO_BANDA_SIN_CFG_READY)
 
     log.info(f"/aplicar-plc OK (BANDA) -> {ip}:{port}")
     return {"status": "ok", "enviado": True, "device": "banda", "plc": f"{ip}:{port}",
             "salidas": 0, "plan": plan_legible, "avisos": avisos, "notas": notas,
-            "cfg_ready": cfg_ready, "sin_marcha": plc_banda.sin_marcha(cfg)}
+            "cfg_ready": cfg_ready, "sin_marcha": plc_banda.sin_marcha(cfg),
+            "requiere_start": plc_banda.requiere_start(cfg),
+            "boton_start": plc_banda.boton_start(cfg)}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -3242,9 +3216,13 @@ def banda_config(req: BandaConfigRequest):
         raise HTTPException(400, "Falta el bloque 'band' con la configuracion de la banda.")
 
     cfg = {"device": "banda", "name": "Configuracion de banda", "band": band, "outputs": []}
+    # Si viene del asistente, la intencion del LLM viaja con la configuracion
+    # para comprobar la cobertura otra vez justo antes de escribir.
+    if isinstance(req.logic, dict) and isinstance(req.logic.get("intent"), dict):
+        cfg["intent"] = req.logic["intent"]
 
     # 1) Validacion previa: configuracion parcial NUNCA.
-    errores = plc_banda.validar_config(cfg)
+    errores = _errores_banda(cfg)
     if errores:
         raise HTTPException(422, "La configuracion de la banda no es valida:\n- "
                             + "\n- ".join(errores))
@@ -3259,7 +3237,9 @@ def banda_config(req: BandaConfigRequest):
 
     if req.dry_run:
         return {"status": "dry-run", "enviado": False, "device": "banda",
-                "plan": plan_legible, "avisos": avisos}
+                "plan": plan_legible, "avisos": avisos,
+                "requiere_start": plc_banda.requiere_start(cfg),
+                "boton_start": plc_banda.boton_start(cfg)}
 
     plc, ip, port, notas = _banda_plc(req)
     try:
@@ -3281,12 +3261,15 @@ def banda_config(req: BandaConfigRequest):
     finally:
         plc.close()
 
-    if not estado.get("cfg_ready") and not plc_banda.sin_marcha(cfg):
+    if not estado.get("cfg_ready"):
         avisos.append(AVISO_BANDA_SIN_CFG_READY)
 
     log.info(f"/banda/config OK -> {ip}:{port}")
     return {"status": "ok", "enviado": True, "device": "banda", "plc": f"{ip}:{port}",
-            "plan": plan_legible, "avisos": avisos, "notas": notas, "estado": estado}
+            "plan": plan_legible, "avisos": avisos, "notas": notas, "estado": estado,
+            "cfg_ready": bool(estado.get("cfg_ready")),
+            "requiere_start": plc_banda.requiere_start(cfg),
+            "boton_start": plc_banda.boton_start(cfg)}
 
 
 @app.post("/banda/frecuencia")
@@ -3316,10 +3299,11 @@ def banda_frecuencia(req: BandaFrecuenciaRequest):
         if direccion in (0, "0", None):
             direccion = plc_banda.DIR_1     # el ST exige 1 o 2 para validar
         plc.configurar_banda(frecuencia_hz=hz, direccion=direccion)
-        # 3) Trigger: el ST hace el reset del VFD y recarga la consigna.
+        # 3) Reset + nueva configuracion: el ST reinicia el VFD y recarga la consigna.
+        plc.trigger_vfd_reset()
         plc.trigger_new_config()
-        # 4) Esperar confirmacion real.
-        listo = plc.esperar_config_lista()
+        # 4) Esperar confirmacion real (CfgReady cae y vuelve a 1).
+        listo = plc.esperar_config_lista(esperar_caida=True)
         avisos = plc.verificar_vfd()
         estado = _banda_estado(plc)
     except ValueError as e:
