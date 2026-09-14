@@ -24,7 +24,6 @@ import unicodedata
 
 MALETIN = "maletin"
 BANDA = "banda"
-DISPOSITIVOS = (MALETIN, BANDA)
 
 
 def normalizar(texto: str) -> str:

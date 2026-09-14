@@ -225,10 +225,7 @@ ADDR_PLUMA = {
     2: {"cmd": ADDR_PLUMA2_CMD, "status": ADDR_PLUMA2_STATUS},
 }
 
-ADDR_VFD_CONTROL   = _addr("vfd_control")
-ADDR_VFD_SPEED_RAW = _addr("vfd_speed_raw")
 ADDR_VFD_FREQ_CALC = _addr("vfd_freq_calc")
-ADDR_VFD_RESET     = _addr("vfd_reset")
 
 
 # ---------------------------------------------------------------------------
@@ -246,9 +243,6 @@ ADDR_VFD_RESET     = _addr("vfd_reset")
 DIR_PARO      = 0
 DIR_1         = 1
 DIR_2         = 2
-# Nombres historicos: el ST solo distingue "direccion 1" y "direccion 2".
-DIR_DERECHA   = DIR_1
-DIR_IZQUIERDA = DIR_2
 
 BAND_DIR = {
     "paro": DIR_PARO, "parar": DIR_PARO, "stop": DIR_PARO, "0": DIR_PARO,
@@ -259,10 +253,6 @@ BAND_DIR = {
 }
 
 DIR_NOMBRE = {DIR_PARO: "sin direccion", DIR_1: "direccion 1", DIR_2: "direccion 2"}
-
-VFD_CMD_DIR1 = 18
-VFD_CMD_DIR2 = 34
-VFD_CMD_PARO = 1
 
 # StopMode (%R9) segun §4. I3 SIEMPRE detiene: no se puede deshabilitar.
 STOP_MODE_I3, STOP_MODE_I2, STOP_MODE_SW, STOP_MODE_I2_SW = 0, 1, 2, 3
@@ -357,32 +347,13 @@ SENSOR_PLUMA_CMDS = {
     "bajar": 2, "abajo": 2, "down": 2,
     "stop": 3, "parar": 3, "detener": 3, "forzar_stop": 3,
 }
-SENSOR_PLUMA_NOMBRE = {0: "sin intervenir", 1: "subir", 2: "bajar", 3: "forzar stop"}
 
 # SN_BandMode (%R16/%R17, §11/§13): si el evento de un sensor puede pausar la banda.
 BAND_MODE_PAUSA, BAND_MODE_SOLO_EVENTO = 0, 1
-BAND_MODE_NOMBRE = {BAND_MODE_PAUSA: "puede pausar la banda",
-                    BAND_MODE_SOLO_EVENTO: "solo evento (no afecta la banda)"}
 
 # Botones fisicos que el ST acepta como START (§5: BtnStart := PhIn1). Si una
 # version futura del ST admite otro, se agrega aqui y el resto lo respeta.
 START_BUTTONS = ("I1",)
-
-# Sensores fisicos: S1 = %I4 -> PhIn4 ; S2 = %I5 -> PhIn5. Ambos activos en
-# bajo (el ST los invierte con NOT en §2). Python NO los controla: configura
-# que debe hacer el PLC cuando cada uno se active y lee Mon_S1_Det/Mon_S2_Det.
-SENSORES = {1: "S1", 2: "S2"}
-
-# Botonera fisica del tablero (§2/§4/§5). NO se controla por Modbus: el ST la
-# lee directo y el backend solo OBSERVA su efecto en los monitores R105..R107.
-BOTONES = {
-    "I1": {"addr": "%I1", "tipo": "NA", "funcion": "arranque (solo con movimiento configurado)"},
-    "I2": {"addr": "%I2", "tipo": "NC", "funcion": "paro de banda si StopMode = 1 o 3"},
-    "I3": {"addr": "%I3", "tipo": "NC", "funcion": "paro duro: banda, eventos, torreta y plumas"},
-}
-
-# Bit de cada lampara dentro de una mascara de torreta (0..7)
-TORRETA_BIT = {"verde": 1, "amarilla": 2, "roja": 4}
 
 TORRETA_NOMBRE = {
     0: "apagada", 1: "verde", 2: "amarilla", 3: "verde + amarilla",
@@ -462,7 +433,7 @@ class BandaPLC:
     TODA la comunicacion Modbus de la banda pasa por esta clase: no hay
     llamadas sueltas repartidas por otros archivos. Las primitivas publicas
     son read_band_register / write_band_register y, encima de ellas, las
-    operaciones de alto nivel (write_band_config, trigger_new_config,
+    operaciones de alto nivel (configurar_*, trigger_new_config,
     trigger_vfd_reset, configurar_paros, paro_software, configurar_autostop,
     leer_estado, command_gate).
 
@@ -889,10 +860,6 @@ class BandaPLC:
         print(f"Reset del VFD solicitado (ResetCmd={v})")
         return v
 
-    # Nombres historicos (los usa el plan de carga y quedan como alias).
-    aplicar_nueva_config = trigger_new_config
-    reset_vfd = trigger_vfd_reset
-
     def esperar_config_lista(self, timeout=CFG_READY_TIMEOUT_S,
                              esperar_caida=False) -> bool:
         """Espera a que CfgReady_Reg (%R7) valga 1 tras un trigger.
@@ -943,128 +910,11 @@ class BandaPLC:
         self._w(ADDR_DIR_CMD, DIR_PARO)
         print("BANDA DETENIDA (DirCmd=0 -> configuracion invalida -> VFD_Control=1)")
 
-    def habilitar(self, on=True, direccion=None):
-        """Da (on=True) o quita (on=False) la orden de movimiento.
-
-        AVISO IMPORTANTE del programa maestro ST: BandEnable NO es un registro
-        Modbus. Es un BOOL que solo engancha el boton fisico I1 (§5), y solo
-        si CfgReady AND CfgValid AND NOT GenStop. Ademas, cada NewCfgFlag lo
-        borra (§6): tras cargar una configuracion SIEMPRE hay que volver a
-        pulsar I1. Desde aqui lo unico que se puede hacer es dejar el sentido
-        de giro escrito y comprobar en %R1 si el operador ya habilito la banda."""
-        if not on:
-            self.parar()
-            return
-        d = self._direccion(direccion, permitir_paro=False) if direccion is not None else None
-        if d is not None:
-            self._w(ADDR_DIR_CMD, d)
-        print("BANDA lista para marcha" + (f" (DirCmd={d})" if d is not None else ""))
-        if not self.band_enable():
-            print("AVISO: BandEnable esta en 0 (%R1). El programa maestro solo lo "
-                  "enciende con el boton fisico I1: pulsalo (sin paro I3/I2/software "
-                  "activo) para que la banda arranque con esta configuracion.")
-
-    def band_enable(self) -> bool:
-        """True si BandEnable esta latcheado (%R1 = BandEnable_Reg, §18)."""
-        return self._r(ADDR_BAND_ENABLE_REG) == 1
-
     def config_lista(self) -> bool:
         """True si la secuencia init termino y CfgReady esta activo (%R7)."""
         return self._r(ADDR_CFG_READY_REG) == 1
 
-    # -- ESCRITURA DE CONFIGURACION COMPLETA -------------------------------
-    def write_band_config(self, direccion=None, frecuencia_hz=None,
-                          sensores=None, torreta=None):
-        """Escribe TODA la configuracion de la banda SIN disparar el trigger.
-
-        Orden: R2/R4 -> R20..R29 / R30..R39 -> R40/R41/R50. El trigger (R5) va
-        aparte y SIEMPRE despues, para que el PLC no lea una configuracion a
-        medias.
-
-        sensores : {1: {...}, 2: {...}} con claves accion / timer_preset /
-                   count_preset / torreta_mask / habilitar / pluma1 / pluma2
-        torreta  : {"run": 0..7, "idle": 0..7, "i1": 0..7}
-        """
-        self.configurar_banda(frecuencia_hz=frecuencia_hz, direccion=direccion)
-
-        for n, datos in (sensores or {}).items():
-            n = int(n)
-            if datos is None or datos is False:
-                self.apagar_sensor(n)
-                continue
-            self.configurar_sensor(
-                n,
-                accion=datos.get("accion"),
-                timer_preset=datos.get("timer_preset"),
-                count_preset=datos.get("count_preset"),
-                torreta_mask=datos.get("torreta_mask"),
-                habilitar=datos.get("habilitar", True),
-                pluma1=datos.get("pluma1"),
-                pluma2=datos.get("pluma2"),
-            )
-
-        if torreta:
-            self.configurar_torreta(mask_run=torreta.get("run"),
-                                    mask_idle=torreta.get("idle"),
-                                    mask_i1=torreta.get("i1"))
-
     # -- LECTURA DE ESTADO / FEEDBACK --------------------------------------
-    def read_band_status(self) -> dict:
-        """Feedback general de la banda: R1, R3, R7, R8, R2, R4."""
-        status = self._r(ADDR_BAND_STATUS)
-        return {
-            "band_status": status,
-            "estado": BAND_STATUS.get(status, str(status)),
-            "running": status in (1, 2),
-            "direccion": {1: 1, 2: 2}.get(status),
-            "band_enable": self._r(ADDR_BAND_ENABLE_REG) == 1,
-            "cfg_ready": self._r(ADDR_CFG_READY_REG) == 1,
-            "dir_cmd": self._r(ADDR_DIR_CMD),
-            "freq_request_hz": self._r(ADDR_FREQ_REQUEST),
-            # %R8 ya viene escalado por el ST (§10: VFD_SpeedRaw / 100), asi
-            # que se muestra tal cual: no se vuelve a dividir.
-            "vfd_speed_hz": self._r(ADDR_VFD_SPEED_DISP),
-        }
-
-    def read_sensor_status(self, n=None) -> dict:
-        """Feedback de los sensores: conteo (R25/R35), timer (R26/R36) y
-        CountDone (R27/R37). Sin argumento devuelve los dos."""
-        nums = [n] if n else sorted(ADDR_SENSOR)
-        salida = {}
-        for i in nums:
-            if i not in ADDR_SENSOR:
-                raise ValueError(f"Sensor no valido: {i}.")
-            a = ADDR_SENSOR[i]
-            salida[i] = {
-                "count": self._r(a["count_accum"]),
-                "timer_s": self._r(a["timer_accum"]),
-                "count_done": self._r(a["count_done"]) == 1,
-            }
-        return salida
-
-    def read_tower_status(self) -> dict:
-        """Mascaras de torreta cargadas en el PLC (R40 / R41 / R50)."""
-        run = self._r(ADDR_TORRETA_RUN)
-        idle = self._r(ADDR_TORRETA_IDLE)
-        i1 = self._r(ADDR_TORRETA_I1)
-        return {
-            "run": run, "run_nombre": TORRETA_NOMBRE.get(run, str(run)),
-            "idle": idle, "idle_nombre": TORRETA_NOMBRE.get(idle, str(idle)),
-            "i1": i1, "i1_nombre": TORRETA_NOMBRE.get(i1, str(i1)),
-        }
-
-    def read_gate_status(self) -> dict:
-        """Estado real de las plumas (R62 / R63) y el ultimo comando (R60/R61)."""
-        salida = {}
-        for n, a in ADDR_PLUMA.items():
-            st = self._r(a["status"])
-            salida[n] = {
-                "status": st,
-                "estado": PLUMA_ESTADO.get(st, str(st)),
-                "cmd": self._r(a["cmd"]),
-            }
-        return salida
-
     def leer_estado(self) -> dict:
         """Estado COMPLETO para el frontend (6 lecturas por bloque).
 
@@ -1677,10 +1527,6 @@ def boton_start(cfg) -> str:
     boton = str(band.get("start_button") or "").strip().upper()
     return boton if boton in START_BUTTONS else START_BUTTONS[0]
 
-
-def _usa_sensores(band) -> bool:
-    """True si el bloque 'band' configura S1 o S2 (misma regla que el plan)."""
-    return any(_accion_de_sensor(band, n)[0] is not None for n in (1, 2))
 
 
 def plan_config(cfg) -> list:
