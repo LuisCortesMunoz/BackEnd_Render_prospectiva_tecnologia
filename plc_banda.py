@@ -17,11 +17,11 @@ de Cscape descargo al PLC. Verificadas contra ese archivo:
     R5  NewCfgFlag        R500/R502/R504/R506  registros internos del VFD
     R6  ResetCmd
     R7  CfgReady_Reg
-    R8  VFD_SpeedDisp
+    R8  VFD_SpeedDisp     R50 I1_LampMask (lamparas que siguen a I1, §15b)
 
 REPARTO DE RESPONSABILIDADES (no negociable)
 
-    Python  -> interpreta al usuario, valida, escribe R2/R4/R20..R41/R60..R61,
+    Python  -> interpreta al usuario, valida, escribe R2/R4/R20..R41/R50/R60..R61,
                dispara R5/R6 y LEE R1/R3/R7/R8/R25..R27/R35..R37/R62/R63.
     ST      -> arranque, paro, direccion, frecuencia, reset del VFD, sensores,
                contadores, temporizadores, torreta, plumas, interlocks y todo
@@ -117,6 +117,10 @@ ADDR_SENSOR = {
 # Salidas fisicas Q3/Q4/Q5: las genera el ST (§15). Python solo da mascaras.
 ADDR_TORRETA_RUN   = R(40)
 ADDR_TORRETA_IDLE  = R(41)
+# I1_LampMask (§15b): lamparas que siguen a I1 MIENTRAS este presionado, sin
+# enclavar y con I3 por encima. Requiere el tag fijo %R50 y el bloque §15b del
+# parche Archivos Cscape/ST_parche_lamparas_I1_banda.txt.
+ADDR_TORRETA_I1    = R(50)
 
 # PLUMAS  (§17). Salidas fisicas Q6/Q7/Q8/Q9: las genera el ST, que ademas
 # impide activar los dos sentidos de una misma pluma a la vez. Python solo
@@ -604,8 +608,12 @@ class BandaPLC:
         return seguia
 
     # -- §15  torreta ------------------------------------------------------
-    def configurar_torreta(self, mask_run=None, mask_idle=None):
-        """TorretaRun (%R40) y TorretaIdle (%R41). Bitmask 0..7 (b0=V,b1=A,b2=R).
+    def configurar_torreta(self, mask_run=None, mask_idle=None, mask_i1=None):
+        """TorretaRun (%R40), TorretaIdle (%R41) e I1_LampMask (%R50).
+        Bitmask 0..7 (b0=V,b1=A,b2=R).
+
+        mask_i1: lamparas que el ST (§15b) enciende SOLO mientras I1 esta
+        presionado; se apagan al soltarlo y el paro I3 las apaga.
 
         La torreta la gobierna el ST (Q3/Q4/Q5); aqui solo se declara que se
         enciende con la banda corriendo y que se enciende con la banda
@@ -619,9 +627,14 @@ class BandaPLC:
             self._w(ADDR_TORRETA_IDLE,
                     self._entero(mask_idle, MASK_MIN, MASK_MAX,
                                  "La mascara de torreta detenida"))
+        if mask_i1 is not None:
+            self._w(ADDR_TORRETA_I1,
+                    self._entero(mask_i1, MASK_MIN, MASK_MAX,
+                                 "La mascara de lamparas con I1"))
         print("Torreta configurada"
               + (f" | run={mask_run}" if mask_run is not None else "")
-              + (f" | idle={mask_idle}" if mask_idle is not None else ""))
+              + (f" | idle={mask_idle}" if mask_idle is not None else "")
+              + (f" | i1={mask_i1}" if mask_i1 is not None else ""))
 
     # -- §17  plumas -------------------------------------------------------
     def command_gate(self, n, comando):
@@ -852,6 +865,7 @@ class BandaPLC:
         s1 = self.read_band_block(ADDR_S1_ENABLE, 8)            # R20..R27
         s2 = self.read_band_block(ADDR_S2_ENABLE, 8)            # R30..R37
         tor = self.read_band_block(ADDR_TORRETA_RUN, 2)         # R40..R41
+        tor_i1 = self.read_band_register(ADDR_TORRETA_I1)       # R50
         plu = self.read_band_block(ADDR_PLUMA1_CMD, 4)          # R60..R63
         vfd = self.read_band_block(ADDR_VFD_CONTROL, 7)         # R500..R506
 
@@ -872,6 +886,7 @@ class BandaPLC:
             "torreta": {
                 "run": tor[0], "run_nombre": TORRETA_NOMBRE.get(tor[0], str(tor[0])),
                 "idle": tor[1], "idle_nombre": TORRETA_NOMBRE.get(tor[1], str(tor[1])),
+                "i1": tor_i1, "i1_nombre": TORRETA_NOMBRE.get(tor_i1, str(tor_i1)),
             },
             "pluma1": {"status": plu[2], "estado": PLUMA_ESTADO.get(plu[2], str(plu[2])),
                        "cmd": plu[0]},
@@ -980,6 +995,9 @@ def _fase_visual(estado: dict) -> str:
     tiene que enterarse."""
     if estado.get("i3_paro"):
         return "paro"                  # I3 presionado (lectura de la entrada)
+    if (not estado.get("cfg_ready") and estado.get("dir_cmd") == DIR_PARO
+            and (estado.get("torreta") or {}).get("i1")):
+        return "sin_marcha"            # programa de lamparas con I1 (§15b)
     if estado.get("running"):
         return "corriendo"
     if not estado.get("cfg_ready"):
@@ -991,6 +1009,7 @@ def _fase_visual(estado: dict) -> str:
 
 FASE_TEXTO = {
     "paro": "Paro I3 activo — suelta I3 y pulsa I1",
+    "sin_marcha": "Sin marcha — las lamparas siguen a I1 mientras este presionado",
     "configurando": "Configurando VFD...",
     "lista": "Sistema listo — pulsa I1 para habilitar",
     "habilitada": "Banda habilitada",
@@ -1094,7 +1113,7 @@ def validar_config(cfg) -> list:
         if band.get(campo) is not None:
             _entero_en_rango(band[campo], 0, INT_MAX, f"band.{campo}", errores)
 
-    for campo in ("torreta_s1", "torreta_s2", "torreta_run", "torreta_idle"):
+    for campo in ("torreta_s1", "torreta_s2", "torreta_run", "torreta_idle", "torreta_i1"):
         if band.get(campo) is not None:
             _entero_en_rango(band[campo], MASK_MIN, MASK_MAX, f"band.{campo}", errores)
 
@@ -1184,6 +1203,23 @@ def avisos_config(cfg) -> list:
                 f"poner el conteo en 0 la rearman). Con count_s{n}=0 se "
                 f"ejecutaria en cada deteccion.")
 
+    if band.get("torreta_i1"):
+        i1 = band.get("torreta_i1")
+        avisos.append(
+            f"Lamparas con I1 ({TORRETA_NOMBRE.get(i1, i1)}): se encienden SOLO "
+            f"mientras I1 este presionado, se apagan al soltarlo y el paro I3 las "
+            f"apaga. Requiere el bloque §15b y el tag I1_LampMask (%R50) en el ST "
+            f"(Archivos Cscape/ST_parche_lamparas_I1_banda.txt).")
+    if solo_luces_i1(cfg):
+        avisos.append(
+            "Programa sin marcha: DirCmd queda en 0, asi que pulsar I1 NO arranca "
+            "la banda (CfgReady se queda en 0 a proposito).")
+        if any(band.get(f"s{n}_action") is not None or band.get(f"wait_s{n}_s") is not None
+               or band.get(f"count_s{n}") is not None for n in (1, 2)):
+            avisos.append(
+                "Los sensores solo actuan con la banda habilitada por I1: en un "
+                "programa sin marcha no haran nada.")
+
     if band.get("enable", True) is not False:
         avisos.append(
             "El programa maestro no tiene registro BandEnable: tras cargar la "
@@ -1217,6 +1253,15 @@ def _accion_de_sensor(band, n):
             return None, None, None      # sensor no mencionado: no se toca
 
     return accion, espera, conteo
+
+
+def solo_luces_i1(cfg) -> bool:
+    """True si el programa NO pide mover la banda y usa lamparas con I1 (§15b).
+
+    En ese modo I1 tiene que encender lamparas, no arrancar la banda: se deja
+    DirCmd en 0 para que §5 nunca enclave BandEnable."""
+    band = (cfg or {}).get("band") or {}
+    return band.get("enable") is False and bool(band.get("torreta_i1"))
 
 
 def plan_config(cfg) -> list:
@@ -1267,22 +1312,30 @@ def plan_config(cfg) -> list:
             "habilitar": True,
         }))
 
-    if band.get("torreta_run") is not None or band.get("torreta_idle") is not None:
-        plan.append(("configurar_torreta", (), {
-            "mask_run": band.get("torreta_run"),
-            "mask_idle": band.get("torreta_idle"),
-        }))
+    # Torreta: las tres mascaras SIEMPRE (null -> 0). Son registros que el PLC
+    # conserva entre cargas: sin escribirlos, la mascara de un programa
+    # anterior seguiria encendiendo lamparas que este programa no pidio.
+    plan.append(("configurar_torreta", (), {
+        "mask_run": band.get("torreta_run") or 0,
+        "mask_idle": band.get("torreta_idle") or 0,
+        "mask_i1": band.get("torreta_i1") or 0,
+    }))
 
-    # Sentido de giro: ultimo parametro antes del trigger. El ST exige 1 o 2
-    # para dar la configuracion por valida, asi que un programa sin direccion
-    # explicita se carga en direccion 1.
-    plan.append(("cambiar_direccion", (band.get("direction") or DIR_1,), {}))
+    if not solo_luces_i1(cfg):
+        # Sentido de giro: ultimo parametro antes del trigger. El ST exige 1 o
+        # 2 para dar la configuracion por valida, asi que un programa sin
+        # direccion explicita se carga en direccion 1.
+        plan.append(("cambiar_direccion", (band.get("direction") or DIR_1,), {}))
 
-    # 3) Trigger de nueva configuracion (siempre el ultimo registro escrito)
-    plan.append(("trigger_new_config", (), {}))
+        # 3) Trigger de nueva configuracion (siempre el ultimo registro escrito)
+        plan.append(("trigger_new_config", (), {}))
 
-    # 4) Confirmacion real del PLC
-    plan.append(("esperar_config_lista", (), {}))
+        # 4) Confirmacion real del PLC
+        plan.append(("esperar_config_lista", (), {}))
+    # Programa sin marcha con lamparas que siguen a I1: DirCmd se queda en 0
+    # (paso 1), asi §3 deja CfgValid = FALSE y §5 no enclava BandEnable al
+    # pulsar I1. Sin trigger ni espera: en este modo CfgReady no llega nunca, a
+    # proposito. §15/§15b no dependen de CfgValid.
 
     # 5) Plumas (independientes de la secuencia del VFD)
     for n in (1, 2):

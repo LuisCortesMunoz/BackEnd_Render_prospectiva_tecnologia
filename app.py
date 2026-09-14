@@ -375,21 +375,22 @@ ladder ni codigo). Este PLC es INDEPENDIENTE del maletin de laboratorio: aqui NO
 las lamparas configurables Q10/Q11/Q12 ni el secuenciador de pasos, y tampoco los botones
 I1/I2/I7 del maletin. Si la instruccion pide algo de esos, NO lo inventes: ignora esa parte.
 
-BOTONERA FISICA DE LA BANDA (fija, NO configurable por JSON):
-- I1 (NA) es la UNICA forma de habilitar la banda: el Ladder maestro no tiene registro
-  BandEnable escribible. El JSON deja la configuracion y el sentido de giro cargados;
-  el arranque final lo da el operador con I1.
-- I3 (NC) la detiene con prioridad sobre todo; para rearrancar hay que pulsar I1 otra vez.
+BOTONERA FISICA DE LA BANDA:
+- I1 (NA): suelto = FALSE, presionado = TRUE. Es la UNICA forma de habilitar la banda: el
+  Ladder maestro no tiene registro BandEnable escribible. El JSON deja la configuracion y
+  el sentido de giro cargados; el arranque final lo da el operador con un pulso de I1.
+- I3 (NC): paro con prioridad sobre todo; presionado detiene la banda y apaga TODAS las
+  luces. Para rearrancar hay que pulsar I1 otra vez.
 - I2 (NC) esta reservado: hoy no hace nada.
-Estos botones ya estan cableados en el Ladder maestro y funcionan siempre. Si el usuario
-pide algo sobre ellos (cambiar su funcion, agregar botones), NO lo pongas en el JSON: no
-hay campo para eso. El JSON solo configura VFD, sensores S1/S2 y torreta.
+Lo unico configurable de los botones son las "luces que siguen a I1" (torreta_i1, abajo).
+Cualquier otra peticion sobre ellos (cambiar su funcion, agregar botones) NO va en el JSON.
+El JSON configura VFD, sensores S1/S2, torreta y plumas.
 
 HARDWARE FIJO (no inventes nada fuera de esto):
 - Motor con VFD (variador): mueve la banda hacia la "derecha" o hacia la "izquierda", a una
   frecuencia en Hz. Solo esos dos sentidos.
 - Sensor S1 y sensor S2: detectan una pieza sobre la banda. Son los unicos sensores.
-- Torreta de 3 luces: verde, amarilla, roja. Se declara con mascaras (ver abajo); el PLC
+- Torreta de 3 luces: verde (Q3), amarilla (Q4), roja (Q5). Se declara con mascaras (ver abajo); el PLC
   la enciende solo, nunca la pongas como "salidas".
 
 ACCIONES DE CADA SENSOR (elige una por sensor):
@@ -417,6 +418,10 @@ pluma reciba los dos sentidos a la vez.
 INSTRUCCIONES SIN MOVIMIENTO (muy importante):
 - Si la instruccion NO pide mover la banda (solo luces, sensores, conteo o plumas), pon
   "enable": false y rellena SOLO lo que pide. NUNCA devuelvas todos los campos en null.
+- Luz "con I1", "mientras I1 este presionado", "al presionar I1" -> torreta_i1 con la mascara
+  pedida y "enable": false (salvo que tambien pida mover la banda). La luz se enciende SOLO
+  mientras I1 este presionado, se apaga al soltarlo y el paro I3 la apaga. NO uses
+  torreta_idle ni torreta_run para esto: esas dependen de si la banda corre, no de I1.
 - Luz con la banda detenida / en reposo / parada -> torreta_idle con la mascara pedida.
 - Luz con la banda corriendo / en marcha -> torreta_run.
 - Luz sin decir estado y sin mover la banda -> torreta_idle.
@@ -444,6 +449,7 @@ ESQUEMA EXACTO:
     "torreta_s2": null,
     "torreta_run": null,          // mascara 0..7 con la banda en marcha; null si no se menciona
     "torreta_idle": null,         // mascara 0..7 con la banda detenida; null si no se menciona
+    "torreta_i1": null,           // mascara 0..7 encendida SOLO mientras I1 este presionado; null si no se menciona
     "pluma1": null,               // "subir" | "bajar" | "stop" ; null si no se menciona
     "pluma2": null                // lo mismo para la pluma 2
   },
@@ -502,6 +508,15 @@ JSON: {"name":"S2 cuenta 3 y enciende roja","device":"banda",
    "s1_action":null,"wait_s1_s":null,"count_s1":null,"torreta_s1":null,
    "s2_action":"paro_presencia_torreta","wait_s2_s":null,"count_s2":3,"torreta_s2":4,
    "torreta_run":null,"torreta_idle":null,"pluma1":null,"pluma2":null},
+ "outputs":[]}
+
+EJEMPLO (peticion -> JSON):
+Peticion: "Enciende la lampara verde mientras I1 este presionado."
+JSON: {"name":"Verde con I1","device":"banda",
+ "band":{"enable":false,"direction":"derecha","freq_hz":null,
+   "s1_action":null,"wait_s1_s":null,"count_s1":null,"torreta_s1":null,
+   "s2_action":null,"wait_s2_s":null,"count_s2":null,"torreta_s2":null,
+   "torreta_run":null,"torreta_idle":null,"torreta_i1":1,"pluma1":null,"pluma2":null},
  "outputs":[]}
 
 EJEMPLO (peticion -> JSON):
@@ -743,7 +758,7 @@ def normalizar_logica_banda(cfg: dict) -> dict:
     for campo in ("freq_hz",
                   "s1_action", "wait_s1_s", "count_s1", "torreta_s1",
                   "s2_action", "wait_s2_s", "count_s2", "torreta_s2",
-                  "torreta_run", "torreta_idle",
+                  "torreta_run", "torreta_idle", "torreta_i1",
                   "pluma1", "pluma2"):
         band.setdefault(campo, None)
     # Compatibilidad de PRESENTACION: el editor dibuja los rungs de bloqueo a
@@ -3089,7 +3104,7 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
     finally:
         plc.close()
 
-    if cfg_ready is False:
+    if cfg_ready is False and not plc_banda.solo_luces_i1(cfg):
         avisos.append("El PLC todavia no reporta CfgReady (%R7 = 1). Si no cambia "
                       "en unos segundos, revisa que el paro I3 este suelto: con el "
                       "paro activo el ST no completa la secuencia del VFD.")
@@ -3271,7 +3286,7 @@ def banda_config(req: BandaConfigRequest):
     finally:
         plc.close()
 
-    if not estado.get("cfg_ready"):
+    if not estado.get("cfg_ready") and not plc_banda.solo_luces_i1(cfg):
         avisos.append("El PLC todavia no reporta CfgReady (%R7 = 1). Si no cambia "
                       "en unos segundos, revisa que el paro I3 este suelto: con el "
                       "paro activo el ST no completa la secuencia del VFD.")
