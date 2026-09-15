@@ -27,14 +27,17 @@ Forma de la intencion (la pide SYSTEM_PROMPT_BANDA en app.py):
                      "paro_automatico": {"segundos": int,
                                          "cuenta": "movimiento"|"total"} | null},
       "paros": {"i2": bool, "software": bool},
-      "eventos": [{"sensor": 1|2, "conteo": int|null, "cada_deteccion": bool,
+      "eventos": [{"sensor": 1|2, "conteo": int|null,
                    "banda": "no_afecta"|"pausa_mientras_detecta"|"pausa_temporizada",
                    "duracion_s": int|null, "luces": ["verde"|"amarilla"|"roja"],
                    "pluma1": "subir"|"bajar"|"stop"|null, "pluma2": ...,
-                   "al_contar": null | {"detener_banda": bool, "detener_proceso": bool,
+                   "al_contar": null | {"pausar_banda": bool, "detener_proceso": bool,
                                         "luces": [...], "direccion": "derecha"|"izquierda"|"invertir"|null,
-                                        "pluma1": ..., "pluma2": ...}}],
+                                        "pluma1": ..., "pluma2": ..., "duracion_s": int|null}}],
+      # ST v5: luces/plumas/banda del evento ocurren en CADA deteccion; "al_contar" es
+      # una segunda capa al llegar a "conteo" (duracion_s null = enclavadas).
       "luces": {"corriendo": [...], "detenida": [...], "mientras_i1": [...]},
+      "luz_temporizada": null | {"luces": [...], "segundos": int},
       "plumas_manual": {"pluma1": "subir"|"bajar"|"stop"|null, "pluma2": ...},
       "no_soportado": ["..."]
     }
@@ -57,10 +60,13 @@ CAMPOS_BAND = (
     # Acciones enclavadas al alcanzar el conteo (§14c, %R70..%R79).
     "s1_count_action_mask", "s1_count_lamp_mask", "s1_count_dir", "s1_count_pluma1", "s1_count_pluma2",
     "s2_count_action_mask", "s2_count_lamp_mask", "s2_count_dir", "s2_count_pluma1", "s2_count_pluma2",
+    # Duracion de las acciones del contador (%R88/%R89, %R92/%R93) y lampara
+    # temporizada independiente (%R96/%R97).
+    "s1_count_hold_s", "s2_count_hold_s", "timed_lamp_mask", "timed_lamp_s",
 )
 
 # Bits de S_CountActionMask (%R70/%R75): se suman para combinar acciones.
-CONTAR_BITS = {"detener_banda": 1, "detener_proceso": 2, "luces": 4, "direccion": 8,
+CONTAR_BITS = {"pausar_banda": 1, "detener_proceso": 2, "luces": 4, "direccion": 8,
                "pluma1": 16, "pluma2": 32}
 CONTAR_DIR = {"derecha": 1, "izquierda": 2, "invertir": 3}
 CONTAR_DIR_TXT = {v: k for k, v in CONTAR_DIR.items()}
@@ -219,6 +225,9 @@ def validar_intencion(intent) -> list:
                 p = ac.get(f"pluma{m}")
                 if p is not None and _norm(p) not in PLUMA_EVENTO:
                     errores.append(f"{tag}.al_contar.pluma{m}='{p}' debe ser 'subir', 'bajar', 'stop' o null.")
+            d = ac.get("duracion_s")
+            if d is not None and not (_entero(d) or 0) > 0:
+                errores.append(f"{tag}.al_contar.duracion_s='{d}' debe ser mayor que 0 o null.")
 
     luces = intent.get("luces") or {}
     if not isinstance(luces, dict):
@@ -230,6 +239,12 @@ def validar_intencion(intent) -> list:
             for c in (lista or []):
                 if _ALIAS_COLOR.get(_norm(c)) is None:
                     errores.append(f"luces.{estado}: '{c}' no es un color de la torreta.")
+    lt = intent.get("luz_temporizada")
+    if lt is not None:
+        if not isinstance(lt, dict) or not _colores(lt.get("luces")):
+            errores.append("luz_temporizada necesita al menos una luz (verde, amarilla o roja).")
+        elif not (_entero(lt.get("segundos")) or 0) > 0:
+            errores.append("luz_temporizada.segundos debe ser mayor que 0.")
     pm = intent.get("plumas_manual") or {}
     if not isinstance(pm, dict):
         errores.append("'plumas_manual' debe ser un objeto.")
@@ -317,11 +332,13 @@ def normalizar_intencion(intent) -> tuple:
             mascara |= _mascara(ev.get("luces"))
             # Acciones enclavadas al alcanzar el conteo (§14c).
             ac = ev.get("al_contar") if isinstance(ev.get("al_contar"), dict) else {}
-            if ac.get("detener_banda"):
-                contar_bits |= CONTAR_BITS["detener_banda"]
+            if ac.get("pausar_banda") or ac.get("detener_banda"):
+                contar_bits |= CONTAR_BITS["pausar_banda"]
             if ac.get("detener_proceso"):
                 contar_bits |= CONTAR_BITS["detener_proceso"]
             contar_luces |= _mascara(ac.get("luces"))
+            fijar("contar_hold", _entero(ac.get("duracion_s")) or None,
+                  "la duracion de las acciones al contar")
             d = _norm(ac.get("direccion"))
             fijar("contar_dir", CONTAR_DIR.get(d) if d else None, "la direccion al contar")
             for m in (1, 2):
@@ -366,10 +383,17 @@ def normalizar_intencion(intent) -> tuple:
         band[f"s{n}_count_dir"] = campos.get("contar_dir")
         band[f"s{n}_count_pluma1"] = campos.get("contar_pluma1")
         band[f"s{n}_count_pluma2"] = campos.get("contar_pluma2")
+        if campos.get("contar_hold") and not contar_bits:
+            errores.append(f"S{n}: se dio una duracion al contar pero ninguna accion al llegar al conteo.")
+        band[f"s{n}_count_hold_s"] = campos.get("contar_hold") if contar_bits else None
 
     luces = intent.get("luces") or {}
     for estado, campo in LUCES_ESTADO.items():
         band[campo] = _mascara(luces.get(estado)) or None
+
+    lt = intent.get("luz_temporizada") if isinstance(intent.get("luz_temporizada"), dict) else {}
+    band["timed_lamp_mask"] = _mascara(lt.get("luces")) or None
+    band["timed_lamp_s"] = _entero(lt.get("segundos")) if band["timed_lamp_mask"] else None
 
     pm = intent.get("plumas_manual") or {}
     for m in (1, 2):
@@ -419,9 +443,10 @@ def acciones_de_intencion(intent) -> set:
             if p:
                 A.add((s, f"pluma{m}", p))
         ac = ev.get("al_contar") if isinstance(ev.get("al_contar"), dict) else {}
-        for clave in ("detener_banda", "detener_proceso"):
-            if ac.get(clave):
-                A.add((s, "al_contar", clave))
+        if ac.get("pausar_banda") or ac.get("detener_banda"):
+            A.add((s, "al_contar", "pausar_banda"))
+        if ac.get("detener_proceso"):
+            A.add((s, "al_contar", "detener_proceso"))
         for c in _colores(ac.get("luces")):
             A.add((s, "al_contar_luz", c))
         if _norm(ac.get("direccion")):
@@ -430,10 +455,17 @@ def acciones_de_intencion(intent) -> set:
             p = _norm(ac.get(f"pluma{m}"))
             if p:
                 A.add((s, f"al_contar_pluma{m}", p))
+        if _entero(ac.get("duracion_s")) and any(
+                ac.get(k) for k in ("pausar_banda", "detener_banda", "detener_proceso", "luces",
+                                    "direccion", "pluma1", "pluma2")):
+            A.add((s, "al_contar_duracion", _entero(ac.get("duracion_s"))))
     luces = intent.get("luces") or {}
     for estado in LUCES_ESTADO:
         for c in _colores(luces.get(estado)):
             A.add((f"luces_{estado}", "luz", c))
+    lt = intent.get("luz_temporizada") if isinstance(intent.get("luz_temporizada"), dict) else {}
+    for c in _colores(lt.get("luces")):
+        A.add(("luz_temporizada", c, _entero(lt.get("segundos"))))
     pm = intent.get("plumas_manual") or {}
     for m in (1, 2):
         p = _norm(pm.get(f"pluma{m}"))
@@ -484,7 +516,7 @@ def acciones_de_band(band) -> set:
         # Acciones del contador: solo cuentan las que tienen su bit en la mascara,
         # porque el PLC ignora el resto.
         bits = _entero(b.get(f"s{n}_count_action_mask")) or 0
-        for clave in ("detener_banda", "detener_proceso"):
+        for clave in ("pausar_banda", "detener_proceso"):
             if bits & CONTAR_BITS[clave]:
                 A.add((s, "al_contar", clave))
         if bits & CONTAR_BITS["luces"]:
@@ -497,9 +529,13 @@ def acciones_de_band(band) -> set:
             p = _entero(b.get(f"s{n}_count_pluma{m}"))
             if bits & CONTAR_BITS[f"pluma{m}"] and p:
                 A.add((s, f"al_contar_pluma{m}", PLUMA_EVENTO_TXT.get(p, p)))
+        if bits and _entero(b.get(f"s{n}_count_hold_s")):
+            A.add((s, "al_contar_duracion", _entero(b.get(f"s{n}_count_hold_s"))))
     for estado, campo in LUCES_ESTADO.items():
         for c in _colores_de_mascara(b.get(campo)):
             A.add((f"luces_{estado}", "luz", c))
+    for c in _colores_de_mascara(b.get("timed_lamp_mask")):
+        A.add(("luz_temporizada", c, _entero(b.get("timed_lamp_s"))))
     for m in (1, 2):
         p = _entero(b.get(f"pluma{m}"))
         if p is not None:
@@ -510,6 +546,8 @@ def acciones_de_band(band) -> set:
 def texto_accion(a) -> str:
     """Accion atomica -> frase legible (errores, resumenes y chat)."""
     quien, que = a[0], a[1]
+    if quien == "luz_temporizada":
+        return f"luz {que} durante {a[2]} s"
     if quien == "banda":
         if que == "direccion":
             return f"banda avanza a la {a[2]}"
@@ -533,10 +571,12 @@ def texto_accion(a) -> str:
     if que == "conteo":
         return f"{quien}: actua al contar {a[2]}"
     if que == "al_contar":
-        return f"{quien} al llegar al conteo: " + ("detiene la banda" if a[2] == "detener_banda"
+        return f"{quien} al llegar al conteo: " + ("pausa la banda" if a[2] == "pausar_banda"
                                                     else "detiene el proceso")
     if que == "al_contar_luz":
-        return f"{quien} al llegar al conteo: enciende {a[2]} (enclavada)"
+        return f"{quien} al llegar al conteo: enciende {a[2]}"
+    if que == "al_contar_duracion":
+        return f"{quien} al llegar al conteo: las acciones duran {a[2]} s"
     if que == "al_contar_direccion":
         return f"{quien} al llegar al conteo: direccion {a[2]}"
     if que.startswith("al_contar_pluma"):
@@ -561,101 +601,18 @@ def verificar_cobertura(intent, band) -> dict:
 
 def errores_cobertura(cfg) -> list:
     """Comprobacion final antes de escribir: si el programa trae la intencion
-    del LLM, la configuracion debe contener EXACTAMENTE sus acciones y no puede
-    pedir a un sensor algo que el ST no hace (cada deteccion + conteo)."""
+    del LLM, la configuracion debe contener EXACTAMENTE sus acciones."""
     intent = (cfg or {}).get("intent")
     if not isinstance(intent, dict):
         return []
     cob = verificar_cobertura(intent, (cfg or {}).get("band"))
-    errores = [c["mensaje"] for c in _conflictos_momento(intent)]
+    errores = []
     if cob["faltantes"]:
         errores.append("La configuracion perdio acciones pedidas: " + "; ".join(cob["faltantes"]) + ".")
     if cob["sobrantes"]:
         errores.append("La configuracion agrego acciones que no se pidieron: "
                        + "; ".join(cob["sobrantes"]) + ".")
     return errores
-
-
-# ---------------------------------------------------------------------------
-# CADA DETECCION vs CONTEO EN EL MISMO SENSOR
-# ---------------------------------------------------------------------------
-# En el ST (§11/§13) el evento de un sensor se dispara en CADA deteccion solo
-# si CountPreset = 0. Con CountPreset = N se dispara UNA vez, al llegar a N, y
-# las acciones del contador (§14c) exigen CountPreset > 0. Por eso un mismo
-# sensor no puede mover plumas / encender luces / pausar en cada deteccion y,
-# ademas, contar hasta N. Normalizarlo en silencio cambiaria el significado
-# (la pluma subiria una sola vez), asi que se detecta y se pregunta.
-_RE_CADA_DETECCION = re.compile(
-    r"\bcada\s+(?:vez\s+)?que\b[^.;]{0,40}?\bdetect|\b(?:en\s+)?cada\s+deteccion"
-    r"|\bsiempre\s+que\b[^.;]{0,40}?\bdetect|\bcada\s+(?:pieza|objeto|caja)\b")
-
-
-def _acciones_evento(ev) -> list:
-    """Acciones de un evento que ocurren cuando el evento se dispara."""
-    acciones = [f"luz {c}" for c in _colores(ev.get("luces"))]
-    for m in (1, 2):
-        p = _norm(ev.get(f"pluma{m}"))
-        if p:
-            acciones.append(f"{p} la pluma {m}")
-    if _norm(ev.get("banda") or "no_afecta") != "no_afecta":
-        acciones.append("pausar la banda")
-    return acciones
-
-
-def _conflictos_momento(intent, texto=None) -> list:
-    """Sensores que piden acciones en cada deteccion y ademas un conteo.
-
-    Explicito: un evento marcado cada_deteccion con acciones + conteo > 0 en ese
-    sensor. Por el texto: la frase dice "cada que detecte" y un evento con
-    conteo trae acciones propias (el LLM pudo no marcar cada_deteccion)."""
-    texto_cada = bool(texto) and bool(_RE_CADA_DETECCION.search(
-        "".join(c for c in unicodedata.normalize("NFD", str(texto).lower())
-                if unicodedata.category(c) != "Mn")))
-    por_sensor = {}
-    for ev in intent.get("eventos") or []:
-        n = _entero(ev.get("sensor")) if isinstance(ev, dict) else None
-        if n in (1, 2):
-            por_sensor.setdefault(n, []).append(ev)
-    conflictos = []
-    for n, evs in sorted(por_sensor.items()):
-        conteo = max((_entero(ev.get("conteo")) or 0) for ev in evs)
-        if conteo <= 0:
-            continue
-        cada = [a for ev in evs if ev.get("cada_deteccion") for a in _acciones_evento(ev)]
-        if not cada and texto_cada:
-            cada = [a for ev in evs if (_entero(ev.get("conteo")) or 0) > 0 for a in _acciones_evento(ev)]
-        if not cada:
-            continue
-        otro = 2 if n == 1 else 1
-        conflictos.append({
-            "sensor": n, "conteo": conteo, "acciones": cada,
-            "mensaje": (f"S{n} no puede {', '.join(cada)} en CADA deteccion y ademas contar hasta "
-                        f"{conteo}: en el PLC, con un conteo el evento del sensor solo ocurre una "
-                        f"vez, al llegar a {conteo}. Usa S{otro} para las acciones de cada deteccion "
-                        f"y S{n} para contar, o quita una de las dos."),
-            "otro": otro,
-        })
-    return conflictos
-
-
-def conflicto_deteccion_conteo(texto, intent):
-    """Pregunta de aclaracion si la instruccion choca con el ST; None si no."""
-    conflictos = _conflictos_momento(intent, texto)
-    if not conflictos:
-        return None
-    c = conflictos[0]
-    n, conteo, otro = c["sensor"], c["conteo"], c["otro"]
-    return {
-        "slot": "momento_sensor",
-        "pregunta": (f"Con el PLC actual, S{n} no puede {', '.join(c['acciones'])} en cada detección "
-                     f"y también contar hasta {conteo}: con un conteo, su evento solo ocurre una vez "
-                     f"al llegar a {conteo}. ¿Cómo lo quieres?"),
-        "opciones": [
-            f"Usa S{otro} para lo de cada detección y S{n} para contar hasta {conteo}",
-            f"Solo en cada detección con S{n}, sin contar",
-            f"Solo una vez al llegar a {conteo} con S{n}",
-        ],
-    }
 
 
 def resumen_acciones(intent) -> list:
@@ -710,6 +667,8 @@ def revisar_contra_texto(texto, intent) -> list:
             mascara |= _mascara(ev.get("luces"))
         for ac in contar:
             mascara |= _mascara(ac.get("luces"))
+        if isinstance(intent.get("luz_temporizada"), dict):
+            mascara |= _mascara(intent["luz_temporizada"].get("luces"))
         for lista in (intent.get("luces") or {}).values():
             mascara |= _mascara(lista)
         for patron, color in ((r"\bverde", "verde"), (r"\bamarill|\bambar", "amarilla"), (r"\broj[ao]", "roja")):
@@ -731,6 +690,9 @@ def revisar_contra_texto(texto, intent) -> list:
     sin_hz = re.sub(r"\d+\s*(?:hz|hertz)\b", " ", t)
 
     tiempos = {_entero(ev.get("duracion_s")) for ev in eventos}
+    tiempos |= {_entero(ac.get("duracion_s")) for ac in contar}
+    if isinstance(intent.get("luz_temporizada"), dict):
+        tiempos.add(_entero(intent["luz_temporizada"].get("segundos")))
     if isinstance(mov.get("paro_automatico"), dict):
         tiempos.add(_entero(mov["paro_automatico"].get("segundos")))
     pedidos = [int(s) for s in re.findall(r"(\d+)\s*(?:segundos?|segs?|s)\b", sin_hz)]

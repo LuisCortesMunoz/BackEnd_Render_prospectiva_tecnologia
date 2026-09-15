@@ -160,6 +160,20 @@ BAND_REGISTERS = {
     "count_dir_target":     (85, FB,  "CountDirTarget_Reg"),
     "count_pluma1_override": (86, FB, "CountPluma1Override_Reg"),
     "count_pluma2_override": (87, FB, "CountPluma2Override_Reg"),
+    # -- duracion de las acciones del contador (§3/§14c, ST v5)
+    "s1_count_hold_mode":   (88, CFG, "S1_CountHoldMode"),     # 0 enclavadas · 1 duran HoldPreset s
+    "s1_count_hold_preset": (89, CFG, "S1_CountHoldPreset"),   # segundos
+    "s1_count_hold_accum":  (90, FB,  "S1_CountHoldAccum"),
+    "s1_count_action_active": (91, FB, "S1_CountActionActive_Reg"),
+    "s2_count_hold_mode":   (92, CFG, "S2_CountHoldMode"),
+    "s2_count_hold_preset": (93, CFG, "S2_CountHoldPreset"),
+    "s2_count_hold_accum":  (94, FB,  "S2_CountHoldAccum"),
+    "s2_count_action_active": (95, FB, "S2_CountActionActive_Reg"),
+    # -- lampara temporizada independiente (§15, ST v5)
+    "timed_lamp_mask":      (96, CFG, "TimedLampMask"),        # 0..7
+    "timed_lamp_preset":    (97, CFG, "TimedLampPreset"),      # segundos
+    "timed_lamp_trigger":   (98, TRIG, "TimedLampTrigger"),    # cambio de valor 1, 2, 3...
+    "timed_lamp_active":    (99, FB,  "TimedLampActive_Reg"),
     # -- monitoreo §19 (1 = activo)
     "mon_i1_raw":        (100, MON,  "Mon_I1_Raw"),
     "mon_i2_raw":        (101, MON,  "Mon_I2_Raw"),
@@ -207,7 +221,7 @@ ADDR_ESCRIBIBLES = frozenset(R(n) for n, acc, _ in BAND_REGISTERS.values() if ac
 ADDR_SOLO_LECTURA = frozenset(R(n) for n, acc, _ in BAND_REGISTERS.values() if acc not in (CFG, TRIG))
 
 # Bloques contiguos que lee leer_estado(): 5 peticiones Modbus en total.
-LECTURA_BLOQUES = ((1, 41), (50, 1), (60, 28), (100, 28), (500, 7))
+LECTURA_BLOQUES = ((1, 41), (50, 1), (60, 40), (100, 28), (500, 7))
 
 # Nombres historicos (los usan los metodos y app.py).
 ADDR_BAND_ENABLE_REG = _addr("band_enable")
@@ -229,13 +243,17 @@ ADDR_SENSOR = {
         "enable", "action", "timer_preset", "count_preset", "torreta_mask",
         "count_accum", "timer_accum", "count_done", "pluma1", "pluma2",
         "band_mode", "event_active", "count_action_mask", "count_lamp_mask",
-        "count_dir_target", "count_pluma1", "count_pluma2")}
+        "count_dir_target", "count_pluma1", "count_pluma2", "count_hold_mode",
+        "count_hold_preset", "count_hold_accum", "count_action_active")}
     for n in (1, 2)
 }
 
 ADDR_TORRETA_RUN   = _addr("torreta_run")
 ADDR_TORRETA_IDLE  = _addr("torreta_idle")
 ADDR_TORRETA_I1    = _addr("torreta_i1")
+ADDR_TIMED_LAMP_MASK    = _addr("timed_lamp_mask")
+ADDR_TIMED_LAMP_PRESET  = _addr("timed_lamp_preset")
+ADDR_TIMED_LAMP_TRIGGER = _addr("timed_lamp_trigger")
 
 ADDR_PLUMA1_CMD    = _addr("pluma1_cmd")
 ADDR_PLUMA2_CMD    = _addr("pluma2_cmd")
@@ -311,8 +329,8 @@ STOP_REASON_TEXTO = {
     4: "Paro automatico completado",
     5: "Detenida por Sensor 1",
     6: "Detenida por Sensor 2",
-    7: "Detenida por el contador de S1",
-    8: "Detenida por el contador de S2",
+    7: "Pausada o detenida por el contador de S1",
+    8: "Pausada o detenida por el contador de S2",
 }
 
 # S1_Action / S2_Action (%R21 / %R31), tal como los interpretan §11..§14.
@@ -380,7 +398,10 @@ BAND_MODE_PAUSA, BAND_MODE_SOLO_EVENTO = 0, 1
 START_BUTTONS = ("I1",)
 
 # S_CountActionMask (%R70/%R75, §14c): acciones al alcanzar CountPreset. Se
-# SUMAN y quedan ENCLAVADAS hasta NewCfgFlag o ResetCmd.
+# SUMAN. En el ST v5 son una SEGUNDA capa: el evento del sensor sigue ocurriendo
+# en cada deteccion. Pausa, luces y plumas quedan enclavadas (CountHoldMode 0) o
+# duran CountHoldPreset segundos (1); detener el proceso siempre queda enclavado
+# y el cambio de direccion es permanente.
 COUNT_BANDA, COUNT_PROCESO, COUNT_LUCES, COUNT_DIRECCION, COUNT_PLUMA1, COUNT_PLUMA2 = 1, 2, 4, 8, 16, 32
 COUNT_ACTION_MAX = 63
 # S_CountDirTarget (%R72/%R77): 0 sin cambio · 1 dir 1 · 2 dir 2 · 3 invertir.
@@ -726,7 +747,8 @@ class BandaPLC:
                           count_preset=None, torreta_mask=None, habilitar=True,
                           pluma1=None, pluma2=None, band_mode=None,
                           count_action_mask=None, count_lamp_mask=None,
-                          count_dir_target=None, count_pluma1=None, count_pluma2=None):
+                          count_dir_target=None, count_pluma1=None, count_pluma2=None,
+                          count_hold_mode=None, count_hold_preset=None):
         """Configura el bloque completo de S1 (%R16, %R20..%R29) o S2 (%R17, %R30..%R39).
 
         accion       : 0..4 o su nombre ('nada', 'paro_presencia',
@@ -784,7 +806,9 @@ class BandaPLC:
                 ("count_lamp_mask", count_lamp_mask, MASK_MIN, MASK_MAX),
                 ("count_dir_target", count_dir_target, 0, 3),
                 ("count_pluma1", count_pluma1, 0, 3),
-                ("count_pluma2", count_pluma2, 0, 3)):
+                ("count_pluma2", count_pluma2, 0, 3),
+                ("count_hold_mode", count_hold_mode, 0, 1),
+                ("count_hold_preset", count_hold_preset, 0, INT_MAX)):
             if valor is not None:
                 self._w(a[campo], self._entero(valor, low, high, f"S{n} {campo}"))
 
@@ -814,7 +838,7 @@ class BandaPLC:
         self._w(a["pluma2"], SENSOR_PLUMA_NADA)
         self._w(a["band_mode"], BAND_MODE_PAUSA)
         for campo in ("count_action_mask", "count_lamp_mask", "count_dir_target",
-                      "count_pluma1", "count_pluma2"):
+                      "count_pluma1", "count_pluma2", "count_hold_mode", "count_hold_preset"):
             self._w(a[campo], 0)
         print(f"S{n}: deshabilitado")
 
@@ -846,7 +870,8 @@ class BandaPLC:
 
         La torreta la gobierna el ST (Q3/Q4/Q5); aqui solo se declara que se
         enciende con la banda corriendo y que se enciende con la banda
-        detenida. Prioridad del ST: S2 -> S1 -> RUN -> IDLE."""
+        detenida. En el ST v5 todas las fuentes de luz se SUMAN (RUN/IDLE, eventos,
+        I1, contador y lampara temporizada); I3 las apaga todas."""
         if mask_run is not None:
             self._w(ADDR_TORRETA_RUN,
                     self._entero(mask_run, MASK_MIN, MASK_MAX,
@@ -863,6 +888,27 @@ class BandaPLC:
               + (f" | run={mask_run}" if mask_run is not None else "")
               + (f" | idle={mask_idle}" if mask_idle is not None else "")
               + (f" | i1={mask_i1}" if mask_i1 is not None else ""))
+
+    # -- §15  lampara temporizada ------------------------------------------
+    def configurar_lampara_temporizada(self, mask=0, segundos=0):
+        """TimedLampMask (%R96) y TimedLampPreset (%R97). No la enciende: eso lo
+        hace disparar_lampara_temporizada()."""
+        m = self._entero(mask or 0, MASK_MIN, MASK_MAX, "La mascara de la lampara temporizada")
+        s = self._entero(segundos or 0, 0, INT_MAX, "Los segundos de la lampara temporizada")
+        if m and s <= 0:
+            raise ValueError("La lampara temporizada necesita un tiempo mayor que 0 segundos.")
+        self._w(ADDR_TIMED_LAMP_MASK, m)
+        self._w(ADDR_TIMED_LAMP_PRESET, s)
+        print(f"Lampara temporizada: mascara={m} | {s}s")
+        return m, s
+
+    def disparar_lampara_temporizada(self):
+        """Cambia TimedLampTrigger (%R98): el ST enciende TimedLampMask durante
+        TimedLampPreset segundos. Se detecta por CAMBIO DE VALOR (1, 2, 3...) y
+        exige CfgValid; I3 la apaga antes de tiempo."""
+        v = self._pulso_valor_nuevo(ADDR_TIMED_LAMP_TRIGGER)
+        print(f"Lampara temporizada encendida (TimedLampTrigger={v})")
+        return v
 
     # -- §17  plumas -------------------------------------------------------
     def command_gate(self, n, comando):
@@ -1113,6 +1159,10 @@ def estado_desde_registros(reg: dict) -> dict:
             "count_dir_target": g(f"s{n}_count_dir_target"),
             "count_pluma1": g(f"s{n}_count_pluma1"),
             "count_pluma2": g(f"s{n}_count_pluma2"),
+            "count_hold_mode": g(f"s{n}_count_hold_mode"),
+            "count_hold_preset": g(f"s{n}_count_hold_preset"),
+            "count_hold_accum": g(f"s{n}_count_hold_accum"),
+            "count_action_active": si(f"s{n}_count_action_active"),
         }
     # Acciones del contador enclavadas (§14c): se liberan con NewCfgFlag o ResetCmd.
     origen = g("count_action_source")
@@ -1131,6 +1181,12 @@ def estado_desde_registros(reg: dict) -> dict:
     contador["activo"] = bool(origen or contador["banda_detenida"]
                               or contador["proceso_detenido"] or contador["luces"])
     estado["contador"] = contador
+    estado["lampara_temporizada"] = {
+        "mask": g("timed_lamp_mask"),
+        "nombre": TORRETA_NOMBRE.get(g("timed_lamp_mask"), ""),
+        "segundos": g("timed_lamp_preset"),
+        "activa": si("timed_lamp_active"),
+    }
     # Por que el PLC rechaza la configuracion (vacio si CfgValid = 1).
     estado["motivos_cfg_invalida"] = [] if estado["cfg_valid"] else motivos_config_invalida(reg)
     # Tabla de diagnostico: todos los registros leidos, con su acceso.
@@ -1213,12 +1269,27 @@ def motivos_config_invalida(reg: dict) -> list:
         for p in ("count_dir_target", "count_pluma1", "count_pluma2"):
             if not 0 <= g(s + p) <= 3:
                 m.append(f"{r(s + p)} = {g(s + p)}: debe estar entre 0 y 3.")
+        hold = g(s + "count_hold_mode")
+        if not 0 <= hold <= 1:
+            m.append(f"{r(s + 'count_hold_mode')} = {hold}: debe ser 0 o 1.")
+        if g(s + "count_hold_preset") < 0:
+            m.append(f"{r(s + 'count_hold_preset')} = {g(s + 'count_hold_preset')}: no puede ser negativo.")
+        temporales = COUNT_BANDA | COUNT_LUCES | COUNT_PLUMA1 | COUNT_PLUMA2
+        if hold == 1 and 0 <= mascara <= COUNT_ACTION_MAX and mascara & temporales \
+                and g(s + "count_hold_preset") <= 0:
+            m.append(f"{r(s + 'count_hold_mode')} = 1 necesita {r(s + 'count_hold_preset')} mayor que 0.")
     for clave in ("torreta_run", "torreta_idle", "torreta_i1"):
         if not MASK_MIN <= g(clave) <= MASK_MAX:
             m.append(f"{r(clave)} = {g(clave)}: debe estar entre 0 y 7.")
     for clave in ("pluma1_cmd", "pluma2_cmd"):
         if not PLUMA_CMD_MIN <= g(clave) <= PLUMA_CMD_MAX:
             m.append(f"{r(clave)} = {g(clave)}: debe estar entre 0 y 2.")
+    if not MASK_MIN <= g("timed_lamp_mask") <= MASK_MAX:
+        m.append(f"{r('timed_lamp_mask')} = {g('timed_lamp_mask')}: debe estar entre 0 y 7.")
+    if g("timed_lamp_preset") < 0:
+        m.append(f"{r('timed_lamp_preset')} = {g('timed_lamp_preset')}: no puede ser negativo.")
+    if g("timed_lamp_mask") and g("timed_lamp_preset") <= 0:
+        m.append(f"{r('timed_lamp_mask')} = {g('timed_lamp_mask')} necesita {r('timed_lamp_preset')} mayor que 0.")
     return m
 
 
@@ -1234,8 +1305,6 @@ def _fase_visual(estado: dict) -> str:
     contador = estado.get("contador") or {}
     if contador.get("proceso_detenido"):
         return "paro_contador_proceso"     # enclavado hasta nueva config o Reset
-    if contador.get("banda_detenida"):
-        return "paro_contador_banda"
     if estado.get("aux_stop"):
         return "paro_i2"
     if estado.get("soft_stop"):
@@ -1243,6 +1312,8 @@ def _fase_visual(estado: dict) -> str:
     if estado.get("running"):
         return "corriendo"
     if estado.get("band_enable"):
+        if contador.get("banda_detenida"):
+            return "pausa_contador"        # ST v5: pausa, BandEnable sigue activo
         return "pausa_sensor" if estado.get("stop_reason") in (5, 6) else "habilitada"
     if estado.get("auto_stop_done"):
         return "auto_completado"
@@ -1260,7 +1331,7 @@ FASE_TEXTO = {
     "paro_i2": "Paro I2 activo — suelta I2 y pulsa I1",
     "paro_software": "Paro software activo — liberalo y pulsa I1",
     "paro_contador_proceso": "Proceso detenido por el contador — envia la configuracion o haz Reset",
-    "paro_contador_banda": "Banda detenida por el contador — envia la configuracion o haz Reset",
+    "pausa_contador": "Pausada por el contador — continua al terminar el tiempo o con Reset",
     "esperando_config": "Esperando configuracion",
     "sin_marcha": "Lista sin movimiento — sensores, torreta y plumas activos",
     "configurando": "Configurando VFD...",
@@ -1360,6 +1431,9 @@ def _codigos_contador(band, n) -> dict:
         "count_dir_target": _codigo(band.get(f"s{n}_count_dir"), COUNT_DIRS, 0, 3) or 0,
         "count_pluma1": _codigo(band.get(f"s{n}_count_pluma1"), SENSOR_PLUMA_CMDS, 0, 3) or 0,
         "count_pluma2": _codigo(band.get(f"s{n}_count_pluma2"), SENSOR_PLUMA_CMDS, 0, 3) or 0,
+        # s{n}_count_hold_s: null = enclavadas (modo 0); N = duran N segundos (modo 1).
+        "count_hold_mode": 1 if (_codigo(band.get(f"s{n}_count_hold_s"), {}, 1, INT_MAX) or 0) else 0,
+        "count_hold_preset": _codigo(band.get(f"s{n}_count_hold_s"), {}, 0, INT_MAX) or 0,
     }
 
 
@@ -1370,7 +1444,8 @@ def _errores_contador(band, n, marcha) -> list:
               "count_lamp_mask": (band.get(f"s{n}_count_lamp_mask"), {}, MASK_MIN, MASK_MAX),
               "count_dir": (band.get(f"s{n}_count_dir"), COUNT_DIRS, 0, 3),
               "count_pluma1": (band.get(f"s{n}_count_pluma1"), SENSOR_PLUMA_CMDS, 0, 3),
-              "count_pluma2": (band.get(f"s{n}_count_pluma2"), SENSOR_PLUMA_CMDS, 0, 3)}
+              "count_pluma2": (band.get(f"s{n}_count_pluma2"), SENSOR_PLUMA_CMDS, 0, 3),
+              "count_hold_s": (band.get(f"s{n}_count_hold_s"), {}, 0, INT_MAX)}
     for campo, (valor, tabla, low, high) in campos.items():
         if valor is not None and _codigo(valor, tabla, low, high) is None:
             errores.append(f"band.s{n}_{campo}='{valor}' fuera de rango ({low}..{high}).")
@@ -1402,7 +1477,7 @@ def _describir_contador(band, n) -> list:
     c = _codigos_contador(band, n)
     mascara, acciones = c["count_action_mask"], []
     if mascara & COUNT_BANDA:
-        acciones.append("detiene la banda")
+        acciones.append("pausa la banda")
     if mascara & COUNT_PROCESO:
         acciones.append("detiene el proceso (banda, eventos y plumas)")
     if mascara & COUNT_LUCES:
@@ -1515,6 +1590,13 @@ def validar_config(cfg) -> list:
     for n in (1, 2):
         errores.extend(_errores_contador(band, n, not sin_marcha(cfg)))
 
+    # Lampara temporizada (§3 v5): mascara 0..7 y, si hay luces, segundos > 0.
+    mascara_t = band.get("timed_lamp_mask")
+    if mascara_t is not None and _codigo(mascara_t, {}, MASK_MIN, MASK_MAX) is None:
+        errores.append(f"band.timed_lamp_mask='{mascara_t}' debe estar entre 0 y 7.")
+    elif _codigo(mascara_t, {}, MASK_MIN, MASK_MAX) and not (_codigo(band.get("timed_lamp_s"), {}, 1, INT_MAX) or 0):
+        errores.append("band.timed_lamp_s: la lampara temporizada necesita segundos mayor que 0.")
+
     for n in (1, 2):
         bm = band.get(f"s{n}_band_mode")
         if bm is not None and _codigo(bm, {}, 0, 1) is None:
@@ -1575,15 +1657,13 @@ def avisos_config(cfg) -> list:
 
         codigo, _, _ = _accion_de_sensor(band, n)
         codigo = _accion_codigo(codigo)
-        # El conteo cambio de significado con el ST nuevo: conviene decirlo.
+        # ST v5: el evento ocurre en CADA deteccion aunque haya conteo; el conteo
+        # solo agrega las acciones de count_action_mask al llegar al objetivo.
         preset = band.get(f"count_s{n}")
-        if preset and codigo:
+        if preset and not _codigos_contador(band, n)["count_action_mask"]:
             avisos.append(
-                f"S{n}: con count_s{n}={preset} la accion se ejecuta UNA vez, al "
-                f"llegar a {preset} detecciones (CountDone se queda en 1 hasta la "
-                f"siguiente configuracion o un Reset del VFD; ni un paro ni "
-                f"poner el conteo en 0 la rearman). Con count_s{n}=0 se "
-                f"ejecutaria en cada deteccion.")
+                f"S{n}: count_s{n}={preset} solo cuenta piezas: el evento del sensor ocurre en "
+                f"cada deteccion y no hay acciones configuradas al llegar al conteo.")
 
         # Torreta y plumas de un sensor duran lo que dura su evento (§15/§17).
         plumas = [_codigo(band.get(f"s{n}_pluma{m}"), SENSOR_PLUMA_CMDS, 0, 3) for m in (1, 2)]
@@ -1601,8 +1681,12 @@ def avisos_config(cfg) -> list:
         if acciones:
             avisos.append(
                 f"S{n}: al llegar a {band.get(f'count_s{n}')} detecciones {', '.join(acciones)}. "
-                f"Estas acciones quedan ENCLAVADAS hasta cargar otra configuracion o hacer un Reset; "
-                f"I3 sigue siendo el paro prioritario.")
+                + (f"La pausa, las luces y las plumas del contador duran {band.get(f's{n}_count_hold_s')} s; "
+                   if band.get(f"s{n}_count_hold_s") else
+                   "La pausa, las luces y las plumas del contador quedan ENCLAVADAS hasta otra "
+                   "configuracion o un Reset; ")
+                + "detener el proceso siempre queda enclavado y el cambio de direccion es "
+                  "permanente. I3 sigue siendo el paro prioritario.")
 
     modo, preset = _auto_stop(band)
     if modo:
@@ -1621,6 +1705,10 @@ def avisos_config(cfg) -> list:
             "banda (%R10). Liberarlo NO rearranca la banda: hay que pulsar I1. Con "
             "el paro software activo el VFD no termina su configuracion.")
 
+    if band.get("timed_lamp_mask"):
+        avisos.append(
+            f"Lampara temporizada: {TORRETA_NOMBRE.get(band.get('timed_lamp_mask'), '')} durante "
+            f"{band.get('timed_lamp_s')} s al cargar la configuracion; se puede repetir desde el panel.")
     if band.get("torreta_i1"):
         i1 = band.get("torreta_i1")
         avisos.append(
@@ -1777,6 +1865,12 @@ def plan_config(cfg) -> list:
         "mask_i1": band.get("torreta_i1") or 0,
     }))
 
+    # Lampara temporizada (§15 v5): mascara y tiempo SIEMPRE (null -> 0).
+    plan.append(("configurar_lampara_temporizada", (), {
+        "mask": band.get("timed_lamp_mask") or 0,
+        "segundos": band.get("timed_lamp_s") or 0,
+    }))
+
     if marcha:
         # Sentido de giro: ultimo parametro antes de los triggers. El ST exige
         # 1 o 2 cuando hay movimiento, asi que sin direccion explicita va la 1.
@@ -1791,6 +1885,10 @@ def plan_config(cfg) -> list:
     #    a 1 al terminar el reset del VFD (§8); sin movimiento, el ST lo da por
     #    listo en cuanto la configuracion es valida.
     plan.append(("esperar_config_lista", (), {"esperar_caida": marcha}))
+
+    # La lampara temporizada se enciende cuando la configuracion ya es valida.
+    if band.get("timed_lamp_mask"):
+        plan.append(("disparar_lampara_temporizada", (), {}))
 
     # 5) Plumas manuales (independientes de la secuencia del VFD)
     for n in (1, 2):

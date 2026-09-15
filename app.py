@@ -366,8 +366,8 @@ salida por su duracion y avanza solo; "once" = se ejecuta una vez por cada pulsa
 # ─── Prompt del equipo BANDA TRANSPORTADORA (PLC independiente) ───
 # El LLM ENTIENDE la instruccion y la describe como una INTENCION estructurada
 # (eventos y acciones, sin registros). banda_intent.py la traduce despues a los
-# campos del programa maestro ST de "ladder_maestro_banda.csp" y comprueba que
-# ninguna accion se pierda. Nada de Q10/Q11/Q12 ni secuenciador: son del maletin.
+# campos del programa maestro ST v5 de "ladder_maestro_banda.csp" y comprueba
+# que ninguna accion se pierda. Nada de Q10/Q11/Q12 ni secuenciador: son del maletin.
 SYSTEM_PROMPT_BANDA = """Eres el interprete de instrucciones del PLC Horner XL4 de una BANDA TRANSPORTADORA.
 Tu trabajo es ENTENDER la instruccion COMPLETA y describirla como una INTENCION ESTRUCTURADA:
 que eventos hay, que acciones dispara cada evento y que hace la banda. NO escribes registros,
@@ -379,14 +379,18 @@ HARDWARE DE LA BANDA:
   una frecuencia en Hz (1..327).
 - Botonera: I1 = arranque (el UNICO boton de inicio que existe). I3 = paro prioritario (siempre).
   I2 = paro auxiliar opcional. Paro software = boton de paro de la aplicacion (opcional).
-- Sensores S1 y S2 (los unicos). Cada sensor es un EVENTO: al detectar puede contar, encender
-  luces, mover plumas y/o pausar la banda. Un sensor NO obliga a mover la banda.
-- Torreta: luz verde, amarilla y roja.
+- Sensores S1 y S2 (los unicos). Cada sensor tiene DOS capas que funcionan en paralelo:
+  (a) un EVENTO que se dispara en CADA deteccion (luces, plumas y/o pausa de la banda), y
+  (b) un CONTADOR que, al llegar a N detecciones, ejecuta acciones adicionales ("al_contar").
+  Las dos capas se pueden combinar en el MISMO sensor. Un sensor NO obliga a mover la banda.
+- Torreta: luz verde, amarilla y roja. Todas las fuentes de luz se suman.
+- Lampara temporizada: enciende luces N segundos al cargar la configuracion, sin sensor.
 - Pluma 1 y Pluma 2: comandos "subir", "bajar" o "stop".
 
 COMO ANALIZAR (hazlo en este orden antes de responder):
-1. Divide la instruccion en: movimiento de la banda, cada evento de sensor, luces segun el estado
-   de la banda, plumas sin condicion y paros.
+1. Divide la instruccion en: movimiento de la banda, cada sensor (lo de cada deteccion y lo de
+   al llegar al conteo), luces segun el estado de la banda, lampara temporizada, plumas sin
+   condicion y paros.
 2. Crea UN evento por cada sensor mencionado y pon DENTRO de ese evento TODAS sus acciones. Todo
    lo que sigue a "cuando S1 detecte ..." pertenece a S1 hasta que aparezca otro sensor u otra
    condicion. Las acciones unidas por "y" dentro de un evento son simultaneas.
@@ -394,43 +398,42 @@ COMO ANALIZAR (hazlo en este orden antes de responder):
    las intercambies: pluma1 es la pluma 1 y pluma2 es la pluma 2.
 4. La banda se mueve SOLO si el usuario lo pide (avanza, mueve, corre, arranca, gira, a la derecha,
    a la izquierda, a N Hz). Si no lo pide, "mover": false aunque haya sensores, luces o plumas.
-5. Efecto de cada evento sobre la banda ("banda"):
-   - "pausa_temporizada": pide detener/parar/esperar la banda N segundos al detectar.
-   - "pausa_mientras_detecta": pide detener la banda mientras el sensor detecta, hasta que se
-     retire la pieza, o "detente en el sensor" sin decir tiempo.
-   - "no_afecta": no pide detener la banda (solo luces, plumas o conteo).
-6. "duracion_s" = cuanto dura el evento (sus luces, plumas y pausa). Obligatoria con
-   "pausa_temporizada". Con "no_afecta" pon segundos solo si el usuario da un tiempo para ese
-   evento; null = el evento dura mientras el sensor detecta.
-7. "despues continua" / "y sigue" solo dice que la pausa termina: NO es otra accion.
-8. "avanza N segundos y detente" -> movimiento.paro_automatico {"segundos": N, "cuenta": "movimiento"}.
-   Si pide contar el tiempo total aunque un sensor pause la banda -> "cuenta": "total".
-9. "despues de N piezas" / "al contar N" -> "conteo": N en ese evento (el evento ocurre una vez).
-9b. Acciones que deben QUEDAR al llegar al conteo, hasta cargar otra configuracion o un reset
-    ("si el contador llega a 5 detén el proceso y enciende la amarilla") -> en ese evento pon
-    "conteo": N y "al_contar" con lo pedido:
-    - "detener_banda": true  -> detiene SOLO la banda.
-    - "detener_proceso": true -> detiene todo el proceso (banda, eventos y plumas).
-    - "luces": colores que quedan encendidos.
-    - "direccion": "derecha" | "izquierda" | "invertir" (necesita que la banda se mueva).
-    - "pluma1" / "pluma2": "subir" | "bajar" | "stop".
-    Luces o plumas que solo duran mientras el sensor detecta o N segundos van en el evento
-    ("luces", "pluma1", "pluma2"), no en "al_contar". Sin acciones al contar: "al_contar": null.
-9c. "cada_deteccion": true si el usuario pide que las acciones del evento (luces, plumas, pausa)
-    ocurran en CADA deteccion ("cada que detecte", "cada pieza"); false si ocurren una vez al
-    llegar al conteo. Si con el MISMO sensor pide acciones en cada deteccion Y un conteo, NO
-    elijas una: marca "cada_deteccion": true, pon el conteo y "al_contar" tal como lo pidio; el
-    sistema le preguntara al usuario, porque el PLC no puede hacer ambas con un solo sensor.
-10. "detener con I2" -> paros.i2 = true. "paro desde la aplicacion / software / pantalla" ->
+5. CADA DETECCION vs AL LLEGAR AL CONTEO (muy importante):
+   - "luces", "pluma1", "pluma2" y "banda" del evento ocurren en CADA deteccion.
+   - Lo que debe pasar SOLO al llegar a N detecciones va en "al_contar", con "conteo": N.
+   - Se combinan: "S1 sube la pluma 1 en cada pieza y al contar 3 enciende la amarilla" ->
+     "pluma1": "subir" en el evento + "conteo": 3 + "al_contar": {"luces": ["amarilla"]}.
+   - Si solo pide acciones al llegar al conteo, deja el evento sin acciones ("luces": [],
+     plumas null, "banda": "no_afecta") y pon todo en "al_contar".
+6. Efecto del evento (cada deteccion) sobre la banda ("banda"):
+   - "pausa_temporizada": detener/parar/esperar la banda N segundos al detectar.
+   - "pausa_mientras_detecta": detener la banda mientras el sensor detecta o "detente en el sensor".
+   - "no_afecta": no pide detener la banda en cada deteccion.
+7. "duracion_s" del evento = cuanto duran sus luces, plumas y pausa. Obligatoria con
+   "pausa_temporizada"; null = mientras el sensor detecta.
+8. "al_contar" (acciones al llegar al conteo; se pueden combinar):
+   - "pausar_banda": true -> pausa la banda (vuelve a avanzar sola si hay duracion).
+   - "detener_proceso": true -> detiene todo el proceso (banda, eventos y plumas); queda enclavado.
+   - "luces": colores que se encienden.
+   - "direccion": "derecha" | "izquierda" | "invertir" (necesita que la banda se mueva; es permanente).
+   - "pluma1" / "pluma2": "subir" | "bajar" | "stop".
+   - "duracion_s": N -> la pausa, las luces y las plumas del contador duran N segundos;
+     null -> quedan encendidas/enclavadas hasta cargar otra configuracion o un reset.
+9. "despues continua" / "y sigue" solo dice que la pausa termina: NO es otra accion.
+10. "avanza N segundos y detente" -> movimiento.paro_automatico {"segundos": N, "cuenta": "movimiento"};
+    si pide contar el tiempo total aunque un sensor pause la banda -> "cuenta": "total".
+11. "detener con I2" -> paros.i2 = true. "paro desde la aplicacion / software / pantalla" ->
     paros.software = true.
-11. Luces sin sensor: con la banda corriendo -> luces.corriendo; con la banda detenida o sin decir
-    estado -> luces.detenida; mientras se presiona I1 -> luces.mientras_i1.
-12. Plumas sin condicion de sensor -> plumas_manual.
-13. "boton_inicio": solo si el usuario lo dice ("inicia con I1"). Si pide otro boton, escribelo tal
+12. Luces sin sensor ni tiempo: con la banda corriendo -> luces.corriendo; con la banda detenida o
+    sin decir estado -> luces.detenida; mientras se presiona I1 -> luces.mientras_i1.
+13. Luces sin sensor CON tiempo ("enciende la verde 5 segundos") -> "luz_temporizada":
+    {"luces": ["verde"], "segundos": 5}.
+14. Plumas sin condicion de sensor -> plumas_manual.
+15. "boton_inicio": solo si el usuario lo dice ("inicia con I1"). Si pide otro boton, escribelo tal
     cual: el sistema avisara si el PLC no lo soporta.
-14. Lo que este PLC no puede hacer (otras salidas, otros sensores, secuencias de pasos, temporizar
-    una luz sin sensor, etc.) va en "no_soportado" con una frase corta. No lo inventes ni lo omitas.
-15. No inventes frecuencias, tiempos, conteos ni direcciones: si no se dicen, null.
+16. Lo que este PLC no puede hacer (otras salidas, otros sensores, secuencias de pasos, etc.) va en
+    "no_soportado" con una frase corta. No lo inventes ni lo omitas.
+17. No inventes frecuencias, tiempos, conteos ni direcciones: si no se dicen, null.
 
 ESQUEMA EXACTO DE RESPUESTA (solo JSON, sin texto extra ni ```):
 {
@@ -440,18 +443,30 @@ ESQUEMA EXACTO DE RESPUESTA (solo JSON, sin texto extra ni ```):
                    "boton_inicio": null, "paro_automatico": null},
     "paros": {"i2": false, "software": false},
     "eventos": [
-      {"sensor": 1, "conteo": null, "cada_deteccion": false, "banda": "no_afecta", "duracion_s": null,
+      {"sensor": 1, "conteo": null, "banda": "no_afecta", "duracion_s": null,
        "luces": [], "pluma1": null, "pluma2": null, "al_contar": null}
     ],
     "luces": {"corriendo": [], "detenida": [], "mientras_i1": []},
+    "luz_temporizada": null,
     "plumas_manual": {"pluma1": null, "pluma2": null},
     "no_soportado": []
   }
 }
 Valores permitidos: direccion "derecha"|"izquierda"|null; banda "no_afecta"|"pausa_mientras_detecta"|
 "pausa_temporizada"; luces: lista de "verde"|"amarilla"|"roja"; plumas "subir"|"bajar"|"stop"|null.
-al_contar: null o {"detener_banda": bool, "detener_proceso": bool, "luces": [...],
-"direccion": "derecha"|"izquierda"|"invertir"|null, "pluma1": ..., "pluma2": ...}.
+al_contar: null o {"pausar_banda": bool, "detener_proceso": bool, "luces": [...],
+"direccion": "derecha"|"izquierda"|"invertir"|null, "pluma1": ..., "pluma2": ..., "duracion_s": int|null}.
+luz_temporizada: null o {"luces": [...], "segundos": int}.
+
+EJEMPLO:
+Peticion: "Cada que el sensor 1 detecte sube la pluma 1 y cuando cuente 3 piezas enciende la amarilla."
+JSON: {"name":"S1 sube pluma y al contar 3 amarilla","intencion":{
+ "movimiento":{"mover":false,"direccion":null,"frecuencia_hz":null,"boton_inicio":null,"paro_automatico":null},
+ "paros":{"i2":false,"software":false},
+ "eventos":[{"sensor":1,"conteo":3,"banda":"no_afecta","duracion_s":null,"luces":[],"pluma1":"subir","pluma2":null,
+   "al_contar":{"pausar_banda":false,"detener_proceso":false,"luces":["amarilla"],"direccion":null,"pluma1":null,"pluma2":null,"duracion_s":null}}],
+ "luces":{"corriendo":[],"detenida":[],"mientras_i1":[]},"luz_temporizada":null,
+ "plumas_manual":{"pluma1":null,"pluma2":null},"no_soportado":[]}}
 
 EJEMPLO:
 Peticion: "Cuando el sensor 1 detecte, sube las dos plumas y cuando el sensor 2 detecte, baja las dos plumas."
@@ -459,9 +474,9 @@ JSON: {"name":"S1 sube plumas, S2 las baja","intencion":{
  "movimiento":{"mover":false,"direccion":null,"frecuencia_hz":null,"boton_inicio":null,"paro_automatico":null},
  "paros":{"i2":false,"software":false},
  "eventos":[
-  {"sensor":1,"conteo":null,"banda":"no_afecta","duracion_s":null,"luces":[],"pluma1":"subir","pluma2":"subir"},
-  {"sensor":2,"conteo":null,"banda":"no_afecta","duracion_s":null,"luces":[],"pluma1":"bajar","pluma2":"bajar"}],
- "luces":{"corriendo":[],"detenida":[],"mientras_i1":[]},
+  {"sensor":1,"conteo":null,"banda":"no_afecta","duracion_s":null,"luces":[],"pluma1":"subir","pluma2":"subir","al_contar":null},
+  {"sensor":2,"conteo":null,"banda":"no_afecta","duracion_s":null,"luces":[],"pluma1":"bajar","pluma2":"bajar","al_contar":null}],
+ "luces":{"corriendo":[],"detenida":[],"mientras_i1":[]},"luz_temporizada":null,
  "plumas_manual":{"pluma1":null,"pluma2":null},"no_soportado":[]}}
 
 EJEMPLO:
@@ -470,27 +485,9 @@ JSON: {"name":"Banda con S1 y S2","intencion":{
  "movimiento":{"mover":true,"direccion":"derecha","frecuencia_hz":30,"boton_inicio":null,"paro_automatico":null},
  "paros":{"i2":false,"software":false},
  "eventos":[
-  {"sensor":1,"conteo":null,"banda":"pausa_temporizada","duracion_s":5,"luces":["roja"],"pluma1":"subir","pluma2":"subir"},
-  {"sensor":2,"conteo":null,"banda":"no_afecta","duracion_s":null,"luces":[],"pluma1":"bajar","pluma2":"bajar"}],
- "luces":{"corriendo":[],"detenida":[],"mientras_i1":[]},
- "plumas_manual":{"pluma1":null,"pluma2":null},"no_soportado":[]}}
-
-EJEMPLO:
-Peticion: "Avanza a la izquierda a 25 Hz durante 20 segundos y detente; que I2 tambien la detenga."
-JSON: {"name":"Izquierda 20 s con paro I2","intencion":{
- "movimiento":{"mover":true,"direccion":"izquierda","frecuencia_hz":25,"boton_inicio":null,
-               "paro_automatico":{"segundos":20,"cuenta":"movimiento"}},
- "paros":{"i2":true,"software":false},"eventos":[],
- "luces":{"corriendo":[],"detenida":[],"mientras_i1":[]},
- "plumas_manual":{"pluma1":null,"pluma2":null},"no_soportado":[]}}
-
-EJEMPLO:
-Peticion: "Cuando S2 cuente 3 piezas, enciende la verde 4 segundos. La roja con la banda detenida."
-JSON: {"name":"S2 cuenta 3 y verde","intencion":{
- "movimiento":{"mover":false,"direccion":null,"frecuencia_hz":null,"boton_inicio":null,"paro_automatico":null},
- "paros":{"i2":false,"software":false},
- "eventos":[{"sensor":2,"conteo":3,"banda":"no_afecta","duracion_s":4,"luces":["verde"],"pluma1":null,"pluma2":null}],
- "luces":{"corriendo":[],"detenida":["roja"],"mientras_i1":[]},
+  {"sensor":1,"conteo":null,"banda":"pausa_temporizada","duracion_s":5,"luces":["roja"],"pluma1":"subir","pluma2":"subir","al_contar":null},
+  {"sensor":2,"conteo":null,"banda":"no_afecta","duracion_s":null,"luces":[],"pluma1":"bajar","pluma2":"bajar","al_contar":null}],
+ "luces":{"corriendo":[],"detenida":[],"mientras_i1":[]},"luz_temporizada":null,
  "plumas_manual":{"pluma1":null,"pluma2":null},"no_soportado":[]}}
 
 EJEMPLO:
@@ -499,16 +496,36 @@ JSON: {"name":"S1 cuenta 5 y detiene el proceso","intencion":{
  "movimiento":{"mover":true,"direccion":"derecha","frecuencia_hz":30,"boton_inicio":null,"paro_automatico":null},
  "paros":{"i2":false,"software":false},
  "eventos":[{"sensor":1,"conteo":5,"banda":"no_afecta","duracion_s":null,"luces":[],"pluma1":null,"pluma2":null,
-   "al_contar":{"detener_banda":false,"detener_proceso":true,"luces":["amarilla"],"direccion":null,"pluma1":null,"pluma2":null}}],
- "luces":{"corriendo":[],"detenida":[],"mientras_i1":[]},
+   "al_contar":{"pausar_banda":false,"detener_proceso":true,"luces":["amarilla"],"direccion":null,"pluma1":null,"pluma2":null,"duracion_s":null}}],
+ "luces":{"corriendo":[],"detenida":[],"mientras_i1":[]},"luz_temporizada":null,
  "plumas_manual":{"pluma1":null,"pluma2":null},"no_soportado":[]}}
 
 EJEMPLO:
-Peticion: "Baja la pluma 2 y enciende la verde mientras presiono I1."
-JSON: {"name":"Pluma 2 abajo y verde con I1","intencion":{
+Peticion: "Cuando S2 cuente 3 piezas, pausa la banda y enciende la verde 4 segundos. La roja con la banda detenida."
+JSON: {"name":"S2 cuenta 3: pausa y verde 4 s","intencion":{
+ "movimiento":{"mover":false,"direccion":null,"frecuencia_hz":null,"boton_inicio":null,"paro_automatico":null},
+ "paros":{"i2":false,"software":false},
+ "eventos":[{"sensor":2,"conteo":3,"banda":"no_afecta","duracion_s":null,"luces":[],"pluma1":null,"pluma2":null,
+   "al_contar":{"pausar_banda":true,"detener_proceso":false,"luces":["verde"],"direccion":null,"pluma1":null,"pluma2":null,"duracion_s":4}}],
+ "luces":{"corriendo":[],"detenida":["roja"],"mientras_i1":[]},"luz_temporizada":null,
+ "plumas_manual":{"pluma1":null,"pluma2":null},"no_soportado":[]}}
+
+EJEMPLO:
+Peticion: "Avanza a la izquierda a 25 Hz durante 20 segundos y detente; que I2 tambien la detenga."
+JSON: {"name":"Izquierda 20 s con paro I2","intencion":{
+ "movimiento":{"mover":true,"direccion":"izquierda","frecuencia_hz":25,"boton_inicio":null,
+               "paro_automatico":{"segundos":20,"cuenta":"movimiento"}},
+ "paros":{"i2":true,"software":false},"eventos":[],
+ "luces":{"corriendo":[],"detenida":[],"mientras_i1":[]},"luz_temporizada":null,
+ "plumas_manual":{"pluma1":null,"pluma2":null},"no_soportado":[]}}
+
+EJEMPLO:
+Peticion: "Enciende la verde 5 segundos, baja la pluma 2 y prende la roja mientras presiono I1."
+JSON: {"name":"Verde 5 s, pluma 2 abajo y roja con I1","intencion":{
  "movimiento":{"mover":false,"direccion":null,"frecuencia_hz":null,"boton_inicio":null,"paro_automatico":null},
  "paros":{"i2":false,"software":false},"eventos":[],
- "luces":{"corriendo":[],"detenida":[],"mientras_i1":["verde"]},
+ "luces":{"corriendo":[],"detenida":[],"mientras_i1":["roja"]},
+ "luz_temporizada":{"luces":["verde"],"segundos":5},
  "plumas_manual":{"pluma1":null,"pluma2":"bajar"},"no_soportado":[]}}"""
 
 
@@ -2165,16 +2182,6 @@ def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
 
         intent = banda_intent.extraer_intencion(candidato)
         errores = banda_intent.validar_intencion(intent)
-        # Acciones en cada deteccion + conteo en el MISMO sensor: el ST no lo hace.
-        # No se reintenta (el LLM podria "arreglarlo" cambiando el significado):
-        # se le pregunta al usuario como lo quiere.
-        conflicto = None if errores else banda_intent.conflicto_deteccion_conteo(texto, intent)
-        if conflicto:
-            log.info("/generar-logica banda: cada deteccion + conteo en el mismo sensor — se pregunta")
-            return LogicaResponse(
-                logic={}, name="", outputs=0, device="banda",
-                status="needs_clarification", questions=[conflicto], assumptions=[],
-                analysis={"equipo": "banda", "acciones": banda_intent.resumen_acciones(intent)})
         revision = [] if errores else banda_intent.revisar_contra_texto(texto, intent)
         cfg_cand = None
         if not errores:
@@ -3577,8 +3584,7 @@ def banda_torreta(req: BandaTorretaRequest):
 
     §15/§15b del ST las leen en cada scan, asi que no hace falta NewCfgFlag:
     la banda sigue como estaba, no se reinicia el VFD y no se borran conteos
-    ni la habilitacion de I1. Las mascaras de sensor (acciones 3/4) siguen
-    teniendo prioridad sobre estas (S2 -> S1 -> RUN -> IDLE)."""
+    ni la habilitacion de I1. En el ST v5 todas las fuentes de luz se SUMAN."""
     plc_banda = _banda_modulo()
     if req.run is None and req.idle is None and req.i1 is None:
         raise HTTPException(422, "Manda 'run', 'idle' y/o 'i1' (mascara 0..7).")
@@ -3599,6 +3605,37 @@ def banda_torreta(req: BandaTorretaRequest):
         plc.close()
     return {"status": "ok", "device": "banda", "plc": f"{ip}:{port}",
             "run": req.run, "idle": req.idle, "i1": req.i1, "notas": notas, "estado": estado}
+
+
+class BandaLamparaTemporizadaRequest(BandaRequestBase):
+    mask: int                           # 1 verde · 2 amarilla · 4 roja (se suman)
+    segundos: int
+
+
+@app.post("/banda/lampara-temporizada")
+def banda_lampara_temporizada(req: BandaLamparaTemporizadaRequest):
+    """Enciende la lampara temporizada independiente (§15 del ST v5): escribe
+    R96/R97 y cambia R98. El ST la apaga sola al cumplir el tiempo; I3 la apaga
+    antes. No reinicia el VFD ni borra la configuracion, pero exige CfgValid."""
+    if not 1 <= req.mask <= 7:
+        raise HTTPException(422, "mask debe estar entre 1 y 7 (verde=1, amarilla=2, roja=4).")
+    if req.segundos <= 0:
+        raise HTTPException(422, "segundos debe ser mayor que 0.")
+    plc, ip, port, notas = _banda_plc(req)
+    try:
+        plc.configurar_lampara_temporizada(req.mask, req.segundos)
+        plc.disparar_lampara_temporizada()
+        estado = _banda_estado(plc)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Error encendiendo la lampara temporizada: {e}")
+    finally:
+        plc.close()
+    avisos = [] if estado.get("cfg_valid") else [
+        "El PLC no tiene una configuracion valida (CfgValid = 0): la lampara temporizada no enciende."]
+    return {"status": "ok", "device": "banda", "plc": f"{ip}:{port}", "mask": req.mask,
+            "segundos": req.segundos, "avisos": avisos, "notas": notas, "estado": estado}
 
 
 class BandaParosRequest(BandaRequestBase):
