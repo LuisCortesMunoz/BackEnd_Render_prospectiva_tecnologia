@@ -416,6 +416,11 @@ COMO ANALIZAR (hazlo en este orden antes de responder):
     - "pluma1" / "pluma2": "subir" | "bajar" | "stop".
     Luces o plumas que solo duran mientras el sensor detecta o N segundos van en el evento
     ("luces", "pluma1", "pluma2"), no en "al_contar". Sin acciones al contar: "al_contar": null.
+9c. "cada_deteccion": true si el usuario pide que las acciones del evento (luces, plumas, pausa)
+    ocurran en CADA deteccion ("cada que detecte", "cada pieza"); false si ocurren una vez al
+    llegar al conteo. Si con el MISMO sensor pide acciones en cada deteccion Y un conteo, NO
+    elijas una: marca "cada_deteccion": true, pon el conteo y "al_contar" tal como lo pidio; el
+    sistema le preguntara al usuario, porque el PLC no puede hacer ambas con un solo sensor.
 10. "detener con I2" -> paros.i2 = true. "paro desde la aplicacion / software / pantalla" ->
     paros.software = true.
 11. Luces sin sensor: con la banda corriendo -> luces.corriendo; con la banda detenida o sin decir
@@ -435,7 +440,7 @@ ESQUEMA EXACTO DE RESPUESTA (solo JSON, sin texto extra ni ```):
                    "boton_inicio": null, "paro_automatico": null},
     "paros": {"i2": false, "software": false},
     "eventos": [
-      {"sensor": 1, "conteo": null, "banda": "no_afecta", "duracion_s": null,
+      {"sensor": 1, "conteo": null, "cada_deteccion": false, "banda": "no_afecta", "duracion_s": null,
        "luces": [], "pluma1": null, "pluma2": null, "al_contar": null}
     ],
     "luces": {"corriendo": [], "detenida": [], "mientras_i1": []},
@@ -2160,6 +2165,16 @@ def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
 
         intent = banda_intent.extraer_intencion(candidato)
         errores = banda_intent.validar_intencion(intent)
+        # Acciones en cada deteccion + conteo en el MISMO sensor: el ST no lo hace.
+        # No se reintenta (el LLM podria "arreglarlo" cambiando el significado):
+        # se le pregunta al usuario como lo quiere.
+        conflicto = None if errores else banda_intent.conflicto_deteccion_conteo(texto, intent)
+        if conflicto:
+            log.info("/generar-logica banda: cada deteccion + conteo en el mismo sensor — se pregunta")
+            return LogicaResponse(
+                logic={}, name="", outputs=0, device="banda",
+                status="needs_clarification", questions=[conflicto], assumptions=[],
+                analysis={"equipo": "banda", "acciones": banda_intent.resumen_acciones(intent)})
         revision = [] if errores else banda_intent.revisar_contra_texto(texto, intent)
         cfg_cand = None
         if not errores:

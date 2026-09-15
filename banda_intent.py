@@ -27,7 +27,7 @@ Forma de la intencion (la pide SYSTEM_PROMPT_BANDA en app.py):
                      "paro_automatico": {"segundos": int,
                                          "cuenta": "movimiento"|"total"} | null},
       "paros": {"i2": bool, "software": bool},
-      "eventos": [{"sensor": 1|2, "conteo": int|null,
+      "eventos": [{"sensor": 1|2, "conteo": int|null, "cada_deteccion": bool,
                    "banda": "no_afecta"|"pausa_mientras_detecta"|"pausa_temporizada",
                    "duracion_s": int|null, "luces": ["verde"|"amarilla"|"roja"],
                    "pluma1": "subir"|"bajar"|"stop"|null, "pluma2": ...,
@@ -561,18 +561,101 @@ def verificar_cobertura(intent, band) -> dict:
 
 def errores_cobertura(cfg) -> list:
     """Comprobacion final antes de escribir: si el programa trae la intencion
-    del LLM, la configuracion debe contener EXACTAMENTE sus acciones."""
+    del LLM, la configuracion debe contener EXACTAMENTE sus acciones y no puede
+    pedir a un sensor algo que el ST no hace (cada deteccion + conteo)."""
     intent = (cfg or {}).get("intent")
     if not isinstance(intent, dict):
         return []
     cob = verificar_cobertura(intent, (cfg or {}).get("band"))
-    errores = []
+    errores = [c["mensaje"] for c in _conflictos_momento(intent)]
     if cob["faltantes"]:
         errores.append("La configuracion perdio acciones pedidas: " + "; ".join(cob["faltantes"]) + ".")
     if cob["sobrantes"]:
         errores.append("La configuracion agrego acciones que no se pidieron: "
                        + "; ".join(cob["sobrantes"]) + ".")
     return errores
+
+
+# ---------------------------------------------------------------------------
+# CADA DETECCION vs CONTEO EN EL MISMO SENSOR
+# ---------------------------------------------------------------------------
+# En el ST (§11/§13) el evento de un sensor se dispara en CADA deteccion solo
+# si CountPreset = 0. Con CountPreset = N se dispara UNA vez, al llegar a N, y
+# las acciones del contador (§14c) exigen CountPreset > 0. Por eso un mismo
+# sensor no puede mover plumas / encender luces / pausar en cada deteccion y,
+# ademas, contar hasta N. Normalizarlo en silencio cambiaria el significado
+# (la pluma subiria una sola vez), asi que se detecta y se pregunta.
+_RE_CADA_DETECCION = re.compile(
+    r"\bcada\s+(?:vez\s+)?que\b[^.;]{0,40}?\bdetect|\b(?:en\s+)?cada\s+deteccion"
+    r"|\bsiempre\s+que\b[^.;]{0,40}?\bdetect|\bcada\s+(?:pieza|objeto|caja)\b")
+
+
+def _acciones_evento(ev) -> list:
+    """Acciones de un evento que ocurren cuando el evento se dispara."""
+    acciones = [f"luz {c}" for c in _colores(ev.get("luces"))]
+    for m in (1, 2):
+        p = _norm(ev.get(f"pluma{m}"))
+        if p:
+            acciones.append(f"{p} la pluma {m}")
+    if _norm(ev.get("banda") or "no_afecta") != "no_afecta":
+        acciones.append("pausar la banda")
+    return acciones
+
+
+def _conflictos_momento(intent, texto=None) -> list:
+    """Sensores que piden acciones en cada deteccion y ademas un conteo.
+
+    Explicito: un evento marcado cada_deteccion con acciones + conteo > 0 en ese
+    sensor. Por el texto: la frase dice "cada que detecte" y un evento con
+    conteo trae acciones propias (el LLM pudo no marcar cada_deteccion)."""
+    texto_cada = bool(texto) and bool(_RE_CADA_DETECCION.search(
+        "".join(c for c in unicodedata.normalize("NFD", str(texto).lower())
+                if unicodedata.category(c) != "Mn")))
+    por_sensor = {}
+    for ev in intent.get("eventos") or []:
+        n = _entero(ev.get("sensor")) if isinstance(ev, dict) else None
+        if n in (1, 2):
+            por_sensor.setdefault(n, []).append(ev)
+    conflictos = []
+    for n, evs in sorted(por_sensor.items()):
+        conteo = max((_entero(ev.get("conteo")) or 0) for ev in evs)
+        if conteo <= 0:
+            continue
+        cada = [a for ev in evs if ev.get("cada_deteccion") for a in _acciones_evento(ev)]
+        if not cada and texto_cada:
+            cada = [a for ev in evs if (_entero(ev.get("conteo")) or 0) > 0 for a in _acciones_evento(ev)]
+        if not cada:
+            continue
+        otro = 2 if n == 1 else 1
+        conflictos.append({
+            "sensor": n, "conteo": conteo, "acciones": cada,
+            "mensaje": (f"S{n} no puede {', '.join(cada)} en CADA deteccion y ademas contar hasta "
+                        f"{conteo}: en el PLC, con un conteo el evento del sensor solo ocurre una "
+                        f"vez, al llegar a {conteo}. Usa S{otro} para las acciones de cada deteccion "
+                        f"y S{n} para contar, o quita una de las dos."),
+            "otro": otro,
+        })
+    return conflictos
+
+
+def conflicto_deteccion_conteo(texto, intent):
+    """Pregunta de aclaracion si la instruccion choca con el ST; None si no."""
+    conflictos = _conflictos_momento(intent, texto)
+    if not conflictos:
+        return None
+    c = conflictos[0]
+    n, conteo, otro = c["sensor"], c["conteo"], c["otro"]
+    return {
+        "slot": "momento_sensor",
+        "pregunta": (f"Con el PLC actual, S{n} no puede {', '.join(c['acciones'])} en cada detección "
+                     f"y también contar hasta {conteo}: con un conteo, su evento solo ocurre una vez "
+                     f"al llegar a {conteo}. ¿Cómo lo quieres?"),
+        "opciones": [
+            f"Usa S{otro} para lo de cada detección y S{n} para contar hasta {conteo}",
+            f"Solo en cada detección con S{n}, sin contar",
+            f"Solo una vez al llegar a {conteo} con S{n}",
+        ],
+    }
 
 
 def resumen_acciones(intent) -> list:
