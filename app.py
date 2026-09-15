@@ -921,6 +921,9 @@ def guardar_historial(pregunta: str, texto_raw: str):
 # Con POST /feedback el usuario lo marca accepted / corrected / rejected.
 # Solo los ejemplos accepted/corrected se inyectan como contexto en
 # peticiones futuras: el modelo mejora sin reentrenamiento.
+# La BANDA usa la misma memoria con sus propios ejemplos (device='banda', id
+# 'bej_'): se guarda la intencion aceptada y solo se inyecta en el prompt de la
+# banda, nunca en el del maletin.
 
 STOPWORDS_ES = {
     "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "al",
@@ -1081,6 +1084,50 @@ def agregar_ejemplo_logica(texto: str, cfg: dict) -> str:
     return nuevo_id
 
 
+# Etiquetas de la banda: se usan para guardar sus ejemplos y para buscar los
+# parecidos a una peticion nueva de la banda.
+TAGS_BANDA = {
+    "banda-movimiento": ["avanz", "mueve", "mover", "derecha", "izquierda", "hz", "frecuencia", "corre"],
+    "banda-sensor1":    ["s1", "sensor 1", "sensor uno"],
+    "banda-sensor2":    ["s2", "sensor 2", "sensor dos"],
+    "banda-pluma":      ["pluma"],
+    "banda-luz":        ["luz", "luces", "lampara", "torreta", "verde", "amarilla", "roja"],
+    "banda-contador":   ["cuenta", "conteo", "contador", "piezas", "detecciones"],
+    "banda-pausa":      ["deten", "pausa", "espera", "parar"],
+    "banda-paro":       ["i2", "software", "paro automatico"],
+}
+
+
+def extraer_tags_banda(texto: str) -> list:
+    """Etiquetas de una peticion de la banda (sin acentos)."""
+    t = str(texto or "").lower().translate(ACENTOS)
+    return sorted(tag for tag, kws in TAGS_BANDA.items() if any(k in t for k in kws))
+
+
+def agregar_ejemplo_banda(texto: str, cfg: dict) -> str:
+    """Guarda una configuracion de la BANDA (intencion + band) como ejemplo
+    'pending' y devuelve su id. Con 👍/👎 (POST /feedback) pasa a accepted,
+    corrected o rejected; solo los dos primeros se reutilizan."""
+    ejemplos    = cargar_memoria()
+    norm_prompt = " ".join(sorted(_tokens(texto)))
+    ejemplos = [e for e in ejemplos
+                if not (e.get("device") == "banda" and e.get("status") == "pending"
+                        and " ".join(sorted(_tokens(e.get("user_prompt", "")))) == norm_prompt)]
+    nuevo_id = f"bej_{datetime.datetime.now():%Y%m%d_%H%M%S_%f}"
+    ejemplos.append({
+        "id":          nuevo_id,
+        "date":        datetime.datetime.now().isoformat(timespec="seconds"),
+        "device":      "banda",
+        "user_prompt": texto,
+        "datos":       {"engine_config": cfg},
+        "status":      "pending",
+        "tags":        extraer_tags_banda(texto),
+        "uses":        0,
+    })
+    guardar_memoria(_podar_memoria(ejemplos))
+    return nuevo_id
+
+
 def aplicar_feedback(ejemplo_id: str, status: str,
                      user_correction: Optional[str] = None,
                      error_explanation: Optional[str] = None,
@@ -1103,16 +1150,26 @@ def aplicar_feedback(ejemplo_id: str, status: str,
     raise KeyError(ejemplo_id)
 
 
-def ejemplos_relevantes(pregunta: str, k: int = MAX_EJEMPLOS_PROMPT) -> list:
+def ejemplos_relevantes(pregunta: str, k: int = MAX_EJEMPLOS_PROMPT,
+                        filtro=None, tags_fn=None) -> list:
     """Top-k ejemplos validados (accepted/corrected) mas parecidos a la
-    peticion actual, por coincidencia de tags y de palabras clave."""
+    peticion actual, por coincidencia de tags y de palabras clave.
+
+    filtro : si viene, solo considera los ejemplos que lo cumplen (la banda
+             pasa agent_memory.es_ejemplo_banda). Sin filtro se excluyen los
+             ejemplos de la banda, asi el maletin se comporta como siempre.
+    tags_fn: funcion de etiquetas de la peticion (por defecto extraer_tags)."""
     ejemplos = cargar_memoria()
     tokens_p = _tokens(pregunta)
-    tags_p   = set(extraer_tags(pregunta)) - {"Horner_XL4"}
+    tags_p   = set((tags_fn or extraer_tags)(pregunta)) - {"Horner_XL4"}
 
     candidatos = []
     for e in ejemplos:
         if e.get("status") not in ("accepted", "corrected"):
+            continue
+        if filtro is not None and not filtro(e):
+            continue
+        if filtro is None and e.get("device") == "banda":
             continue
         tags_e = set(e.get("tags", [])) - {"Horner_XL4"}
         score  = 3 * len(tags_p & tags_e) + len(tokens_p & _tokens(e.get("user_prompt", "")))
@@ -2072,6 +2129,19 @@ def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
     messages.append({"role": "user", "content":
                      f"{texto}\n\nResponde SOLO con el JSON del esquema indicado."})
 
+    # Memoria de feedback: ejemplos de la BANDA que el usuario valido con 👍 o
+    # corrigio. Solo ejemplos de la banda; la cobertura y las validaciones
+    # siguen custodiando la salida. Si algo falla, se ignora.
+    if AGENT_MEMORY_ENABLED:
+        try:
+            rel = ejemplos_relevantes(texto, filtro=agent_memory.es_ejemplo_banda,
+                                      tags_fn=extraer_tags_banda)
+            bloque = agent_memory.bloque_banda_prompt(rel)
+            if bloque:
+                messages.insert(1, {"role": "system", "content": bloque})
+        except Exception as e:
+            log.warning(f"Memoria de ejemplos de la banda fallo (se ignora): {e}")
+
     cfg = None
     errores, revision = [], []
     intentos = max(1, MAX_AUTOREVISIONES)
@@ -2141,6 +2211,13 @@ def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
     except Exception as e:
         log.warning(f"No se pudo guardar historial (banda): {e}")
 
+    # Se guarda como ejemplo 'pending': el chat muestra 👍/👎 con este id.
+    ejemplo_id = ""
+    try:
+        ejemplo_id = agregar_ejemplo_banda(texto, cfg)
+    except Exception as e:
+        log.warning(f"No se pudo guardar ejemplo de la banda: {e}")
+
     nombre_prog = cfg.get("name", "Programa banda")
     log.info(f"/generar-logica OK (BANDA) — {nombre_prog}")
     return LogicaResponse(
@@ -2149,7 +2226,7 @@ def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
         outputs=0,                      # este PLC no tiene salidas configurables
         device="banda",
         warnings=warnings,
-        ejemplo_id="",
+        ejemplo_id=ejemplo_id,
         program={"metadata": {"name": nombre_prog, "engine_config": cfg}},
         analysis={"acciones": banda_intent.resumen_acciones(cfg["intent"])},
     )

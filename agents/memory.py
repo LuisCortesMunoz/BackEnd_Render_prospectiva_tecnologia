@@ -15,10 +15,47 @@ import json
 
 
 def es_ejemplo_logica(e: dict) -> bool:
-    """True si el ejemplo esta en el esquema engine-config (nuevo)."""
+    """True si el ejemplo esta en el esquema engine-config (nuevo) del maletin.
+    Los ejemplos de la banda (device='banda') tienen otro PLC y otro esquema:
+    nunca se inyectan en el prompt del maletin."""
     return (isinstance(e, dict)
+            and e.get("device") != "banda"
             and isinstance(e.get("datos"), dict)
             and isinstance(e["datos"].get("engine_config"), dict))
+
+
+def es_ejemplo_banda(e: dict) -> bool:
+    """True si el ejemplo es de la banda (intencion + configuracion canonica)."""
+    return (isinstance(e, dict)
+            and e.get("device") == "banda"
+            and isinstance(e.get("datos"), dict)
+            and isinstance(e["datos"].get("engine_config"), dict))
+
+
+def bloque_banda_prompt(ejemplos: list) -> str:
+    """Bloque de ejemplos de la BANDA validados por el usuario (👍 o corregidos).
+
+    Se muestra la INTENCION que se acepto, porque es lo que el LLM de la banda
+    devuelve; la traduccion a registros la sigue haciendo el normalizador."""
+    ejemplos = [e for e in (ejemplos or []) if es_ejemplo_banda(e)]
+    if not ejemplos:
+        return ""
+    partes = [
+        "EJEMPLOS DE LA BANDA VALIDADOS POR EL USUARIO (interacciones previas):",
+        "Si la peticion es parecida, entiendela igual que en estos ejemplos; si hay una "
+        "correccion del usuario, respetala. Responde con el mismo esquema de intencion.",
+    ]
+    for i, e in enumerate(ejemplos, 1):
+        cfg = e["datos"]["engine_config"]
+        partes.append(f"\n--- Ejemplo {i} [{e.get('status')}] ---")
+        partes.append(f"Peticion: {e.get('user_prompt', '')}")
+        if e.get("user_correction"):
+            partes.append(f"Correccion del usuario: {e['user_correction']}")
+        if e.get("error_explanation"):
+            partes.append(f"Error a evitar: {e['error_explanation']}")
+        intencion = {"name": cfg.get("name"), "intencion": cfg.get("intent") or {}}
+        partes.append("JSON: " + json.dumps(intencion, ensure_ascii=False, separators=(",", ":"))[:1500])
+    return "\n".join(partes)
 
 
 def filtrar_logica(ejemplos: list) -> list:
