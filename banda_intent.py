@@ -30,7 +30,10 @@ Forma de la intencion (la pide SYSTEM_PROMPT_BANDA en app.py):
       "eventos": [{"sensor": 1|2, "conteo": int|null,
                    "banda": "no_afecta"|"pausa_mientras_detecta"|"pausa_temporizada",
                    "duracion_s": int|null, "luces": ["verde"|"amarilla"|"roja"],
-                   "pluma1": "subir"|"bajar"|"stop"|null, "pluma2": ...}],
+                   "pluma1": "subir"|"bajar"|"stop"|null, "pluma2": ...,
+                   "al_contar": null | {"detener_banda": bool, "detener_proceso": bool,
+                                        "luces": [...], "direccion": "derecha"|"izquierda"|"invertir"|null,
+                                        "pluma1": ..., "pluma2": ...}}],
       "luces": {"corriendo": [...], "detenida": [...], "mientras_i1": [...]},
       "plumas_manual": {"pluma1": "subir"|"bajar"|"stop"|null, "pluma2": ...},
       "no_soportado": ["..."]
@@ -51,7 +54,16 @@ CAMPOS_BAND = (
     "s1_action", "s1_band_mode", "wait_s1_s", "count_s1", "torreta_s1", "s1_pluma1", "s1_pluma2",
     "s2_action", "s2_band_mode", "wait_s2_s", "count_s2", "torreta_s2", "s2_pluma1", "s2_pluma2",
     "torreta_run", "torreta_idle", "torreta_i1", "pluma1", "pluma2",
+    # Acciones enclavadas al alcanzar el conteo (§14c, %R70..%R79).
+    "s1_count_action_mask", "s1_count_lamp_mask", "s1_count_dir", "s1_count_pluma1", "s1_count_pluma2",
+    "s2_count_action_mask", "s2_count_lamp_mask", "s2_count_dir", "s2_count_pluma1", "s2_count_pluma2",
 )
+
+# Bits de S_CountActionMask (%R70/%R75): se suman para combinar acciones.
+CONTAR_BITS = {"detener_banda": 1, "detener_proceso": 2, "luces": 4, "direccion": 8,
+               "pluma1": 16, "pluma2": 32}
+CONTAR_DIR = {"derecha": 1, "izquierda": 2, "invertir": 3}
+CONTAR_DIR_TXT = {v: k for k, v in CONTAR_DIR.items()}
 
 COLOR_BIT = {"verde": 1, "amarilla": 2, "roja": 4}
 _ALIAS_COLOR = {"verde": "verde", "amarilla": "amarilla", "amarillo": "amarilla",
@@ -192,6 +204,21 @@ def validar_intencion(intent) -> list:
             p = ev.get(f"pluma{m}")
             if p is not None and _norm(p) not in PLUMA_EVENTO:
                 errores.append(f"{tag}.pluma{m}='{p}' debe ser 'subir', 'bajar', 'stop' o null.")
+        ac = ev.get("al_contar")
+        if ac is not None:
+            if not isinstance(ac, dict):
+                errores.append(f"{tag}.al_contar debe ser un objeto o null.")
+                continue
+            if ac.get("direccion") is not None and _norm(ac["direccion"]) not in CONTAR_DIR:
+                errores.append(f"{tag}.al_contar.direccion='{ac['direccion']}' debe ser 'derecha', "
+                               f"'izquierda', 'invertir' o null.")
+            for c in (ac.get("luces") or []):
+                if _ALIAS_COLOR.get(_norm(c)) is None:
+                    errores.append(f"{tag}.al_contar.luces: '{c}' no es un color de la torreta.")
+            for m in (1, 2):
+                p = ac.get(f"pluma{m}")
+                if p is not None and _norm(p) not in PLUMA_EVENTO:
+                    errores.append(f"{tag}.al_contar.pluma{m}='{p}' debe ser 'subir', 'bajar', 'stop' o null.")
 
     luces = intent.get("luces") or {}
     if not isinstance(luces, dict):
@@ -279,6 +306,7 @@ def normalizar_intencion(intent) -> tuple:
                 return
             campos[clave] = valor
 
+        contar_bits, contar_luces = 0, 0
         for ev in evs:
             fijar("efecto", _norm(ev.get("banda") or "no_afecta"), "el efecto sobre la banda")
             fijar("duracion", _entero(ev.get("duracion_s")), "la duracion del evento")
@@ -287,6 +315,18 @@ def normalizar_intencion(intent) -> tuple:
                 p = _norm(ev.get(f"pluma{m}"))
                 fijar(f"pluma{m}", PLUMA_EVENTO.get(p) if p else None, f"la pluma {m}")
             mascara |= _mascara(ev.get("luces"))
+            # Acciones enclavadas al alcanzar el conteo (§14c).
+            ac = ev.get("al_contar") if isinstance(ev.get("al_contar"), dict) else {}
+            if ac.get("detener_banda"):
+                contar_bits |= CONTAR_BITS["detener_banda"]
+            if ac.get("detener_proceso"):
+                contar_bits |= CONTAR_BITS["detener_proceso"]
+            contar_luces |= _mascara(ac.get("luces"))
+            d = _norm(ac.get("direccion"))
+            fijar("contar_dir", CONTAR_DIR.get(d) if d else None, "la direccion al contar")
+            for m in (1, 2):
+                p = _norm(ac.get(f"pluma{m}"))
+                fijar(f"contar_pluma{m}", PLUMA_EVENTO.get(p) if p else None, f"la pluma {m} al contar")
 
         efecto = campos.get("efecto", "no_afecta")
         duracion = campos.get("duracion")
@@ -309,6 +349,23 @@ def normalizar_intencion(intent) -> tuple:
         band[f"torreta_s{n}"] = mascara or None
         band[f"s{n}_pluma1"] = campos.get("pluma1")
         band[f"s{n}_pluma2"] = campos.get("pluma2")
+
+        if contar_luces:
+            contar_bits |= CONTAR_BITS["luces"]
+        if campos.get("contar_dir"):
+            contar_bits |= CONTAR_BITS["direccion"]
+            if not mover:
+                errores.append(f"S{n}: cambiar la direccion al contar necesita que la banda se mueva.")
+        for m in (1, 2):
+            if campos.get(f"contar_pluma{m}"):
+                contar_bits |= CONTAR_BITS[f"pluma{m}"]
+        if contar_bits and not campos.get("conteo"):
+            errores.append(f"S{n}: las acciones al llegar al conteo necesitan un conteo mayor que 0.")
+        band[f"s{n}_count_action_mask"] = contar_bits or None
+        band[f"s{n}_count_lamp_mask"] = contar_luces or None
+        band[f"s{n}_count_dir"] = campos.get("contar_dir")
+        band[f"s{n}_count_pluma1"] = campos.get("contar_pluma1")
+        band[f"s{n}_count_pluma2"] = campos.get("contar_pluma2")
 
     luces = intent.get("luces") or {}
     for estado, campo in LUCES_ESTADO.items():
@@ -361,6 +418,18 @@ def acciones_de_intencion(intent) -> set:
             p = _norm(ev.get(f"pluma{m}"))
             if p:
                 A.add((s, f"pluma{m}", p))
+        ac = ev.get("al_contar") if isinstance(ev.get("al_contar"), dict) else {}
+        for clave in ("detener_banda", "detener_proceso"):
+            if ac.get(clave):
+                A.add((s, "al_contar", clave))
+        for c in _colores(ac.get("luces")):
+            A.add((s, "al_contar_luz", c))
+        if _norm(ac.get("direccion")):
+            A.add((s, "al_contar_direccion", _norm(ac.get("direccion"))))
+        for m in (1, 2):
+            p = _norm(ac.get(f"pluma{m}"))
+            if p:
+                A.add((s, f"al_contar_pluma{m}", p))
     luces = intent.get("luces") or {}
     for estado in LUCES_ESTADO:
         for c in _colores(luces.get(estado)):
@@ -412,6 +481,22 @@ def acciones_de_band(band) -> set:
             p = _entero(b.get(f"s{n}_pluma{m}"))
             if p:
                 A.add((s, f"pluma{m}", PLUMA_EVENTO_TXT.get(p, p)))
+        # Acciones del contador: solo cuentan las que tienen su bit en la mascara,
+        # porque el PLC ignora el resto.
+        bits = _entero(b.get(f"s{n}_count_action_mask")) or 0
+        for clave in ("detener_banda", "detener_proceso"):
+            if bits & CONTAR_BITS[clave]:
+                A.add((s, "al_contar", clave))
+        if bits & CONTAR_BITS["luces"]:
+            for c in _colores_de_mascara(b.get(f"s{n}_count_lamp_mask")):
+                A.add((s, "al_contar_luz", c))
+        if bits & CONTAR_BITS["direccion"]:
+            d = _entero(b.get(f"s{n}_count_dir"))
+            A.add((s, "al_contar_direccion", CONTAR_DIR_TXT.get(d, d)))
+        for m in (1, 2):
+            p = _entero(b.get(f"s{n}_count_pluma{m}"))
+            if bits & CONTAR_BITS[f"pluma{m}"] and p:
+                A.add((s, f"al_contar_pluma{m}", PLUMA_EVENTO_TXT.get(p, p)))
     for estado, campo in LUCES_ESTADO.items():
         for c in _colores_de_mascara(b.get(campo)):
             A.add((f"luces_{estado}", "luz", c))
@@ -447,6 +532,15 @@ def texto_accion(a) -> str:
         return f"{quien}: {txt}" + (f" ({a[3]} s)" if a[3] else "")
     if que == "conteo":
         return f"{quien}: actua al contar {a[2]}"
+    if que == "al_contar":
+        return f"{quien} al llegar al conteo: " + ("detiene la banda" if a[2] == "detener_banda"
+                                                    else "detiene el proceso")
+    if que == "al_contar_luz":
+        return f"{quien} al llegar al conteo: enciende {a[2]} (enclavada)"
+    if que == "al_contar_direccion":
+        return f"{quien} al llegar al conteo: direccion {a[2]}"
+    if que.startswith("al_contar_pluma"):
+        return f"{quien} al llegar al conteo: pluma {que[-1]} {a[2]}"
     if que == "luz":
         return f"{quien}: luz {a[2]}"
     return f"{quien}: {que.replace('pluma', 'pluma ')} {a[2]}"
@@ -513,6 +607,9 @@ def revisar_contra_texto(texto, intent) -> list:
         avisos.append(f"El texto menciona el sensor {n}, pero la intencion no tiene ningun evento de S{n}.")
 
     lugares = [(f"S{_entero(ev.get('sensor'))}", ev.get("pluma1"), ev.get("pluma2")) for ev in eventos]
+    # Las plumas y luces que quedan al llegar al conteo tambien cuentan como usadas.
+    contar = [ev["al_contar"] for ev in eventos if isinstance(ev.get("al_contar"), dict)]
+    lugares += [("al_contar", ac.get("pluma1"), ac.get("pluma2")) for ac in contar]
     lugares.append(("manual", pm.get("pluma1"), pm.get("pluma2")))
     usadas = {m for _, p1, p2 in lugares for m, p in ((1, p1), (2, p2)) if p}
     for m in sorted({_NUM[x] for x in _RE_PLUMA_N.findall(t)} - usadas):
@@ -525,7 +622,11 @@ def revisar_contra_texto(texto, intent) -> list:
                       f"evento(s) o comando(s) incluyen pluma1 Y pluma2.")
 
     if not re.search(r"\bapag|\bdesactiv|\bsin luz", t):
-        mascara = sum(_mascara(ev.get("luces")) for ev in eventos)
+        mascara = 0
+        for ev in eventos:
+            mascara |= _mascara(ev.get("luces"))
+        for ac in contar:
+            mascara |= _mascara(ac.get("luces"))
         for lista in (intent.get("luces") or {}).values():
             mascara |= _mascara(lista)
         for patron, color in ((r"\bverde", "verde"), (r"\bamarill|\bambar", "amarilla"), (r"\broj[ao]", "roja")):

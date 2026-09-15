@@ -139,6 +139,27 @@ BAND_REGISTERS = {
     "pluma2_cmd":        (61,  CFG,  "Pluma2Cmd"),
     "pluma1_status":     (62,  FB,   "Pluma1Status"),
     "pluma2_status":     (63,  FB,   "Pluma2Status"),
+    # -- acciones al alcanzar el conteo (§3/§14c). ActionMask: 1 detener banda ·
+    #    2 detener proceso · 4 luces · 8 direccion · 16 pluma 1 · 32 pluma 2 (se suman)
+    "s1_count_action_mask": (70, CFG, "S1_CountActionMask"),
+    "s1_count_lamp_mask":   (71, CFG, "S1_CountLampMask"),
+    "s1_count_dir_target":  (72, CFG, "S1_CountDirTarget"),    # 0 sin cambio · 1 dir 1 · 2 dir 2 · 3 invertir
+    "s1_count_pluma1":      (73, CFG, "S1_CountPluma1Cmd"),    # 0 nada · 1 subir · 2 bajar · 3 stop
+    "s1_count_pluma2":      (74, CFG, "S1_CountPluma2Cmd"),
+    "s2_count_action_mask": (75, CFG, "S2_CountActionMask"),
+    "s2_count_lamp_mask":   (76, CFG, "S2_CountLampMask"),
+    "s2_count_dir_target":  (77, CFG, "S2_CountDirTarget"),
+    "s2_count_pluma1":      (78, CFG, "S2_CountPluma1Cmd"),
+    "s2_count_pluma2":      (79, CFG, "S2_CountPluma2Cmd"),
+    # -- feedback del contador: enclavado hasta NewCfgFlag / ResetCmd
+    "count_band_stop":      (80, FB,  "CountBandStop_Reg"),
+    "count_system_stop":    (81, FB,  "CountSystemStop_Reg"),
+    "count_lamp_latched":   (82, FB,  "CountLampLatchedMask"),
+    "count_dir_change":     (83, FB,  "CountDirChangeActive_Reg"),
+    "count_action_source":  (84, FB,  "CountActionSource_Reg"),  # 0 ninguno · 1 S1 · 2 S2
+    "count_dir_target":     (85, FB,  "CountDirTarget_Reg"),
+    "count_pluma1_override": (86, FB, "CountPluma1Override_Reg"),
+    "count_pluma2_override": (87, FB, "CountPluma2Override_Reg"),
     # -- monitoreo §19 (1 = activo)
     "mon_i1_raw":        (100, MON,  "Mon_I1_Raw"),
     "mon_i2_raw":        (101, MON,  "Mon_I2_Raw"),
@@ -186,7 +207,7 @@ ADDR_ESCRIBIBLES = frozenset(R(n) for n, acc, _ in BAND_REGISTERS.values() if ac
 ADDR_SOLO_LECTURA = frozenset(R(n) for n, acc, _ in BAND_REGISTERS.values() if acc not in (CFG, TRIG))
 
 # Bloques contiguos que lee leer_estado(): 5 peticiones Modbus en total.
-LECTURA_BLOQUES = ((1, 41), (50, 1), (60, 4), (100, 28), (500, 7))
+LECTURA_BLOQUES = ((1, 41), (50, 1), (60, 28), (100, 28), (500, 7))
 
 # Nombres historicos (los usan los metodos y app.py).
 ADDR_BAND_ENABLE_REG = _addr("band_enable")
@@ -207,7 +228,8 @@ ADDR_SENSOR = {
     n: {campo: _addr(f"s{n}_{campo}") for campo in (
         "enable", "action", "timer_preset", "count_preset", "torreta_mask",
         "count_accum", "timer_accum", "count_done", "pluma1", "pluma2",
-        "band_mode", "event_active")}
+        "band_mode", "event_active", "count_action_mask", "count_lamp_mask",
+        "count_dir_target", "count_pluma1", "count_pluma2")}
     for n in (1, 2)
 }
 
@@ -289,6 +311,8 @@ STOP_REASON_TEXTO = {
     4: "Paro automatico completado",
     5: "Detenida por Sensor 1",
     6: "Detenida por Sensor 2",
+    7: "Detenida por el contador de S1",
+    8: "Detenida por el contador de S2",
 }
 
 # S1_Action / S2_Action (%R21 / %R31), tal como los interpretan §11..§14.
@@ -354,6 +378,15 @@ BAND_MODE_PAUSA, BAND_MODE_SOLO_EVENTO = 0, 1
 # Botones fisicos que el ST acepta como START (§5: BtnStart := PhIn1). Si una
 # version futura del ST admite otro, se agrega aqui y el resto lo respeta.
 START_BUTTONS = ("I1",)
+
+# S_CountActionMask (%R70/%R75, §14c): acciones al alcanzar CountPreset. Se
+# SUMAN y quedan ENCLAVADAS hasta NewCfgFlag o ResetCmd.
+COUNT_BANDA, COUNT_PROCESO, COUNT_LUCES, COUNT_DIRECCION, COUNT_PLUMA1, COUNT_PLUMA2 = 1, 2, 4, 8, 16, 32
+COUNT_ACTION_MAX = 63
+# S_CountDirTarget (%R72/%R77): 0 sin cambio · 1 dir 1 · 2 dir 2 · 3 invertir.
+COUNT_DIRS = {"sin_cambio": 0, "derecha": 1, "direccion_1": 1, "izquierda": 2,
+              "direccion_2": 2, "invertir": 3}
+COUNT_DIR_NOMBRE = {0: "sin cambio", 1: "direccion 1", 2: "direccion 2", 3: "invertir"}
 
 TORRETA_NOMBRE = {
     0: "apagada", 1: "verde", 2: "amarilla", 3: "verde + amarilla",
@@ -691,7 +724,9 @@ class BandaPLC:
     # -- §11..§14  sensores S1 y S2 ---------------------------------------
     def configurar_sensor(self, n, accion=None, timer_preset=None,
                           count_preset=None, torreta_mask=None, habilitar=True,
-                          pluma1=None, pluma2=None, band_mode=None):
+                          pluma1=None, pluma2=None, band_mode=None,
+                          count_action_mask=None, count_lamp_mask=None,
+                          count_dir_target=None, count_pluma1=None, count_pluma2=None):
         """Configura el bloque completo de S1 (%R16, %R20..%R29) o S2 (%R17, %R30..%R39).
 
         accion       : 0..4 o su nombre ('nada', 'paro_presencia',
@@ -707,6 +742,8 @@ class BandaPLC:
                        MIENTRAS dura el evento del sensor (§17)
         band_mode    : 0 = el evento puede pausar la banda (acciones 1..4)
                        1 = solo evento: el sensor nunca pausa la banda
+        count_*      : acciones enclavadas al alcanzar count_preset (§14c):
+                       mascara 0..63, luces 0..7, direccion 0..3 y plumas 0..3
         """
         if n not in ADDR_SENSOR:
             raise ValueError(f"Sensor no valido: {n}. Solo existen S1 y S2.")
@@ -742,6 +779,14 @@ class BandaPLC:
                         self._enum(valor, SENSOR_PLUMA_CMDS, 0, 3, f"S{n} pluma {m}"))
         if band_mode is not None:
             self._w(a["band_mode"], self._entero(band_mode, 0, 1, f"S{n}_BandMode"))
+        for campo, valor, low, high in (
+                ("count_action_mask", count_action_mask, 0, COUNT_ACTION_MAX),
+                ("count_lamp_mask", count_lamp_mask, MASK_MIN, MASK_MAX),
+                ("count_dir_target", count_dir_target, 0, 3),
+                ("count_pluma1", count_pluma1, 0, 3),
+                ("count_pluma2", count_pluma2, 0, 3)):
+            if valor is not None:
+                self._w(a[campo], self._entero(valor, low, high, f"S{n} {campo}"))
 
         print(f"S{n}: {'habilitado' if habilitar else 'deshabilitado'}"
               + (f" | accion={accion} (S{n}_Action={acc})" if acc is not None else "")
@@ -768,6 +813,9 @@ class BandaPLC:
         self._w(a["pluma1"], SENSOR_PLUMA_NADA)
         self._w(a["pluma2"], SENSOR_PLUMA_NADA)
         self._w(a["band_mode"], BAND_MODE_PAUSA)
+        for campo in ("count_action_mask", "count_lamp_mask", "count_dir_target",
+                      "count_pluma1", "count_pluma2"):
+            self._w(a[campo], 0)
         print(f"S{n}: deshabilitado")
 
     def reset_contador(self, n) -> bool:
@@ -1060,7 +1108,29 @@ def estado_desde_registros(reg: dict) -> dict:
             "detecta": si(f"mon_s{n}_det"),
             "band_mode": g(f"s{n}_band_mode"),
             "event_active": si(f"s{n}_event_active"),
+            "count_action_mask": g(f"s{n}_count_action_mask"),
+            "count_lamp_mask": g(f"s{n}_count_lamp_mask"),
+            "count_dir_target": g(f"s{n}_count_dir_target"),
+            "count_pluma1": g(f"s{n}_count_pluma1"),
+            "count_pluma2": g(f"s{n}_count_pluma2"),
         }
+    # Acciones del contador enclavadas (§14c): se liberan con NewCfgFlag o ResetCmd.
+    origen = g("count_action_source")
+    contador = {
+        "banda_detenida": si("count_band_stop"),
+        "proceso_detenido": si("count_system_stop"),
+        "luces": g("count_lamp_latched"),
+        "luces_nombre": TORRETA_NOMBRE.get(g("count_lamp_latched"), ""),
+        "cambio_direccion": si("count_dir_change"),
+        "origen": origen,
+        "origen_texto": {0: "ninguno", 1: "S1", 2: "S2"}.get(origen, str(origen)),
+        "direccion_objetivo": g("count_dir_target"),
+        "pluma1": g("count_pluma1_override"),
+        "pluma2": g("count_pluma2_override"),
+    }
+    contador["activo"] = bool(origen or contador["banda_detenida"]
+                              or contador["proceso_detenido"] or contador["luces"])
+    estado["contador"] = contador
     # Por que el PLC rechaza la configuracion (vacio si CfgValid = 1).
     estado["motivos_cfg_invalida"] = [] if estado["cfg_valid"] else motivos_config_invalida(reg)
     # Tabla de diagnostico: todos los registros leidos, con su acceso.
@@ -1122,6 +1192,27 @@ def motivos_config_invalida(reg: dict) -> list:
         for p in ("pluma1", "pluma2"):
             if not 0 <= g(s + p) <= 3:
                 m.append(f"{r(s + p)} = {g(s + p)}: debe estar entre 0 y 3.")
+        # Acciones del contador (§3).
+        mascara = g(s + "count_action_mask")
+        if not 0 <= mascara <= COUNT_ACTION_MAX:
+            m.append(f"{r(s + 'count_action_mask')} = {mascara}: debe estar entre 0 y 63.")
+        elif mascara:
+            if g(s + "count_preset") <= 0:
+                m.append(f"{r(s + 'count_action_mask')} = {mascara} necesita "
+                         f"{r(s + 'count_preset')} mayor que 0.")
+            if mascara & COUNT_LUCES and g(s + "count_lamp_mask") == 0:
+                m.append(f"{r(s + 'count_action_mask')} pide luces pero {r(s + 'count_lamp_mask')} = 0.")
+            if mascara & COUNT_DIRECCION and (g(s + "count_dir_target") == 0 or not movimiento):
+                m.append(f"{r(s + 'count_action_mask')} pide cambiar direccion: necesita "
+                         f"{r(s + 'count_dir_target')} distinto de 0 y movimiento configurado.")
+            for bit, p in ((COUNT_PLUMA1, "count_pluma1"), (COUNT_PLUMA2, "count_pluma2")):
+                if mascara & bit and g(s + p) == 0:
+                    m.append(f"{r(s + 'count_action_mask')} pide mover una pluma pero {r(s + p)} = 0.")
+        if not MASK_MIN <= g(s + "count_lamp_mask") <= MASK_MAX:
+            m.append(f"{r(s + 'count_lamp_mask')} = {g(s + 'count_lamp_mask')}: debe estar entre 0 y 7.")
+        for p in ("count_dir_target", "count_pluma1", "count_pluma2"):
+            if not 0 <= g(s + p) <= 3:
+                m.append(f"{r(s + p)} = {g(s + p)}: debe estar entre 0 y 3.")
     for clave in ("torreta_run", "torreta_idle", "torreta_i1"):
         if not MASK_MIN <= g(clave) <= MASK_MAX:
             m.append(f"{r(clave)} = {g(clave)}: debe estar entre 0 y 7.")
@@ -1140,6 +1231,11 @@ def _fase_visual(estado: dict) -> str:
     POR SENSOR (BandEnable sigue activo y la banda continua sola)."""
     if estado.get("hard_stop"):
         return "paro_i3"
+    contador = estado.get("contador") or {}
+    if contador.get("proceso_detenido"):
+        return "paro_contador_proceso"     # enclavado hasta nueva config o Reset
+    if contador.get("banda_detenida"):
+        return "paro_contador_banda"
     if estado.get("aux_stop"):
         return "paro_i2"
     if estado.get("soft_stop"):
@@ -1163,6 +1259,8 @@ FASE_TEXTO = {
     "paro_i3": "Paro I3 activo — suelta I3 y pulsa I1",
     "paro_i2": "Paro I2 activo — suelta I2 y pulsa I1",
     "paro_software": "Paro software activo — liberalo y pulsa I1",
+    "paro_contador_proceso": "Proceso detenido por el contador — envia la configuracion o haz Reset",
+    "paro_contador_banda": "Banda detenida por el contador — envia la configuracion o haz Reset",
     "esperando_config": "Esperando configuracion",
     "sin_marcha": "Lista sin movimiento — sensores, torreta y plumas activos",
     "configurando": "Configurando VFD...",
@@ -1252,6 +1350,72 @@ def _auto_stop(band) -> tuple:
     if modo is None:
         modo = AUTO_STOP_MOVIMIENTO if preset > 0 else AUTO_STOP_OFF
     return modo, preset
+
+
+def _codigos_contador(band, n) -> dict:
+    """Campos del contador de S1/S2 como codigos del ST (null -> 0)."""
+    return {
+        "count_action_mask": _codigo(band.get(f"s{n}_count_action_mask"), {}, 0, COUNT_ACTION_MAX) or 0,
+        "count_lamp_mask": _codigo(band.get(f"s{n}_count_lamp_mask"), {}, MASK_MIN, MASK_MAX) or 0,
+        "count_dir_target": _codigo(band.get(f"s{n}_count_dir"), COUNT_DIRS, 0, 3) or 0,
+        "count_pluma1": _codigo(band.get(f"s{n}_count_pluma1"), SENSOR_PLUMA_CMDS, 0, 3) or 0,
+        "count_pluma2": _codigo(band.get(f"s{n}_count_pluma2"), SENSOR_PLUMA_CMDS, 0, 3) or 0,
+    }
+
+
+def _errores_contador(band, n, marcha) -> list:
+    """Reglas de §3 para las acciones al alcanzar el conteo de S1/S2."""
+    errores = []
+    campos = {"count_action_mask": (band.get(f"s{n}_count_action_mask"), {}, 0, COUNT_ACTION_MAX),
+              "count_lamp_mask": (band.get(f"s{n}_count_lamp_mask"), {}, MASK_MIN, MASK_MAX),
+              "count_dir": (band.get(f"s{n}_count_dir"), COUNT_DIRS, 0, 3),
+              "count_pluma1": (band.get(f"s{n}_count_pluma1"), SENSOR_PLUMA_CMDS, 0, 3),
+              "count_pluma2": (band.get(f"s{n}_count_pluma2"), SENSOR_PLUMA_CMDS, 0, 3)}
+    for campo, (valor, tabla, low, high) in campos.items():
+        if valor is not None and _codigo(valor, tabla, low, high) is None:
+            errores.append(f"band.s{n}_{campo}='{valor}' fuera de rango ({low}..{high}).")
+    if errores:
+        return errores
+    c = _codigos_contador(band, n)
+    mascara = c["count_action_mask"]
+    if not mascara:
+        if c["count_lamp_mask"] or c["count_dir_target"] or c["count_pluma1"] or c["count_pluma2"]:
+            errores.append(f"S{n}: hay acciones al contar pero band.s{n}_count_action_mask = 0; "
+                           f"el PLC no las ejecutaria.")
+        return errores
+    if not (_codigo(band.get(f"count_s{n}"), {}, 1, INT_MAX) or 0):
+        errores.append(f"S{n}: las acciones al contar necesitan count_s{n} mayor que 0.")
+    if mascara & COUNT_LUCES and not c["count_lamp_mask"]:
+        errores.append(f"S{n}: encender luces al contar necesita al menos una luz.")
+    if mascara & COUNT_DIRECCION:
+        if not c["count_dir_target"]:
+            errores.append(f"S{n}: cambiar direccion al contar necesita la direccion destino.")
+        if not marcha:
+            errores.append(f"S{n}: cambiar la direccion al contar necesita que la banda se mueva.")
+    for bit, p, m in ((COUNT_PLUMA1, "count_pluma1", 1), (COUNT_PLUMA2, "count_pluma2", 2)):
+        if mascara & bit and not c[p]:
+            errores.append(f"S{n}: mover la pluma {m} al contar necesita un comando.")
+    return errores
+
+
+def _describir_contador(band, n) -> list:
+    c = _codigos_contador(band, n)
+    mascara, acciones = c["count_action_mask"], []
+    if mascara & COUNT_BANDA:
+        acciones.append("detiene la banda")
+    if mascara & COUNT_PROCESO:
+        acciones.append("detiene el proceso (banda, eventos y plumas)")
+    if mascara & COUNT_LUCES:
+        acciones.append(f"enciende {TORRETA_NOMBRE.get(c['count_lamp_mask'], c['count_lamp_mask'])}")
+    if mascara & COUNT_DIRECCION:
+        acciones.append(f"cambia a {COUNT_DIR_NOMBRE.get(c['count_dir_target'])} (se detiene 1 s si esta corriendo)")
+    for bit, p, m in ((COUNT_PLUMA1, "count_pluma1", 1), (COUNT_PLUMA2, "count_pluma2", 2)):
+        if mascara & bit:
+            acciones.append(f"pluma {m} {SENSOR_PLUMA_NOMBRE_TXT.get(c[p], c[p])}")
+    return acciones
+
+
+SENSOR_PLUMA_NOMBRE_TXT = {1: "sube", 2: "baja", 3: "stop"}
 
 
 def validar_config(cfg) -> list:
@@ -1349,6 +1513,9 @@ def validar_config(cfg) -> list:
             errores.append(f"band.pluma{n}='{p}' debe ser 0 (stop), 1 (subir) o 2 (bajar).")
 
     for n in (1, 2):
+        errores.extend(_errores_contador(band, n, not sin_marcha(cfg)))
+
+    for n in (1, 2):
         bm = band.get(f"s{n}_band_mode")
         if bm is not None and _codigo(bm, {}, 0, 1) is None:
             errores.append(f"band.s{n}_band_mode='{bm}' debe ser 0 (el evento puede pausar "
@@ -1430,6 +1597,12 @@ def avisos_config(cfg) -> list:
         pausa = codigo and (_codigo(band.get(f"s{n}_band_mode"), {}, 0, 1) or 0) == BAND_MODE_PAUSA
         if pausa and sin_marcha(cfg):
             avisos.append(f"S{n}: el evento pausaria la banda, pero este programa no la mueve.")
+        acciones = _describir_contador(band, n)
+        if acciones:
+            avisos.append(
+                f"S{n}: al llegar a {band.get(f'count_s{n}')} detecciones {', '.join(acciones)}. "
+                f"Estas acciones quedan ENCLAVADAS hasta cargar otra configuracion o hacer un Reset; "
+                f"I3 sigue siendo el paro prioritario.")
 
     modo, preset = _auto_stop(band)
     if modo:
@@ -1591,6 +1764,8 @@ def plan_config(cfg) -> list:
             "pluma1": band.get(f"s{n}_pluma1") or 0,
             "pluma2": band.get(f"s{n}_pluma2") or 0,
             "band_mode": _codigo(band.get(f"s{n}_band_mode"), {}, 0, 1) or BAND_MODE_PAUSA,
+            # Acciones del contador SIEMPRE (null -> 0): son RETAIN y §3 las valida.
+            **_codigos_contador(band, n),
         }))
 
     # Torreta: las tres mascaras SIEMPRE (null -> 0). Son registros que el PLC

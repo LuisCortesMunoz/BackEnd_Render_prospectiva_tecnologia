@@ -406,6 +406,16 @@ COMO ANALIZAR (hazlo en este orden antes de responder):
 8. "avanza N segundos y detente" -> movimiento.paro_automatico {"segundos": N, "cuenta": "movimiento"}.
    Si pide contar el tiempo total aunque un sensor pause la banda -> "cuenta": "total".
 9. "despues de N piezas" / "al contar N" -> "conteo": N en ese evento (el evento ocurre una vez).
+9b. Acciones que deben QUEDAR al llegar al conteo, hasta cargar otra configuracion o un reset
+    ("si el contador llega a 5 detén el proceso y enciende la amarilla") -> en ese evento pon
+    "conteo": N y "al_contar" con lo pedido:
+    - "detener_banda": true  -> detiene SOLO la banda.
+    - "detener_proceso": true -> detiene todo el proceso (banda, eventos y plumas).
+    - "luces": colores que quedan encendidos.
+    - "direccion": "derecha" | "izquierda" | "invertir" (necesita que la banda se mueva).
+    - "pluma1" / "pluma2": "subir" | "bajar" | "stop".
+    Luces o plumas que solo duran mientras el sensor detecta o N segundos van en el evento
+    ("luces", "pluma1", "pluma2"), no en "al_contar". Sin acciones al contar: "al_contar": null.
 10. "detener con I2" -> paros.i2 = true. "paro desde la aplicacion / software / pantalla" ->
     paros.software = true.
 11. Luces sin sensor: con la banda corriendo -> luces.corriendo; con la banda detenida o sin decir
@@ -426,7 +436,7 @@ ESQUEMA EXACTO DE RESPUESTA (solo JSON, sin texto extra ni ```):
     "paros": {"i2": false, "software": false},
     "eventos": [
       {"sensor": 1, "conteo": null, "banda": "no_afecta", "duracion_s": null,
-       "luces": [], "pluma1": null, "pluma2": null}
+       "luces": [], "pluma1": null, "pluma2": null, "al_contar": null}
     ],
     "luces": {"corriendo": [], "detenida": [], "mientras_i1": []},
     "plumas_manual": {"pluma1": null, "pluma2": null},
@@ -435,6 +445,8 @@ ESQUEMA EXACTO DE RESPUESTA (solo JSON, sin texto extra ni ```):
 }
 Valores permitidos: direccion "derecha"|"izquierda"|null; banda "no_afecta"|"pausa_mientras_detecta"|
 "pausa_temporizada"; luces: lista de "verde"|"amarilla"|"roja"; plumas "subir"|"bajar"|"stop"|null.
+al_contar: null o {"detener_banda": bool, "detener_proceso": bool, "luces": [...],
+"direccion": "derecha"|"izquierda"|"invertir"|null, "pluma1": ..., "pluma2": ...}.
 
 EJEMPLO:
 Peticion: "Cuando el sensor 1 detecte, sube las dos plumas y cuando el sensor 2 detecte, baja las dos plumas."
@@ -474,6 +486,16 @@ JSON: {"name":"S2 cuenta 3 y verde","intencion":{
  "paros":{"i2":false,"software":false},
  "eventos":[{"sensor":2,"conteo":3,"banda":"no_afecta","duracion_s":4,"luces":["verde"],"pluma1":null,"pluma2":null}],
  "luces":{"corriendo":[],"detenida":["roja"],"mientras_i1":[]},
+ "plumas_manual":{"pluma1":null,"pluma2":null},"no_soportado":[]}}
+
+EJEMPLO:
+Peticion: "Avanza a la derecha a 30 Hz; si el contador de S1 llega a 5, detén todo el proceso y enciende la amarilla."
+JSON: {"name":"S1 cuenta 5 y detiene el proceso","intencion":{
+ "movimiento":{"mover":true,"direccion":"derecha","frecuencia_hz":30,"boton_inicio":null,"paro_automatico":null},
+ "paros":{"i2":false,"software":false},
+ "eventos":[{"sensor":1,"conteo":5,"banda":"no_afecta","duracion_s":null,"luces":[],"pluma1":null,"pluma2":null,
+   "al_contar":{"detener_banda":false,"detener_proceso":true,"luces":["amarilla"],"direccion":null,"pluma1":null,"pluma2":null}}],
+ "luces":{"corriendo":[],"detenida":[],"mientras_i1":[]},
  "plumas_manual":{"pluma1":null,"pluma2":null},"no_soportado":[]}}
 
 EJEMPLO:
