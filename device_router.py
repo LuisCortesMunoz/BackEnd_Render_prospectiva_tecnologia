@@ -72,7 +72,33 @@ COMUNES_TERMS = [
     r"\bbot(?:on|ones)\b", r"\bpulsador", r"\bselector",
 ]
 
+
+# PROCESO INDUSTRIAL (capa B, contexto industrial): vocabulario CONCEPTUAL que
+# solo tiene sentido sobre una linea transportadora. El maletin no transporta,
+# no clasifica ni empaqueta nada, asi que estas palabras apuntan a la banda.
+# Se consulta DESPUES de los terminos exclusivos de los dos equipos: un termino
+# del maletin ("enclavamiento", "secuencia", "contador", I1/I2/I7) sigue
+# ganando, de modo que ninguna instruccion que antes iba al maletin cambia.
+PROCESO_TERMS = [
+    r"\bempaqu", r"\bempac", r"\bembalaj", r"\bencajad",
+    r"\bpaletiz", r"\bpalletiz", r"\bpallets?\b", r"\btarimas?\b",
+    r"\bclasific", r"\bsorting\b", r"\bdesviador", r"\bdesvi[ao]\b",
+    r"\balmacen", r"\bbodega", r"\blogistic", r"\bpaqueteria",
+    r"\blotes?\b", r"\bbatch\b", r"\bproduccion\b", r"\bmanufactur",
+    r"\btransport", r"\bembotell", r"\benvasad", r"\bllenad",
+    r"\binspeccion", r"\brechaz", r"\bbuffer\b", r"\bacumula",
+    r"\bcongestion", r"\bestacion(?:es)?\b", r"\bautomotriz\b", r"\bautomotive\b",
+    r"\bcajas?\b", r"\bpaquetes?\b", r"\bbotellas?\b",
+    # Referencias conceptuales por industria (§12): solo sirven para inferir
+    # industria y arquetipos, nunca para copiar el proceso real de la empresa.
+    r"\bpepsico\b", r"\bpepsi\b", r"\bcoca[\s-]?cola\b", r"\bnestle\b", r"\bbimbo\b",
+    r"\bamazon\b", r"\bdhl\b", r"\bfedex\b", r"\bups\b",
+    r"\btoyota\b", r"\bford\b", r"\bvolkswagen\b", r"\bbmw\b",
+    r"\bsamsung\b", r"\bfoxconn\b",
+]
+
 _BANDA_RE = [re.compile(p) for p in BANDA_TERMS]
+_PROCESO_RE = [re.compile(p) for p in PROCESO_TERMS]
 _MALETIN_RE = [re.compile(p) for p in MALETIN_TERMS]
 _COMUNES_RE = [re.compile(p) for p in COMUNES_TERMS]
 
@@ -108,6 +134,13 @@ def detectar_dispositivo(texto: str) -> dict:
         return {"device": MALETIN, "motivo": "terminos exclusivos del maletin"}
     if banda and maletin:
         return {"device": None, "motivo": "mezcla terminos de los dos equipos"}
+
+    # Sin terminos exclusivos de ningun equipo: un proceso industrial
+    # (empaquetado, clasificacion, paletizado, "tipo PepsiCo"...) solo lo puede
+    # ejecutar la banda. Este nivel es NUEVO y va por debajo de todo lo
+    # anterior, asi que no altera ninguna deteccion que ya funcionaba.
+    if _aciertos(t, _PROCESO_RE):
+        return {"device": BANDA, "motivo": "describe un proceso industrial de linea"}
 
     # Sin terminos exclusivos: solo se pregunta si hay algo que de verdad
     # pueda ir en cualquiera de los dos. Sin ninguna señal se conserva el

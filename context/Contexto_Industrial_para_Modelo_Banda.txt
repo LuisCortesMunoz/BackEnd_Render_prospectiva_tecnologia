@@ -1,0 +1,445 @@
+CONTEXTO INDUSTRIAL PARA MODELO DE BANDA
+======================================
+
+USO
+---
+Este archivo es contexto de referencia para el LLM. No debe mapear lenguaje natural
+directamente a registros PLC. El flujo esperado es:
+
+Usuario -> LLM -> intención estructurada -> normalizador determinista -> validador
+-> mapper de registros -> preview -> reset/configuración -> PLC.
+
+REGLAS GENERALES
+----------------
+1. Interpreta la intención completa antes de normalizar.
+2. Distingue eventos, condiciones, acciones simultáneas y acciones secuenciales.
+3. Un sensor puede ejecutar acciones en cada detección y acciones distintas al llegar
+   a un conteo.
+4. S1 y S2 son eventos generales: pueden trabajar con banda, plumas, luces,
+   contadores y timers, incluso si la banda no se mueve.
+5. No inventes hardware que no existe.
+6. Si el usuario menciona una empresa, úsala solo como referencia conceptual de
+   industria; no afirmes que esa empresa usa exactamente la secuencia propuesta.
+7. Si falta un parámetro esencial para ejecutar, usa null/configurable y solicita
+   el dato antes de ejecutar.
+8. I3 siempre permanece como paro prioritario.
+9. Un cambio de dirección debe realizarse de forma segura:
+   STOP -> cambio de dirección -> reanudar.
+10. Toda nueva configuración ejecutable debe pasar automáticamente por reset/
+    preparación; el usuario no necesita pedir "reset".
+
+HARDWARE DISPONIBLE
+-------------------
+Banda:
+- start/stop
+- dirección 1/derecha
+- dirección 2/izquierda
+- frecuencia/velocidad
+- avanzar por tiempo
+- pausa temporal
+- reanudación automática
+- cambio de dirección seguro
+
+Entradas:
+I1 = START principal
+I2 = auxiliar / paro según configuración
+I3 = STOP físico prioritario
+S1 = sensor 1
+S2 = sensor 2
+
+Torreta:
+Q3 = verde
+Q4 = amarilla
+Q5 = roja
+
+Pluma 1:
+Q8 = SUBIR
+Q9 = BAJAR
+
+Pluma 2:
+Q6 = SUBIR
+Q7 = BAJAR
+
+CAPACIDADES DE SENSORES
+-----------------------
+Cada sensor puede:
+- detectar producto
+- contar
+- iniciar timer
+- pausar/detener banda
+- no afectar la banda
+- activar una o varias luces
+- subir/bajar/stop Pluma 1
+- subir/bajar/stop Pluma 2
+- disparar acciones al alcanzar un conteo
+
+PRINCIPIO DE EVENTOS
+--------------------
+No pensar solamente:
+SENSOR -> STOP
+
+Pensar:
+EVENTO -> una o varias ACCIONES
+
+Ejemplo:
+S1 detecta
+-> contador +1
+-> subir P1
+-> subir P2
+-> amarilla ON
+-> banda continúa
+
+ACCION INMEDIATA VS CONTADOR
+----------------------------
+Ejemplo:
+"Cada vez que S1 detecte, sube P1. Al llegar a 3 piezas prende roja 5 s."
+
+Debe interpretarse como:
+
+on_detection:
+- P1 = up
+
+counter:
+- target = 3
+- on_target:
+  - red = true
+  - duration_s = 5
+
+Nunca eliminar la acción inmediata por existir un contador.
+
+ARQUETIPOS DE PROCESO
+---------------------
+continuous_transport:
+START -> mover continuamente -> sensores observan flujo.
+
+indexed_transport:
+mover -> detectar posición -> stop -> esperar -> mover.
+
+counting:
+cada detección -> contador +1.
+
+batching:
+contar N -> indicar lote -> pausar/detener -> continuar según proceso.
+
+sorting:
+detectar -> elegir ruta -> usar pluma como desviador.
+
+rejection:
+evento de rechazo -> pluma -> roja temporal.
+
+inspection:
+detectar -> pausar -> indicar inspección -> continuar.
+
+positioning:
+detectar -> stop -> bajar pluma/tope -> esperar -> subir -> continuar.
+
+buffering:
+si estación siguiente ocupada -> parar alimentación; al liberarse -> continuar.
+
+congestion_control:
+sensor ocupado demasiado tiempo -> stop -> roja.
+
+signaling:
+RUN -> verde; espera -> amarilla; paro/anormal -> roja.
+
+timed_process:
+evento -> timer N -> acción o acción mantenida N segundos.
+
+count_based_sorting:
+al contar N -> activar desviador/pluma.
+
+direction_change:
+evento o contador -> STOP -> cambiar dirección -> continuar.
+
+filling_simulation:
+detectar -> stop -> esperar N simulando proceso -> continuar.
+No inventar válvula real.
+
+packaging:
+contar N -> pausa -> señal de paquete completo -> continuar.
+
+boxing:
+contar N -> pausa -> pluma/indicador -> continuar.
+
+pallet_feed:
+contar N cajas -> parar alimentación -> amarilla -> lote/pallet listo.
+No inventar robot.
+
+two_route_split:
+pluma selecciona ruta A/B según condición disponible.
+
+alternating_routes:
+pieza impar -> ruta 1; pieza par -> ruta 2.
+
+two_station_process:
+S1 -> acción A -> continuar -> S2 -> acción B.
+
+rework:
+evento en S2 -> stop -> invertir -> regresar hacia S1.
+
+flow_control:
+si downstream está ocupado -> esperar; si queda libre -> continuar.
+
+end_of_line:
+S2 confirma salida -> contar producto final -> al objetivo finalizar lote.
+
+REFERENCIAS POR INDUSTRIA
+-------------------------
+food_beverage:
+Referencias conceptuales: PepsiCo, Coca-Cola, Nestlé, Bimbo.
+Inferir:
+- flujo continuo
+- alto volumen
+- conteo
+- presencia
+- acumulación
+- lotes
+- empaque
+- señalización
+- control de congestión
+
+Ejemplo:
+"quiero una banda como PepsiCo"
+-> continuous_transport + counting + flow_control + signaling
+-> I1 inicia
+-> verde durante producción
+-> S1 detecta y cuenta
+-> S2 confirma salida/downstream
+-> si S2 permanece ocupado, pausar flujo
+-> al liberarse, continuar
+-> al alcanzar lote configurable, señalizar o pausar
+
+No afirmar que PepsiCo usa exactamente esa lógica.
+
+parcel_distribution:
+Referencias: Amazon, DHL, FedEx, UPS.
+Inferir:
+- transporte
+- clasificación
+- conteo
+- acumulación
+- múltiples rutas
+- plumas como desviadores conceptuales
+
+automotive:
+Referencias: Toyota, Ford, Volkswagen, BMW.
+Inferir:
+- estaciones secuenciales
+- posicionamiento
+- interlocks
+- pausas
+- confirmaciones
+
+electronics:
+Referencias: Samsung, Foxconn.
+Inferir:
+- estaciones secuenciales
+- conteo
+- inspección
+- rechazo
+- precisión
+
+pharma:
+Inferir:
+- conteo preciso
+- lotes
+- inspección
+- rechazo
+- alarmas
+No inventar hardware regulatorio.
+
+warehouse_logistics:
+Inferir:
+- clasificación
+- acumulación
+- conteo
+- rutas
+- saturación
+
+PETICIONES VAGAS
+----------------
+"quiero una banda de producción"
+Propuesta base:
+I1 -> RUN
+verde -> ON
+S1 -> detectar/contar
+S2 -> confirmar salida
+Parámetros desconocidos -> null/configurable
+
+"quiero paletizado"
+-> alimentación a estación
+-> contar N
+-> stop
+-> amarilla
+-> lote listo
+
+"quiero clasificación"
+-> detectar
+-> decidir ruta
+-> usar pluma
+-> contar
+
+"quiero empaquetado"
+-> transportar
+-> contar N
+-> pausar
+-> indicar paquete completo
+-> continuar
+
+COMPOSICION
+-----------
+Si el usuario pide:
+"transporta, cuenta 5 y clasifica"
+debe producir:
+continuous_transport + counting + sorting
+
+No elegir solo un proceso.
+
+SIMULTANEIDAD
+-------------
+"y", "además", "también", "al mismo tiempo", "mientras"
+normalmente significan acciones paralelas.
+
+Ejemplo:
+"S1 sube las dos plumas y prende roja"
+-> P1 up + P2 up + red ON en el mismo evento.
+
+SECUENCIA
+---------
+"después", "luego", "posteriormente", "cuando termine", "al finalizar"
+indican orden temporal.
+
+Ejemplo:
+"detente 5 segundos y después continúa"
+-> stop -> wait 5 s -> run.
+
+CONDICIONES
+-----------
+"cuando S1 detecte" -> trigger S1_DETECTION
+"cuando contador llegue a 3" -> trigger S1_COUNT_TARGET o S2_COUNT_TARGET
+"hasta que S2 detecte" -> mantener acción hasta S2_DETECTION
+
+SALIDA INTERMEDIA RECOMENDADA DEL LLM
+-------------------------------------
+El LLM debe producir una estructura conceptual similar a:
+
+{
+  "process_reference": {
+    "industry": "food_beverage",
+    "reference": "PepsiCo-style conceptual conveyor",
+    "exact_company_process_claim": false
+  },
+  "archetypes": [
+    "continuous_transport",
+    "counting",
+    "signaling"
+  ],
+  "movement": {
+    "enabled": true,
+    "direction": "direction_1",
+    "frequency_hz": null,
+    "start": "I1"
+  },
+  "sensor1": {
+    "enabled": true,
+    "on_detection": {
+      "pluma1": "up",
+      "pluma2": "up"
+    },
+    "counter": {
+      "enabled": true,
+      "target": 3,
+      "on_target": {
+        "lamp": {
+          "red": true,
+          "duration_s": 5
+        }
+      }
+    }
+  }
+}
+
+NORMALIZADOR
+------------
+Después del LLM, el normalizador debe:
+1. validar que cada función exista en el ST;
+2. convertir la intención a la estructura canónica;
+3. mapear a registros válidos;
+4. conservar todas las acciones;
+5. detectar conflictos;
+6. no inventar registros;
+7. no escribir feedback como comando.
+
+VALIDACION DE COBERTURA
+-----------------------
+Comparar intención estructurada vs configuración normalizada.
+
+Ejemplo:
+LLM entendió:
+- S1 -> P1 subir
+- S1 -> P2 subir
+- contador S1 = 3
+- al objetivo -> roja 5 s
+
+La configuración final debe conservar las 4 relaciones.
+
+Si desaparece alguna:
+NORMALIZATION_ERROR
+
+No ejecutar parcialmente en silencio.
+
+CONFLICTOS
+----------
+Válido:
+S1 -> P1 subir
+S2 -> P1 bajar
+porque son eventos diferentes.
+
+Conflictivo:
+S1 -> P1 subir
+S1 -> P1 bajar
+en el mismo evento.
+
+No inventar prioridad; marcar conflicto.
+
+NO INVENTAR HARDWARE
+--------------------
+No inventar como actuadores reales:
+- robots
+- cámaras
+- cilindros
+- válvulas
+- lectores
+- motores adicionales
+
+La secuencia ejecutable debe usar solo:
+banda, S1, S2, P1, P2, verde, amarilla, roja, timers, counters, botones.
+
+DEFAULTS
+--------
+Si se solicita movimiento sin botón de inicio:
+start = I1.
+
+Si la solicitud es solo sensor/pluma/lámpara/contador:
+no exigir movimiento.
+
+Si falta frecuencia, tiempo o cantidad indispensable:
+usar null/configurable y pedir el dato antes de ejecución.
+
+OBJETIVO FINAL
+--------------
+Convertir solicitudes desde:
+"Avanza derecha 20 Hz; S1 sube ambas plumas; al contar 3 prende roja 5 s."
+
+hasta:
+"quiero una banda tipo PepsiCo"
+
+en una intención industrial razonable y compatible con el hardware.
+
+Orden de prioridad:
+1. intención del usuario
+2. coherencia industrial
+3. capacidades reales
+4. seguridad
+5. conservación de acciones
+6. mínima cantidad de suposiciones

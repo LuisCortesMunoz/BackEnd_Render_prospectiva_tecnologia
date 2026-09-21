@@ -39,7 +39,17 @@ Forma de la intencion (la pide SYSTEM_PROMPT_BANDA en app.py):
       "luces": {"corriendo": [...], "detenida": [...], "mientras_i1": [...]},
       "luz_temporizada": null | {"luces": [...], "segundos": int},
       "plumas_manual": {"pluma1": "subir"|"bajar"|"stop"|null, "pluma2": ...},
-      "no_soportado": ["..."]
+      "no_soportado": ["..."],
+
+      # CAPA SEMANTICA (opcional, la agrega el contexto industrial - capa B).
+      # Describe QUE proceso es; NO produce registros ni cambia nada de lo
+      # anterior. Una intencion sin estos campos se trata igual que siempre.
+      "process_reference": {"industry": str|null, "reference": str|null,
+                            "exact_company_process_claim": false},
+      "archetypes": ["continuous_transport", "counting", ...],
+      "supuestos": ["..."],
+      "parametros_faltantes": [{"campo": str, "pregunta": str, "opciones": [str]}],
+      "conflictos": ["..."]
     }
 ============================================================================
 """
@@ -47,6 +57,19 @@ Forma de la intencion (la pide SYSTEM_PROMPT_BANDA en app.py):
 import json
 import re
 import unicodedata
+
+try:                                    # La capa B es opcional: sin ella, todo
+    import banda_contexto               # sigue funcionando exactamente igual.
+    _ARQUETIPOS = set(banda_contexto.ARQUETIPOS)
+    _INDUSTRIAS = set(banda_contexto.INDUSTRIAS)
+except Exception:                       # pragma: no cover
+    banda_contexto = None
+    _ARQUETIPOS, _INDUSTRIAS = set(), set()
+
+# Campos NUEVOS de la capa semantica. Ninguno llega al PLC: viajan en la
+# respuesta para el preview, los avisos y las preguntas al usuario.
+CAMPOS_SEMANTICOS = ("process_reference", "archetypes", "supuestos",
+                     "parametros_faltantes", "conflictos", "unsupported_capability")
 
 
 # Campos del bloque 'band' canonico (mismo contrato que plc_banda.validar_config
@@ -255,7 +278,150 @@ def validar_intencion(intent) -> list:
                 errores.append(f"plumas_manual.pluma{m}='{p}' debe ser 'subir', 'bajar', 'stop' o null.")
     if not isinstance(intent.get("no_soportado") or [], list):
         errores.append("'no_soportado' debe ser una lista de textos.")
+    # Capa semantica: opcional. Si no viene, no se exige nada (compatibilidad
+    # total con las intenciones anteriores).
+    errores += _errores_semantica(intent)
     return errores
+
+
+# ---------------------------------------------------------------------------
+# CAPA SEMANTICA (contexto industrial)  —  NO produce registros
+# ---------------------------------------------------------------------------
+def _errores_semantica(intent) -> list:
+    """Errores de FORMA de los campos nuevos. Solo se revisa lo que venga:
+    una intencion sin capa semantica es valida."""
+    errores = []
+    pr = intent.get("process_reference")
+    if pr is not None:
+        if not isinstance(pr, dict):
+            errores.append("'process_reference' debe ser un objeto o null.")
+        else:
+            ind = pr.get("industry")
+            if ind is not None and _INDUSTRIAS and _norm(ind) not in _INDUSTRIAS:
+                errores.append(f"process_reference.industry='{ind}' no es una industria "
+                               f"conocida ({', '.join(sorted(_INDUSTRIAS))}).")
+            if pr.get("exact_company_process_claim"):
+                errores.append("process_reference.exact_company_process_claim debe ser false: "
+                               "el nombre de una empresa es solo una referencia conceptual, "
+                               "no se puede afirmar que use esta secuencia.")
+    arqs = intent.get("archetypes")
+    if arqs is not None:
+        if not isinstance(arqs, list):
+            errores.append("'archetypes' debe ser una lista.")
+        else:
+            for a in arqs:
+                if _ARQUETIPOS and _norm(a) not in _ARQUETIPOS:
+                    errores.append(f"archetypes: '{a}' no es un arquetipo de proceso conocido.")
+    for campo in ("supuestos", "conflictos", "unsupported_capability"):
+        v = intent.get(campo)
+        if v is not None and not isinstance(v, list):
+            errores.append(f"'{campo}' debe ser una lista de textos.")
+    pf = intent.get("parametros_faltantes")
+    if pf is not None:
+        if not isinstance(pf, list):
+            errores.append("'parametros_faltantes' debe ser una lista.")
+        else:
+            for i, p in enumerate(pf, 1):
+                if not isinstance(p, dict):
+                    errores.append(f"parametros_faltantes[{i}] debe ser un objeto "
+                                   f"{{'campo','pregunta','opciones'}}.")
+                elif not str(p.get("pregunta") or "").strip():
+                    errores.append(f"parametros_faltantes[{i}] necesita una 'pregunta' para "
+                                   f"pedirle el dato al usuario.")
+    return errores
+
+
+def capa_semantica(intent) -> dict:
+    """Capa semantica normalizada de una intencion. Siempre devuelve la misma
+    forma, aunque el LLM no haya mandado ningun campo nuevo."""
+    intent = intent if isinstance(intent, dict) else {}
+    pr = intent.get("process_reference") if isinstance(intent.get("process_reference"), dict) else {}
+    ind = _norm(pr.get("industry")) if pr.get("industry") else None
+    arqs = []
+    for a in (intent.get("archetypes") or []):
+        k = _norm(a)
+        if k and k not in arqs and (not _ARQUETIPOS or k in _ARQUETIPOS):
+            arqs.append(k)
+    faltantes = []
+    for p in (intent.get("parametros_faltantes") or []):
+        if isinstance(p, dict) and str(p.get("pregunta") or "").strip():
+            faltantes.append({
+                "campo": str(p.get("campo") or "").strip() or "dato",
+                "pregunta": str(p["pregunta"]).strip(),
+                "opciones": [str(o) for o in (p.get("opciones") or []) if str(o).strip()],
+            })
+    return {
+        "process_reference": {
+            "industry": ind if (not _INDUSTRIAS or ind in _INDUSTRIAS) else None,
+            "reference": (str(pr.get("reference")).strip() or None) if pr.get("reference") else None,
+            # Nunca se afirma que una empresa use exactamente esta secuencia (§12).
+            "exact_company_process_claim": False,
+        },
+        "archetypes": arqs,
+        "supuestos": [str(s).strip() for s in (intent.get("supuestos") or []) if str(s).strip()],
+        "parametros_faltantes": faltantes,
+        "conflictos": [str(c).strip() for c in (intent.get("conflictos") or []) if str(c).strip()],
+        # Limitacion CONCEPTUAL del hardware: informa, no bloquea. Distinta de
+        # "no_soportado", que si bloquea porque el usuario lo pidio expresamente.
+        "unsupported_capability": [str(s).strip() for s in
+                                   (intent.get("unsupported_capability") or []) if str(s).strip()],
+        "no_soportado": [str(s).strip() for s in (intent.get("no_soportado") or []) if str(s).strip()],
+    }
+
+
+def resumen_semantico(intent) -> list:
+    """Frases legibles de la lectura conceptual (para el preview y el chat)."""
+    s = capa_semantica(intent)
+    L = []
+    pr = s["process_reference"]
+    if pr["industry"]:
+        L.append(f"Industria de referencia: {pr['industry']}")
+    if pr["reference"]:
+        L.append(f"Referencia conceptual: {pr['reference']} "
+                 f"(no se afirma que esa empresa use esta secuencia)")
+    if s["archetypes"]:
+        L.append("Arquetipos de proceso: " + ", ".join(s["archetypes"]))
+    for t in s["supuestos"]:
+        L.append(f"Supuesto: {t}")
+    for p in s["parametros_faltantes"]:
+        L.append(f"Falta por definir: {p['campo']}")
+    for t in s["conflictos"]:
+        L.append(f"Conflicto: {t}")
+    for t in s["unsupported_capability"]:
+        L.append(f"Fuera del alcance del hardware (se adapta): {t}")
+    for t in s["no_soportado"]:
+        L.append(f"No soportado por el hardware: {t}")
+    return L
+
+
+def avisos_semanticos(intent) -> list:
+    """Avisos (no errores) de la lectura conceptual: lo que se asumio, lo que
+    se adapto por falta de hardware y la referencia de industria usada."""
+    s = capa_semantica(intent)
+    avisos = []
+    pr = s["process_reference"]
+    if pr["reference"]:
+        avisos.append(f"'{pr['reference']}' se uso solo como referencia conceptual de industria; "
+                      f"no se copia el proceso real de ninguna empresa.")
+    for t in s["unsupported_capability"]:
+        avisos.append(f"Este equipo no tiene ese elemento, se adapto con el hardware disponible: {t}")
+    for t in s["supuestos"]:
+        avisos.append(f"Supuesto de la propuesta: {t}")
+    return avisos
+
+
+def pregunta_conflicto(intent):
+    """Un conflicto declarado por el LLM no se resuelve en silencio (§14):
+    se le pregunta al usuario cual de las dos ordenes quiere."""
+    s = capa_semantica(intent)
+    if not s["conflictos"]:
+        return None
+    return {
+        "slot": "conflicto",
+        "pregunta": "Hay ordenes que se contradicen en el mismo evento: "
+                    + "; ".join(s["conflictos"]) + ". ¿Cual quieres que se aplique?",
+        "opciones": [],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -710,7 +876,11 @@ def revisar_contra_texto(texto, intent) -> list:
 
 def pregunta_pendiente(intent):
     """Dato imprescindible que el usuario no dio: con movimiento, el ST exige
-    la frecuencia (§3). No se inventa: se pregunta."""
+    la frecuencia (§3). No se inventa: se pregunta.
+
+    Regla de siempre primero (frecuencia) para no cambiar el comportamiento
+    anterior; despues, los parametros que el LLM marco como faltantes al
+    proponer un proceso a partir de una peticion vaga (capa B)."""
     mov = intent.get("movimiento") or {}
     if mov.get("mover") and _entero(mov.get("frecuencia_hz")) is None:
         return {
@@ -718,7 +888,28 @@ def pregunta_pendiente(intent):
             "pregunta": "¿A qué frecuencia debe avanzar la banda (1 a 327 Hz)?",
             "opciones": ["20 Hz", "30 Hz", "40 Hz"],
         }
+    for p in capa_semantica(intent)["parametros_faltantes"]:
+        # La frecuencia ya se cubrio arriba; aqui solo lo que quedo pendiente
+        # de verdad (conteos, tiempos, colores...) y que el ST necesita.
+        if p["campo"] == "frecuencia_hz":
+            continue
+        if p["campo"] == "conteo" and not _conteo_pendiente(intent):
+            continue
+        return {"slot": p["campo"], "pregunta": p["pregunta"], "opciones": p["opciones"]}
     return None
+
+
+def _conteo_pendiente(intent) -> bool:
+    """¿Hay acciones al llegar al conteo sin el numero de piezas?"""
+    for ev in intent.get("eventos") or []:
+        if not isinstance(ev, dict):
+            continue
+        ac = ev.get("al_contar") if isinstance(ev.get("al_contar"), dict) else {}
+        pide = any(ac.get(k) for k in ("pausar_banda", "detener_banda", "detener_proceso",
+                                       "luces", "direccion", "pluma1", "pluma2"))
+        if pide and not _entero(ev.get("conteo")):
+            return True
+    return False
 
 
 def intencion_json(intent) -> str:

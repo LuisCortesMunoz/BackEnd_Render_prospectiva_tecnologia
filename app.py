@@ -2124,7 +2124,17 @@ def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
     lectura (auto-revision), igual que en el maletin."""
     import banda_intent
 
+    # CAPA A: el prompt de siempre, intacto. Manda sobre todo lo demas.
     messages = [{"role": "system", "content": SYSTEM_PROMPT_BANDA}]
+    # CAPA B: contexto industrial (arquetipos, industrias, peticiones vagas) como
+    # mensaje ADICIONAL detras del anterior. Solo AGREGA lectura conceptual: no
+    # reemplaza ninguna regla de la capa A ni decide registros. Si falla, la
+    # banda sigue funcionando exactamente como antes.
+    try:
+        import banda_contexto
+        messages.append(banda_contexto.mensaje_sistema_industrial())
+    except Exception as e:
+        log.warning(f"Contexto industrial de la banda no disponible (se ignora): {e}")
     if req.contexto:
         previas = "\n".join(f"- {p}" for p in (req.contexto.historial or [])[-4:])
         prev = None
@@ -2188,15 +2198,24 @@ def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
             band, errores = banda_intent.normalizar_intencion(intent)
             cfg_cand = {"name": intent.get("name") or "Programa banda", "device": "banda",
                         "intent": {k: v for k, v in intent.items() if k != "name"},
+                        # Lectura conceptual (capa B). Viaja para el preview y los
+                        # avisos; NO produce registros: el PLC solo usa 'band'.
+                        "semantica": banda_intent.capa_semantica(intent),
                         "band": band, "outputs": []}
-            pregunta = None if errores or revision else banda_intent.pregunta_pendiente(intent)
+            # Ordenes que se contradicen en el mismo evento: no se resuelven en
+            # silencio ni se eligen por nosotros, se pregunta (§14).
+            pregunta = None if errores or revision else banda_intent.pregunta_conflicto(intent)
+            if pregunta is None and not (errores or revision):
+                pregunta = banda_intent.pregunta_pendiente(intent)
             if pregunta:
                 log.info("/generar-logica banda: falta un dato imprescindible — se pregunta")
                 return LogicaResponse(
                     logic={}, name="", outputs=0, device="banda",
                     status="needs_clarification", questions=[pregunta], assumptions=[],
                     analysis={"equipo": "banda",
-                              "acciones": banda_intent.resumen_acciones(intent)})
+                              "acciones": banda_intent.resumen_acciones(intent),
+                              "lectura": banda_intent.resumen_semantico(intent),
+                              "arquetipos": banda_intent.capa_semantica(intent)["archetypes"]})
             if not errores:
                 # Cobertura intencion -> configuracion y compatibilidad con el ST.
                 errores = banda_intent.errores_cobertura(cfg_cand) + validar_logica_banda(cfg_cand)
@@ -2226,7 +2245,9 @@ def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
             422, "No se pudo generar una configuracion valida para la banda:\n- "
             + "\n- ".join(errores or revision))
 
-    warnings = avisos_logica_banda(cfg) + [f"Revisa la interpretacion: {a}" for a in revision]
+    warnings = (avisos_logica_banda(cfg)
+                + banda_intent.avisos_semanticos(cfg["intent"])
+                + [f"Revisa la interpretacion: {a}" for a in revision])
 
     try:
         guardar_historial(texto, json.dumps(cfg, ensure_ascii=False)[:1500])
@@ -2250,7 +2271,9 @@ def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
         warnings=warnings,
         ejemplo_id=ejemplo_id,
         program={"metadata": {"name": nombre_prog, "engine_config": cfg}},
-        analysis={"acciones": banda_intent.resumen_acciones(cfg["intent"])},
+        analysis={"acciones": banda_intent.resumen_acciones(cfg["intent"]),
+                  "lectura": banda_intent.resumen_semantico(cfg["intent"]),
+                  "arquetipos": cfg["semantica"]["archetypes"]},
     )
 
 
