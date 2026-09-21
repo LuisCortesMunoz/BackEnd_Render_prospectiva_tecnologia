@@ -135,18 +135,20 @@ def detectar_dispositivo(texto: str) -> dict:
     if banda and maletin:
         return {"device": None, "motivo": "mezcla terminos de los dos equipos"}
 
-    # Sin terminos exclusivos de ningun equipo: un proceso industrial
-    # (empaquetado, clasificacion, paletizado, "tipo PepsiCo"...) solo lo puede
-    # ejecutar la banda. Este nivel es NUEVO y va por debajo de todo lo
-    # anterior, asi que no altera ninguna deteccion que ya funcionaba.
-    if _aciertos(t, _PROCESO_RE):
-        return {"device": BANDA, "motivo": "describe un proceso industrial de linea"}
-
     # Sin terminos exclusivos: solo se pregunta si hay algo que de verdad
     # pueda ir en cualquiera de los dos. Sin ninguna señal se conserva el
     # comportamiento historico (el maletin).
     if _aciertos(t, _COMUNES_RE):
         return {"device": None, "motivo": "solo terminos comunes a los dos equipos"}
+
+    # Ultimo nivel, por debajo de TODO lo anterior: sin un solo termino de
+    # ningun equipo, un proceso industrial (empaquetado, clasificacion,
+    # paletizado, "tipo PepsiCo"...) solo lo puede ejecutar la banda. Va aqui
+    # a proposito: si la frase trae vocabulario comun ("prende Q10 cuando
+    # termine la produccion") se sigue preguntando, como siempre.
+    if _aciertos(t, _PROCESO_RE):
+        return {"device": BANDA, "motivo": "describe un proceso industrial de linea"}
+
     return {"device": MALETIN, "motivo": "sin senales de banda: flujo del maletin"}
 
 
