@@ -2576,6 +2576,14 @@ async def generar_logica(req: LogicaRequest):
 MODELO_CHAT = os.environ.get("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
 MODELOS_CHAT_RESPALDO = ("llama-3.3-70b-versatile", "openai/gpt-oss-20b",
                          "llama-3.1-8b-instant")
+
+# El modo APRENDIZAJE lleva su propio modelo, independiente del resto del chat:
+# es un tutor que explica conceptos, asi que se fija a un modelo de produccion
+# no razonador y no se arrastra detras de lo que se cambie para otros modos.
+# Los demas modos siguen usando MODELO_CHAT exactamente como antes.
+MODO_APRENDIZAJE = "aprendizaje"
+MODELO_CHAT_APRENDIZAJE = os.environ.get("GROQ_CHAT_MODEL_APRENDIZAJE",
+                                         "llama-3.3-70b-versatile")
 DEFAULT_PROFILE = "media"
 
 # Perfiles copiados TAL CUAL del backend de Ollama (mismos system prompts y
@@ -2674,6 +2682,10 @@ class ChatRequest(BaseModel):
     # El front manda un nombre de modelo de Ollama (ej. 'llama3.2:3b'); aqui se
     # ignora si trae ':' y se usa MODELO_CHAT (ver _modelo_chat_groq).
     model: Optional[str] = None
+    # Modo del copiloto ('aprendizaje', 'practico'...). Solo sirve para elegir
+    # el modelo; el comportamiento lo sigue marcando system_prompt. Si el front
+    # no lo manda, se usa MODELO_CHAT como siempre.
+    copilot_mode: Optional[str] = None
     copilot_profile: str = DEFAULT_PROFILE
     system_prompt: Optional[str] = None
     temperature: float = 0.7
@@ -2694,11 +2706,16 @@ def _perfil_chat(profile_id: str) -> dict:
     return p
 
 
-def _modelo_chat_groq(model: Optional[str]) -> str:
+def _modelo_chat_groq(model: Optional[str], modo: Optional[str] = None) -> str:
     """Los nombres de Ollama llevan ':' (llama3.2:3b) y no sirven en Groq.
-    Si el cliente manda uno asi (o nada), se usa MODELO_CHAT."""
+    Si el cliente manda uno asi (o nada), se usa el modelo del modo: el de
+    APRENDIZAJE es propio y el resto sigue con MODELO_CHAT."""
     m = (model or "").strip()
-    return MODELO_CHAT if (not m or ":" in m) else m
+    if m and ":" not in m:
+        return m                        # el usuario escribio un modelo de Groq
+    if (modo or "").strip().lower() == MODO_APRENDIZAJE:
+        return MODELO_CHAT_APRENDIZAJE
+    return MODELO_CHAT
 
 
 def _candidatos_chat(modelo: str) -> list:
@@ -2775,7 +2792,7 @@ def chat(req: ChatRequest):
 
     perfil        = _perfil_chat(req.copilot_profile)
     system_prompt = (req.system_prompt or "").strip() or perfil["system_prompt"]
-    modelo        = _modelo_chat_groq(req.model)
+    modelo        = _modelo_chat_groq(req.model, req.copilot_mode)
 
     start = time.perf_counter()
     try:

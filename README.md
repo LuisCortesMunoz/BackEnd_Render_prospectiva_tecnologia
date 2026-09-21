@@ -35,6 +35,7 @@ El backend cumple **dos roles** según dónde corra:
 | `GROQ_API_KEY_stt` | Voz a texto (Whisper) | Sí, si usas voz |
 | `GROQ_MODEL` | Modelo de generación (default `openai/gpt-oss-120b`) | No |
 | `GROQ_CHAT_MODEL` | Modelo del chat (default `llama-3.3-70b-versatile`). Usa solo modelos de **producción** de Groq: los de preview se retiran sin aviso. Si el configurado no existe, el chat responde con el primero disponible de `llama-3.3-70b-versatile`, `openai/gpt-oss-20b`, `llama-3.1-8b-instant` y lo avisa en el log. | No |
+| `GROQ_CHAT_MODEL_APRENDIZAJE` | Modelo **solo** del modo Aprendizaje (default `llama-3.3-70b-versatile`). Los demás modos del copiloto siguen con `GROQ_CHAT_MODEL`. | No |
 | `GROQ_STT_MODEL` | Modelo de voz (default `whisper-large-v3`) | No |
 | `ADMIN_TOKEN` | Protege los endpoints `/admin/*` | Recomendada |
 | `ALLOWED_ORIGINS` | Dominios del frontend (CORS) | No |
