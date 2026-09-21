@@ -2568,7 +2568,14 @@ async def generar_logica(req: LogicaRequest):
 # Modelo de chat en Groq. gpt-oss-120b es razonador y consume max_tokens con
 # su razonamiento interno (mal para respuestas cortas), por eso el chat usa
 # por defecto un modelo de produccion no-razonador. Configurable por env.
-MODELO_CHAT = os.environ.get("GROQ_CHAT_MODEL", "qwen/qwen3.6-27b")
+#
+# Solo modelos de PRODUCCION de Groq: los de preview se retiran sin aviso y
+# dejan el chat con 404 model_not_found (le paso a 'qwen/qwen3.6-27b', que
+# ademas nunca existio). Si Groq retira alguno, MODELOS_CHAT_RESPALDO deja
+# que el chat siga respondiendo en vez de caerse.
+MODELO_CHAT = os.environ.get("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
+MODELOS_CHAT_RESPALDO = ("llama-3.3-70b-versatile", "openai/gpt-oss-20b",
+                         "llama-3.1-8b-instant")
 DEFAULT_PROFILE = "media"
 
 # Perfiles copiados TAL CUAL del backend de Ollama (mismos system prompts y
@@ -2694,6 +2701,58 @@ def _modelo_chat_groq(model: Optional[str]) -> str:
     return MODELO_CHAT if (not m or ":" in m) else m
 
 
+def _candidatos_chat(modelo: str) -> list:
+    """El modelo pedido primero y, detras, los de respaldo sin repetir."""
+    orden = [modelo]
+    for m in MODELOS_CHAT_RESPALDO:
+        if m not in orden:
+            orden.append(m)
+    return orden
+
+
+def _modelo_no_existe(e) -> bool:
+    """¿Groq rechazo el modelo (retirado o mal escrito) y no la peticion?"""
+    if getattr(e, "status_code", None) != 404:
+        return False
+    t = str(e).lower()
+    return "model" in t and ("not_found" in t or "does not exist" in t
+                             or "decommissioned" in t)
+
+
+def _sin_reasoning_effort(e) -> bool:
+    """Un modelo no razonador rechaza reasoning_effort: se reintenta sin el."""
+    return (getattr(e, "status_code", None) in (400, 422)
+            and "reasoning_effort" in str(e).lower())
+
+
+def _completar_chat(messages: list, modelo: str, temperature, top_p, num_predict):
+    """Llama a Groq probando el modelo pedido y, si Groq lo retiro, los de
+    respaldo. Devuelve (respuesta, modelo_usado). El ultimo error se propaga
+    para que el endpoint lo traduzca como siempre."""
+    ultimo = None
+    for candidato in _candidatos_chat(modelo):
+        for extra in ({"reasoning_effort": "none"}, {}):
+            try:
+                resp = groq_client.chat.completions.create(
+                    model=candidato, messages=messages, temperature=temperature,
+                    top_p=top_p, max_tokens=num_predict, **extra)
+                if candidato != modelo:
+                    log.warning(f"/chat: '{modelo}' no esta disponible en Groq; "
+                                f"se respondio con '{candidato}'. Actualiza "
+                                f"GROQ_CHAT_MODEL.")
+                return resp, candidato
+            except APIStatusError as e:
+                ultimo = e
+                if _sin_reasoning_effort(e):
+                    continue            # mismo modelo, sin reasoning_effort
+                if _modelo_no_existe(e):
+                    log.warning(f"/chat: modelo '{candidato}' no existe en Groq; "
+                                f"probando el siguiente respaldo.")
+                    break               # siguiente candidato
+                raise                   # 429, 413, etc.: los traduce el endpoint
+    raise ultimo
+
+
 @app.get("/profiles")
 def chat_profiles():
     """Perfiles del copiloto de chat (mismos que el backend viejo de Ollama)."""
@@ -2720,22 +2779,20 @@ def chat(req: ChatRequest):
 
     start = time.perf_counter()
     try:
-        resp = groq_client.chat.completions.create(
-            model=modelo,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": mensaje},
-            ],
-            temperature=req.temperature,
-            top_p=req.top_p,
-            max_tokens=req.num_predict,
-            reasoning_effort="none",
-        )
+        resp, modelo = _completar_chat(
+            [{"role": "system", "content": system_prompt},
+             {"role": "user",   "content": mensaje}],
+            modelo, req.temperature, req.top_p, req.num_predict)
     except APIStatusError as e:
         if e.status_code in (413, 429):
             raise HTTPException(
                 429, "Límite de tokens por minuto del plan gratuito de Groq. "
                      "Espera un minuto y vuelve a intentar.")
+        if _modelo_no_existe(e):
+            raise HTTPException(
+                502, f"Groq no tiene el modelo de chat configurado ni ninguno de "
+                     f"los de respaldo ({', '.join(MODELOS_CHAT_RESPALDO)}). "
+                     f"Revisa GROQ_CHAT_MODEL contra console.groq.com/docs/models.")
         raise HTTPException(502, f"Error de Groq: {e}")
     except Exception as e:
         log.error(f"Error /chat: {e}")
