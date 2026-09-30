@@ -289,12 +289,21 @@ def mensaje_sistema_industrial(ruta: str = None) -> dict:
 # entera con la capa A, que es la que manda; mandar ademas la capa B solo gasta
 # tokens del limite por minuto y, cuando no cabe, Groq rechaza la peticion entera.
 #
-# Regla, en este orden:
-#   1. vocabulario de proceso industrial  -> SI (es lo que la capa B sabe leer)
-#   2. hardware/parametros concretos      -> NO (la capa A basta)
-#   3. nada de lo anterior (peticion vaga)-> SI (la capa B propone la base)
-# Ante la duda se manda: perder la capa B en una peticion conceptual cambiaria la
-# respuesta; mandarla de mas solo cuesta tokens.
+# Regla:
+#   1. la instruccion ya dice QUE hacer (2 o mas senales concretas: sensores,
+#      plumas, luces, Hz, segundos, conteos, direcciones) -> NO. La capa B no
+#      tiene nada que completar, aunque la frase mencione un proceso.
+#   2. vocabulario de proceso industrial -> SI (es lo que la capa B sabe leer)
+#   3. nada de lo anterior (peticion vaga) -> SI (la capa B propone la base)
+#
+# El umbral de 2 senales es lo que distingue "quiero clasificacion con la pluma 1"
+# (una sola senal, falta todo lo demas: la capa B ayuda) de "mueve la banda a la
+# izquierda, con S1 sube las dos plumas 5 segundos y al contar 3 la amarilla"
+# (instruccion completa: la capa B solo la haria mas lenta).
+#
+# La capa B no es gratis: ademas de sus ~2250 tokens, deja menos presupuesto para
+# la respuesta, y una instruccion larga que se queda corta de presupuesto acaba en
+# reintentos. Por eso una peticion especifica no debe arrastrarla.
 
 # Hardware, parametros y verbos que la capa A ya interpreta sola.
 _ESPECIFICO_TERMS = [
@@ -307,7 +316,9 @@ _ESPECIFICO_TERMS = [
     r"\bi\s?[1234]\b",
     r"\bderecha\b", r"\bizquierda\b", r"\bhorario\b", r"\bantihorario\b",
     r"\bavanz", r"\bmuev", r"\bmover\b", r"\barranc", r"\bcorre\b", r"\bgir[ae]",
-    r"\bdeten", r"\bpaus", r"\bparo\b", r"\bpara\b",
+    # "para" a secas NO cuenta: en "cajas para un pallet" es preposicion, no el
+    # verbo parar, y hacia pasar por especifica una peticion conceptual.
+    r"\bdeten", r"\bpaus", r"\bparo\b", r"\bparar\b", r"\bpara la banda\b",
     r"\bsub[ei]", r"\bbaj[ae]",
     r"\bcuent[ae]", r"\bcontar\b", r"\bconteo\b", r"\bcontador",
     r"\bdetect", r"\bdeteccion",
@@ -322,6 +333,17 @@ _VAGO_TERMS = [
     r"\bindustrial\b", r"\bfabrica", r"\bsimula", r"\bejemplo\b",
     r"\balgo\b", r"\bcomo (?:la|el|una?|en)\b", r"\btipo\b", r"\bestilo\b",
 ]
+
+# Cuantas senales concretas distintas bastan para considerar que la instruccion
+# ya dice QUE hacer y no necesita la capa B.
+MIN_SENALES_ESPECIFICAS = 2
+
+# El nombre del equipo NO es vocabulario de proceso. El router usa "\btransport"
+# para mandar "banda transportadora" a la banda, y eso esta bien ahi; pero aqui
+# hacia que CUALQUIER instruccion que dijera "banda transportadora" pareciera
+# conceptual y arrastrara la capa B. El proceso ("transporte", "transportar")
+# sigue contando: solo se descarta el sustantivo del equipo.
+_NOMBRE_EQUIPO_RE = re.compile(r"\btransportador(?:a|as|es)?\b")
 
 _ESPECIFICO_RE = [re.compile(x) for x in _ESPECIFICO_TERMS]
 _VAGO_RE = [re.compile(x) for x in _VAGO_TERMS]
@@ -350,31 +372,40 @@ def _terminos_proceso():
 _PROCESO_RE = None
 
 
-def requiere_contexto_industrial(texto: str) -> bool:
-    """¿Hay que mandarle la capa B al modelo para esta instruccion?"""
+def _senales(texto: str) -> tuple:
+    """(nº de senales concretas, hay vocabulario de proceso, hay forma vaga)."""
     global _PROCESO_RE
     if _PROCESO_RE is None:
         _PROCESO_RE = _terminos_proceso()
     t = _normalizar(texto)
-    if not t.strip():
+    # Para el vocabulario de proceso se ignora el nombre del equipo.
+    t_proceso = _NOMBRE_EQUIPO_RE.sub(" ", t)
+    return (sum(1 for r in _ESPECIFICO_RE if r.search(t)),
+            any(r.search(t_proceso) for r in _PROCESO_RE),
+            any(r.search(t) for r in _VAGO_RE))
+
+
+def requiere_contexto_industrial(texto: str) -> bool:
+    """¿Hay que mandarle la capa B al modelo para esta instruccion?"""
+    if not _normalizar(texto).strip():
         return True
-    if any(r.search(t) for r in _PROCESO_RE) or any(r.search(t) for r in _VAGO_RE):
-        return True
-    return not any(r.search(t) for r in _ESPECIFICO_RE)
+    concretas, proceso, vago = _senales(texto)
+    if concretas >= MIN_SENALES_ESPECIFICAS:
+        return False
+    return bool(proceso or vago or concretas == 0)
 
 
 def motivo_contexto_industrial(texto: str) -> str:
     """Explicacion corta de la decision, para el log."""
-    global _PROCESO_RE
-    if _PROCESO_RE is None:
-        _PROCESO_RE = _terminos_proceso()
-    t = _normalizar(texto)
-    if not t.strip():
+    if not _normalizar(texto).strip():
         return "peticion vacia"
-    if any(r.search(t) for r in _PROCESO_RE):
+    concretas, proceso, vago = _senales(texto)
+    if concretas >= MIN_SENALES_ESPECIFICAS:
+        return f"instruccion especifica ({concretas} senales concretas): la capa A basta"
+    if proceso:
         return "nombra un proceso industrial"
-    if any(r.search(t) for r in _VAGO_RE):
+    if vago:
         return "peticion conceptual o vaga"
-    if any(r.search(t) for r in _ESPECIFICO_RE):
-        return "instruccion especifica: la capa A basta"
+    if concretas:
+        return f"instruccion concreta ({concretas} senal): la capa A basta"
     return "sin senales concretas: peticion vaga"
