@@ -36,6 +36,22 @@ MODELO_STT    = os.environ.get("GROQ_STT_MODEL",    "whisper-large-v3")
 # con failed_generation: ''. 4096 es el valor probado en plc-llm-assistant
 # (test_con_contexto.py v10) que funciona con este mismo modelo.
 MAX_COMPLETION_TOKENS = int(os.environ.get("MAX_COMPLETION_TOKENS", "4096"))
+
+# Presupuesto de tokens por minuto (TPM) del plan. Groq no cuenta solo el
+# prompt: reserva prompt + max_tokens, asi que una peticion se rechaza ANTES de
+# generar nada si la suma pasa el limite. Con la capa B de la banda el prompt
+# crecio hasta ~8400 tokens y ninguna peticion de banda cabia: Groq respondia
+# 429 siempre y esperar un minuto no servia de nada.
+GROQ_TPM_LIMIT = int(os.environ.get("GROQ_TPM_LIMIT", "8000"))
+# Colchon para lo que el estimador no ve (plantilla de chat, response_format).
+TOKENS_MARGEN = int(os.environ.get("GROQ_TOKENS_MARGEN", "200"))
+# Piso de la respuesta: por debajo de esto el modelo razonador se queda sin
+# presupuesto y devuelve JSON vacio. 2000 es el valor que el reintento de
+# llamar_modelo_json ya venia usando con exito.
+MIN_COMPLETION_TOKENS = int(os.environ.get("MIN_COMPLETION_TOKENS", "2000"))
+# Caracteres por token del prompt. Medido sobre estos prompts: 3.19 (capa A),
+# 3.38 (maletin), 3.81 (capa B). Se usa el extremo bajo para NO subestimar.
+CHARS_POR_TOKEN = 3.2
 IDIOMA_STT    = os.environ.get("GROQ_STT_LANGUAGE", "es")
 MAX_AUDIO_MB  = int(os.environ.get("MAX_AUDIO_MB",  "25"))
 
@@ -1557,6 +1573,34 @@ def validar_estructura_datos(datos: dict) -> dict:
     return datos
 
 
+def _estimar_tokens_prompt(messages: list) -> int:
+    """Tokens aproximados del prompt. No hace falta que sea exacto: solo evita
+    pedirle a Groq mas de lo que cabe en el minuto."""
+    chars = sum(len(str(m.get("content") or "")) for m in messages)
+    return int(chars / CHARS_POR_TOKEN) + 4 * len(messages)
+
+
+def _presupuesto_completion(messages: list) -> int:
+    """Cuanto max_tokens se puede pedir sin pasarse del limite por minuto.
+
+    Nunca sube de MAX_COMPLETION_TOKENS (el maletin, cuyo prompt es la tercera
+    parte, sigue recibiendo exactamente los 4096 de siempre) y nunca baja de
+    MIN_COMPLETION_TOKENS, para no ahogar al modelo razonador."""
+    prompt = _estimar_tokens_prompt(messages)
+    disponible = GROQ_TPM_LIMIT - prompt - TOKENS_MARGEN
+    presupuesto = max(MIN_COMPLETION_TOKENS, min(MAX_COMPLETION_TOKENS, disponible))
+    if presupuesto < MAX_COMPLETION_TOKENS:
+        log.info(f"Prompt ~{prompt} tokens: max_tokens se ajusta a {presupuesto} "
+                 f"(limite {GROQ_TPM_LIMIT}/min).")
+    if prompt + presupuesto + TOKENS_MARGEN > GROQ_TPM_LIMIT:
+        log.warning(
+            f"El prompt (~{prompt} tokens) mas la respuesta minima ({presupuesto}) "
+            f"pasan del limite de {GROQ_TPM_LIMIT} tokens/minuto: Groq puede "
+            "rechazar la peticion. Revisa el tamano de los prompts y de los "
+            "ejemplos de memoria que se inyectan.")
+    return presupuesto
+
+
 def _crear_completion(messages: list, max_tokens: int, con_formato: bool = True):
     if groq_client is None:
         raise HTTPException(
@@ -1578,25 +1622,30 @@ def llamar_modelo_json(messages: list) -> dict:
       json_object; se reintenta SIN response_format y se extrae el JSON
       del texto a mano.
     - 413/429 (limite de tokens del plan gratuito): se reintenta con un
-      max_tokens reducido."""
+      max_tokens reducido.
+
+    max_tokens se calcula antes de llamar (_presupuesto_completion) para que
+    prompt + respuesta quepan en el limite por minuto: el 429 pasa a ser la
+    ultima red, no el caso normal."""
+    presupuesto = _presupuesto_completion(messages)
     try:
-        resp = _crear_completion(messages, MAX_COMPLETION_TOKENS)
+        resp = _crear_completion(messages, presupuesto)
     except APIStatusError as e:
         cuerpo = str(getattr(e, "body", "") or e)
         if e.status_code == 400 and "json_validate_failed" in cuerpo:
             log.warning("Groq devolvio json_validate_failed; "
                         "reintentando sin response_format...")
             try:
-                resp = _crear_completion(messages, MAX_COMPLETION_TOKENS,
+                resp = _crear_completion(messages, presupuesto,
                                          con_formato=False)
             except APIStatusError as e2:
                 raise ValueError(
                     f"Groq rechazo la peticion tambien sin modo JSON: {e2}")
         elif e.status_code in (413, 429):
-            log.warning(f"Groq {e.status_code} (limite de tokens); "
-                        "reintentando con max_tokens=2000...")
+            log.warning(f"Groq {e.status_code} (limite de tokens); reintentando "
+                        f"con max_tokens={MIN_COMPLETION_TOKENS}...")
             try:
-                resp = _crear_completion(messages, 2000)
+                resp = _crear_completion(messages, MIN_COMPLETION_TOKENS)
             except APIStatusError:
                 raise ValueError(
                     "Groq rechazo la peticion por el limite de tokens por "
@@ -2130,9 +2179,21 @@ def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
     # mensaje ADICIONAL detras del anterior. Solo AGREGA lectura conceptual: no
     # reemplaza ninguna regla de la capa A ni decide registros. Si falla, la
     # banda sigue funcionando exactamente como antes.
+    #
+    # Se manda SOLO cuando la peticion tiene algo conceptual que traducir. Una
+    # instruccion especifica ("cuando S1 detecte sube la pluma 1") se resuelve
+    # entera con la capa A; mandar tambien la capa B solo gastaba tokens del
+    # limite por minuto del plan gratuito y hacia que Groq rechazara la peticion
+    # completa (429). La decision la toma banda_contexto, no esta funcion.
     try:
         import banda_contexto
-        messages.append(banda_contexto.mensaje_sistema_industrial())
+        if banda_contexto.requiere_contexto_industrial(texto):
+            messages.append(banda_contexto.mensaje_sistema_industrial())
+            log.info("Banda: se agrega el contexto industrial (capa B) — "
+                     + banda_contexto.motivo_contexto_industrial(texto))
+        else:
+            log.info("Banda: sin capa B — "
+                     + banda_contexto.motivo_contexto_industrial(texto))
     except Exception as e:
         log.warning(f"Contexto industrial de la banda no disponible (se ignora): {e}")
     if req.contexto:
