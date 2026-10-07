@@ -26,6 +26,15 @@ TIPO FISICO:
   I1, I3, I4 = NA
   I2, I7     = NC
 
+  El Ladder maestro invierte las NC: para el motor TODAS las fuentes (arranque,
+  segunda fuente, paro, habilitacion, paro general, reset de contador)
+  significan "presionado". Requiere el ST con la habilitacion leyendo X[]
+  (version "TON y enable"); la version anterior la leia en crudo (Xr[]).
+
+TIMER (modo 1 = on_delay): retardo a la conexion (TON). Al caer la logica base
+  (o con paro general / deshabilitado) el acumulado vuelve a 0. Mide con el
+  pulso de 1 s del PLC: un preset de N dura entre N-1 y N segundos.
+
 ----------------------------------------------------------------------------
 MAPA DE REGISTROS %R
 ----------------------------------------------------------------------------
@@ -112,7 +121,7 @@ MODE_DIRECTO = 1
 MODE_ENCLAVADO = 2
 
 TIMER_OFF = 0
-TIMER_RET_ON_DELAY = 1
+TIMER_ON_DELAY = 1
 TIMER_PULSO_TEMPORIZADO = 2
 
 COUNTER_OFF = 0
@@ -393,10 +402,10 @@ class XL4:
         if segundos < 0 or segundos > 32767:
             raise ValueError("El preset del timer debe estar entre 0 y 32767 segundos.")
 
-        self._w(R(base + 6), TIMER_RET_ON_DELAY)
+        self._w(R(base + 6), TIMER_ON_DELAY)
         self._w(R(base + 7), segundos)
 
-        print(f"{salida}: TIMER retentivo configurado a {segundos} s")
+        print(f"{salida}: TIMER a la conexion (TON) configurado a {segundos} s")
 
     def configurar_pulso_salida(self, salida, segundos):
         """

@@ -30,6 +30,13 @@ def _tiene_entrada_base(lg: dict) -> bool:
     return False
 
 
+def _base_enclavada(lg: dict) -> bool:
+    """True si la logica base se auto-retiene: 'enclavado' o 'combinacional'
+    con latched. Es la unica forma en que el Ladder maestro lee el paro."""
+    mode = str((lg or {}).get("mode", "off")).lower()
+    return mode == "enclavado" or (mode == "combinacional" and bool(lg.get("latched")))
+
+
 def validar_semantica(cfg: dict, perfil: dict) -> dict:
     """Devuelve {'errors': [...], 'warnings': [...]}."""
     errors, warnings = [], []
@@ -56,8 +63,9 @@ def validar_semantica(cfg: dict, perfil: dict) -> dict:
         if mode != "off" and modes_ok and mode not in modes_ok:
             errors.append(f"{tag}: el PLC de este perfil no soporta el modo '{mode}'.")
 
-        # 2. Contador: requiere una logica base con entrada (con 'off' no hay pulsos
-        #    que contar y la salida nunca prenderia).
+        # 2. Contador: cuenta las ACTIVACIONES de la logica base (flanco de subida).
+        #    Con 'off' no hay nada que contar; con una base enclavada solo hay una
+        #    activacion por ciclo de arranque-paro, no una por pulsacion.
         ct = o.get("counter")
         if ct:
             ctype = str(ct.get("type", "")).lower()
@@ -65,8 +73,25 @@ def validar_semantica(cfg: dict, perfil: dict) -> dict:
                 errors.append(f"{tag}: el perfil no soporta el contador '{ctype}'.")
             if not _tiene_entrada_base(lg):
                 errors.append(f"{tag}: el contador necesita una logica base con entrada "
-                              f"(source en 'directo' o start en 'enclavado'); con 'off' "
+                              f"(source en 'directo' o a/b en 'combinacional'); con 'off' "
                               f"no hay pulsos que contar.")
+            elif _base_enclavada(lg):
+                errors.append(f"{tag}: el contador cuenta las activaciones de la logica base, "
+                              f"y una base enclavada solo se activa una vez por ciclo de "
+                              f"arranque-paro. Usa base 'directo' con source = la entrada "
+                              f"que se cuenta (y up_held si debe quedar encendida).")
+            # El Ladder maestro aplica up_held DESPUES del timer y sobrescribe su
+            # resultado: el timer de esa salida no tendria ningun efecto.
+            if ctype == "up_held" and o.get("timer"):
+                errors.append(f"{tag}: con counter 'up_held' el PLC ignora el timer de la "
+                              f"misma salida. Quita el timer o usa counter 'up'.")
+
+        # 2b. Paro: el Ladder maestro solo lee 'stop' en logicas enclavadas; en
+        #     'directo' o 'combinacional' sin latched se ignoraria en silencio.
+        if lg.get("stop") and not _base_enclavada(lg):
+            errors.append(f"{tag}: el PLC solo usa 'stop' en logicas enclavadas "
+                          f"('enclavado' o 'combinacional' con latched:true); aqui se "
+                          f"ignoraria. Quita el stop o enclava la salida.")
 
         # 3. Timer: capacidad soportada por el perfil.
         tm = o.get("timer")

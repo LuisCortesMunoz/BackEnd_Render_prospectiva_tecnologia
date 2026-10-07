@@ -241,13 +241,21 @@ CADA salida tiene UNA logica base (elige una):
   - "off"            -> apagada.
   - "directo"        -> source (entrada), enable opcional. La salida sigue a source
                         SOLO mientras la entrada este activa (al soltar, se apaga).
+                        NO lleva stop: el PLC no lee paro en esta logica.
   - "enclavado"      -> start (arranque), stop opcional (paro), enable opcional.
                         AUTO-RETENCION: la salida se queda ENCENDIDA al soltar el
-                        arranque, y solo se apaga con el paro (stop).
+                        arranque, y solo se apaga con el paro (stop). Si se pulsan
+                        arranque y paro a la vez, gana el paro.
   - "combinacional"  -> a, b (dos entradas), op "OR"|"AND", latched opcional, stop opcional.
+                        "OR": prende con a o con b. "AND": prende solo con a y b
+                        PRESIONADAS a la vez.
                         Usa latched:true cuando la combinacion debe QUEDARSE encendida.
+                        El stop SOLO tiene efecto con latched:true (sin enclavar se ignora).
                         En "AND" NO se permite enable (el 2do operando ocupa ese lugar).
 Solo se pueden combinar 2 entradas como maximo por salida.
+"enable" (habilitacion) = la salida solo puede estar encendida MIENTRAS esa entrada
+este PRESIONADA. Todas las entradas significan "presionado", tambien las NC (I2, I7):
+el PLC ya invierte su cableado, tu no lo hagas.
 
 CUANDO USAR "enclavado" (MUY IMPORTANTE):
 Si el usuario usa palabras como enclavar, enclavamiento, se queda/quede encendida,
@@ -266,18 +274,29 @@ la salida se encenderia desde el PRIMER pulso en vez de al llegar al conteo.
 
 CAPAS OPCIONALES por salida (independientes):
   - timer:   {"type":"on_delay"|"pulse","preset_s":N}  (segundos enteros; on_delay 0..32767, pulse 1..32767)
+      - "on_delay" -> retardo a la conexion (TON): la salida enciende cuando la logica base
+                      lleva N segundos activa sin interrupcion. Al soltar se apaga y el
+                      tiempo vuelve a empezar de cero en la siguiente activacion.
+      - "pulse"    -> al ACTIVARSE la logica base, la salida enciende N segundos y se apaga
+                      sola, AUNQUE sueltes antes. Si la base se vuelve a activar mientras esta
+                      encendida, el tiempo vuelve a contar desde cero.
+      El PLC mide el tiempo con un pulso de 1 s: la duracion real es de N-1 a N segundos.
   - counter: {"type":"up"|"up_held","preset":N,"reset_input":"I4"|null}  (up 0..32767, up_held 1..32767)
-    El contador cuenta los PULSOS de la entrada de la logica base (el "source" si la base
-    es "directo", el "start" si es "enclavado"). Esa entrada base es la que se cuenta, por
-    eso una salida con counter SIEMPRE necesita una logica base con una entrada: NUNCA "off"
-    (con "off" no hay nada que contar y la salida jamas prende).
+    El contador cuenta las ACTIVACIONES de la logica base (cada vez que pasa de apagada a
+    encendida). Por eso la base de un contador debe ser "directo" (cuenta los pulsos de
+    source) o "combinacional" SIN latched (cuenta las veces que se cumple la combinacion).
+    NUNCA "off" (no hay nada que contar) ni "enclavado"/latched (contaria ciclos de
+    arranque-paro, no pulsos).
       - "up"      -> la salida prende SOLO mientras la entrada base siga activa Y conteo >= preset.
       - "up_held" -> la salida se ENCIENDE y SE QUEDA encendida al llegar el conteo al preset,
                      aunque sueltes la entrada; solo se apaga con el reset_input.
+                     NO lleva timer en la misma salida: up_held manda y el timer se ignoraria.
     reset_input = entrada fisica que regresa el conteo a cero (opcional).
 
 GLOBAL:
   - system.enable (bool, normalmente true) y system.global_stop (entrada de paro general o null).
+    El paro general apaga todas las salidas y quita los enclavamientos mientras este
+    presionado; los conteos acumulados se conservan.
 
 SECUENCIAS TEMPORIZADAS (semaforo / pasos uno tras otro) — MUY IMPORTANTE:
 La logica por salida de arriba NO puede encadenar etapas (una salida no puede
@@ -1496,11 +1515,14 @@ def es_enclavamiento(pregunta: str) -> bool:
 
 
 def _tiene_latch(cfg: dict) -> bool:
-    """True si al menos una salida del engine-config tiene enclavamiento real."""
+    """True si al menos una salida del engine-config se queda encendida por si
+    sola: enclavamiento real, o un contador up_held (el "se enclava al llegar al
+    conteo" que pide el prompt, donde la base debe ser 'directo')."""
     return any(
         (o.get("logic", {}).get("mode") == "enclavado")
         or (o.get("logic", {}).get("mode") == "combinacional"
             and o.get("logic", {}).get("latched"))
+        or str((o.get("counter") or {}).get("type", "")).lower() == "up_held"
         for o in cfg.get("outputs", [])
     )
 
@@ -2577,6 +2599,13 @@ async def generar_logica(req: LogicaRequest):
         try:
             cfg2 = llamar_modelo_json(retry_msgs)
             errs2 = validar_logica_config(cfg2, perfil_validador)
+            # El reintento tampoco puede colar algo que el PLC ignoraria (p. ej.
+            # contador sobre base enclavada): mismo filtro semantico del bucle.
+            if not errs2 and AGENT_SEMANTIC_ENABLED and perfil_activo is not None:
+                try:
+                    errs2 = agent_validators.validar_semantica(cfg2, perfil_activo).get("errors", []) or []
+                except Exception as e:
+                    log.warning(f"Validacion semantica del retry fallo (se ignora): {e}")
             if not errs2 and _tiene_latch(cfg2):
                 cfg = normalizar_logica_config(cfg2)
                 warnings = list(cfg.get("system", {}).get("warnings", []) or [])

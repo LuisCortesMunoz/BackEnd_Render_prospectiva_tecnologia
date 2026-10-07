@@ -16,21 +16,24 @@ from agents import clarify
 FRAGMENTOS = {
     "temporizador":
         "TEMPORIZADOR: usa timer {type: on_delay|pulse, preset_s en SEGUNDOS}. "
-        "on_delay retrasa el encendido; pulse enciende y se apaga solo al vencer el "
-        "tiempo. Convierte minutos a segundos.",
+        "on_delay es un TON: enciende tras N s de base activa y, al soltar, el tiempo "
+        "vuelve a cero; pulse enciende N s con la activacion y se apaga solo aunque "
+        "sueltes. Convierte minutos a segundos.",
     "contador":
-        "CONTADOR: usa counter {type: up|up_held, preset, reset_input}. La logica "
-        "base DEBE tener entrada (source en 'directo' o start en 'enclavado'): esos "
-        "son los pulsos que se cuentan. 'se enclava/queda encendida al llegar al "
-        "conteo' -> up_held (NO uses mode 'enclavado').",
+        "CONTADOR: usa counter {type: up|up_held, preset, reset_input}. Cuenta las "
+        "activaciones de la logica base, asi que la base DEBE ser 'directo' (source = "
+        "la entrada que se cuenta) o 'combinacional' sin latched; nunca 'enclavado'. "
+        "'se enclava/queda encendida al llegar al conteo' -> up_held, sin timer en "
+        "esa salida.",
     "enclavamiento":
         "ENCLAVAMIENTO: usa logic.mode 'enclavado' con start (arranque) y stop "
         "(paro). La salida se queda encendida al soltar el arranque y se apaga con "
         "el paro. Si el enclavamiento lo produce un conteo, hazlo con el contador.",
     "combinacional":
         "COMBINACIONAL: si DOS entradas gobiernan una salida, usa logic.mode "
-        "'combinacional' con a, b y op (OR|AND). En AND no uses enable. Usa "
-        "latched:true si la combinacion debe quedar retenida.",
+        "'combinacional' con a, b y op (OR|AND); AND = ambas presionadas a la vez. "
+        "En AND no uses enable. Usa latched:true si la combinacion debe quedar "
+        "retenida; el stop solo funciona con latched:true.",
     "secuencia":
         "SECUENCIA/SEMAFORO: si las salidas se encienden EN ORDEN por tiempo, usa el "
         "bloque 'sequence' {start, mode, steps:[{outputs, duration_s}]} y deja "
