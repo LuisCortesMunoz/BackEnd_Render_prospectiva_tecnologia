@@ -745,9 +745,12 @@ def validar_logica_banda(cfg: dict) -> list:
     entorno de solo generacion), cae a una validacion minima equivalente."""
     try:
         import plc_banda
+    except Exception as e:
+        # No solo ImportError: pymodbus 3.16 sin pyserial revienta al importarse
+        # con NameError, y eso tumbaba /generar-logica con un 500.
+        log.warning(f"plc_banda no disponible, validacion minima de la banda: {e!r}")
+    else:
         return plc_banda.validar_config(cfg)
-    except ImportError:
-        pass
 
     errores = []
     if not isinstance(cfg, dict):

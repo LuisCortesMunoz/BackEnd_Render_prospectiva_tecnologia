@@ -5,4 +5,7 @@ pymupdf
 python-dotenv
 pydantic
 python-multipart
-pymodbus
+# Fijado a la version probada: pymodbus 3.16.0 sin pyserial falla al importarse
+# (NameError: name 'pyserial' is not defined) y tumbaba /generar-logica de la banda.
+pymodbus==3.13.0
+pyserial
