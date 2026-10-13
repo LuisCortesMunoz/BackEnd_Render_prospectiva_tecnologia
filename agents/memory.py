@@ -24,12 +24,46 @@ def es_ejemplo_logica(e: dict) -> bool:
             and isinstance(e["datos"].get("engine_config"), dict))
 
 
-def es_ejemplo_banda(e: dict) -> bool:
-    """True si el ejemplo es de la banda (intencion + configuracion canonica)."""
+def _es_banda(e) -> bool:
     return (isinstance(e, dict)
             and e.get("device") == "banda"
             and isinstance(e.get("datos"), dict)
             and isinstance(e["datos"].get("engine_config"), dict))
+
+
+def _usa_motor(e) -> bool:
+    band = e["datos"]["engine_config"].get("band") or {}
+    return isinstance(band, dict) and isinstance(band.get("engine"), dict)
+
+
+def es_ejemplo_banda(e: dict) -> bool:
+    """True si el ejemplo es de la banda v5 (intencion + configuracion canonica).
+    Los del motor configurable (ST v6) usan otro esquema y no se mezclan."""
+    return _es_banda(e) and not _usa_motor(e)
+
+
+def es_ejemplo_banda_motor(e: dict) -> bool:
+    """True si el ejemplo es del motor configurable de la banda (ST v6)."""
+    return _es_banda(e) and _usa_motor(e)
+
+
+def bloque_banda_motor_prompt(ejemplos: list) -> str:
+    """Ejemplos validados del motor configurable: se muestra el JSON de bloques
+    que el LLM devolvio, que es lo que debe volver a producir."""
+    ejemplos = [e for e in (ejemplos or []) if es_ejemplo_banda_motor(e)]
+    if not ejemplos:
+        return ""
+    partes = ["EJEMPLOS DEL MOTOR DE LA BANDA VALIDADOS POR EL USUARIO:",
+              "Si la peticion es parecida, conecta los bloques igual; respeta las correcciones."]
+    for i, e in enumerate(ejemplos, 1):
+        cfg = e["datos"]["engine_config"]
+        partes.append(f"\n--- Ejemplo {i} [{e.get('status')}] ---")
+        partes.append(f"Peticion: {e.get('user_prompt', '')}")
+        if e.get("user_correction"):
+            partes.append(f"Correccion del usuario: {e['user_correction']}")
+        cuerpo = cfg.get("respuesta_llm") or {"name": cfg.get("name"), "band": cfg.get("band")}
+        partes.append("JSON: " + json.dumps(cuerpo, ensure_ascii=False, separators=(",", ":"))[:1500])
+    return "\n".join(partes)
 
 
 def bloque_banda_prompt(ejemplos: list) -> str:

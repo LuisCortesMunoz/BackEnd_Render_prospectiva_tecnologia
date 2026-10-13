@@ -1,0 +1,2879 @@
+(* MASTER BANDA - HORNER / CSCAPE ST - v5 COMBINABLE          *)
+(*                                                            *)
+(* OBJETIVO v5:                                               *)
+(* - S1/S2 son eventos generales independientes de la banda.  *)
+(* - Cada deteccion puede ejecutar acciones inmediatas.        *)
+(* - El contador trabaja EN PARALELO al evento inmediato.      *)
+(* - Al alcanzar CountPreset puede combinar: pausa de banda,   *)
+(*   stop de proceso, luces, direccion y ambas plumas.         *)
+(* - Las acciones temporales del contador pueden ser           *)
+(*   enclavadas o temporizadas.                                *)
+(* - Existe una lampara temporizada independiente.             *)
+(*                                                            *)
+(* DirCmd:                                                     *)
+(*   0 = sin movimiento                                        *)
+(*   1 = Direccion 1 / derecha -> VFD control 18              *)
+(*   2 = Direccion 2 / izquierda -> VFD control 34            *)
+(*                                                            *)
+(* StopMode (%R9):                                             *)
+(*   0 = I3 solamente                                         *)
+(*   1 = I2 + I3                                              *)
+(*   2 = Stop software/enclavamiento + I3                     *)
+(*   3 = I2 + Stop software/enclavamiento + I3                *)
+(* I3 SIEMPRE tiene prioridad y no se puede deshabilitar.     *)
+(*                                                            *)
+(* Sensor Action (accion inmediata de CADA deteccion):         *)
+(*   0 = evento sin parar banda                               *)
+(*   1 = pausa banda mientras sensor activo                    *)
+(*   2 = pausa/evento por tiempo                               *)
+(*   3 = igual a 1; torreta se define por TorretaMask         *)
+(*   4 = igual a 2; torreta se define por TorretaMask         *)
+(* Sensor BandMode: 0=Action puede pausar banda;               *)
+(*                  1=evento auxiliar sin pausar banda.        *)
+(*                                                            *)
+(* IMPORTANTE v5: CountPreset YA NO bloquea la accion          *)
+(* inmediata. Ejemplo: S1 puede subir una pluma en cada pieza  *)
+(* y, simultaneamente, al conteo 3 encender una luz.           *)
+(*                                                            *)
+(* CountActionMask R70/R75:                                   *)
+(*   1  = pausar banda por contador                            *)
+(*   2  = detener proceso completo (enclavado hasta R5/R6)     *)
+(*   4  = luces segun CountLampMask                            *)
+(*   8  = cambiar direccion de forma segura                    *)
+(*   16 = comando Pluma 1                                      *)
+(*   32 = comando Pluma 2                                      *)
+(*   Se SUMAN para combinar acciones.                          *)
+(*                                                            *)
+(* CountHoldMode R88/R92:                                     *)
+(*   0 = acciones temporales quedan enclavadas hasta R5/R6     *)
+(*   1 = acciones temporales duran CountHoldPreset segundos    *)
+(* Aplica a pausa de banda + luces + plumas del contador.      *)
+(* El stop total de proceso permanece enclavado por seguridad  *)
+(* de proceso; el cambio de direccion es persistente.          *)
+(*                                                            *)
+(* Lampara temporizada independiente:                          *)
+(*   R96=mask, R97=segundos, R98=trigger 1,2,3..., R99=active. *)
+(*                                                            *)
+(* TorretaMask: bit0 verde, bit1 amarilla, bit2 roja (0..7).   *)
+(* Las fuentes de luz se SUMAN: RUN/IDLE + S1 + S2 + I1 +      *)
+(* contador + lampara temporizada. I3 apaga todas.             *)
+(*                                                            *)
+(* PlumaCmd: 0=Stop, 1=Subir, 2=Bajar; sensor/count acepta 3=stop. *)
+(* Mapeo fisico confirmado:                                   *)
+(*   Pluma 1: Q8 SUBE / Q9 BAJA                               *)
+(*   Pluma 2: Q6 SUBE / Q7 BAJA                               *)
+(* ============================================================ *)
+
+
+(* ============================================================ *)
+(* §0 - PRIMER SCAN                                            *)
+(* Restaurar RETAIN y dejar actuadores en estado seguro.       *)
+(* ============================================================ *)
+
+IF FST_SCN THEN
+
+    DirCmd          := R_DirCmd ;
+    FreqRequest     := R_FreqRequest ;
+
+    StopMode        := R_StopMode ;
+    AutoStopMode    := R_AutoStopMode ;
+    AutoStopPreset  := R_AutoStopPreset ;
+
+    S1_BandMode     := R_S1_BandMode ;
+    S2_BandMode     := R_S2_BandMode ;
+
+    S1_Enable       := R_S1_Enable ;
+    S1_Action       := R_S1_Action ;
+    S1_TimerPreset  := R_S1_TimerPreset ;
+    S1_CountPreset  := R_S1_CountPreset ;
+    S1_TorretaMask  := R_S1_TorretaMask ;
+    S1_CountAccum   := R_S1_CountAccum ;
+    S1_Pluma1Cmd    := R_S1_Pluma1Cmd ;
+    S1_Pluma2Cmd    := R_S1_Pluma2Cmd ;
+
+    S2_Enable       := R_S2_Enable ;
+    S2_Action       := R_S2_Action ;
+    S2_TimerPreset  := R_S2_TimerPreset ;
+    S2_CountPreset  := R_S2_CountPreset ;
+    S2_TorretaMask  := R_S2_TorretaMask ;
+    S2_CountAccum   := R_S2_CountAccum ;
+    S2_Pluma1Cmd    := R_S2_Pluma1Cmd ;
+    S2_Pluma2Cmd    := R_S2_Pluma2Cmd ;
+
+    S1_CountActionMask := R_S1_CountActionMask ;
+    S1_CountLampMask   := R_S1_CountLampMask ;
+    S1_CountDirTarget  := R_S1_CountDirTarget ;
+    S1_CountPluma1Cmd  := R_S1_CountPluma1Cmd ;
+    S1_CountPluma2Cmd  := R_S1_CountPluma2Cmd ;
+
+    S2_CountActionMask := R_S2_CountActionMask ;
+    S2_CountLampMask   := R_S2_CountLampMask ;
+    S2_CountDirTarget  := R_S2_CountDirTarget ;
+    S2_CountPluma1Cmd  := R_S2_CountPluma1Cmd ;
+    S2_CountPluma2Cmd  := R_S2_CountPluma2Cmd ;
+
+    S1_CountHoldMode   := R_S1_CountHoldMode ;
+    S1_CountHoldPreset := R_S1_CountHoldPreset ;
+    S2_CountHoldMode   := R_S2_CountHoldMode ;
+    S2_CountHoldPreset := R_S2_CountHoldPreset ;
+
+    TimedLampMask      := R_TimedLampMask ;
+    TimedLampPreset    := R_TimedLampPreset ;
+
+    TorretaRun      := R_TorretaRun ;
+    TorretaIdle     := R_TorretaIdle ;
+
+    S1_CountDone    := R_S1_CountDone ;
+    S2_CountDone    := R_S2_CountDone ;
+
+
+    (* Estado seguro al arrancar *)
+
+    BandEnable      := FALSE ;
+    GenStop         := FALSE ;
+    BandRunning     := FALSE ;
+
+    HardStopActive  := FALSE ;
+    AuxStopActive   := FALSE ;
+    SoftStopActive  := FALSE ;
+
+    SoftStopCmd     := 0 ;
+    StopReason      := 0 ;
+
+    AutoStopAccum    := 0 ;
+    AutoStopDone     := FALSE ;
+    AutoStopDone_Reg := 0 ;
+    AutoStopRunIntent := FALSE ;
+
+    CountBandStopLatch   := FALSE ;
+    CountSystemStopLatch := FALSE ;
+    SystemStopActive     := FALSE ;
+    CountStopSource      := 0 ;
+
+    S1_CountBandPauseActive := FALSE ;
+    S2_CountBandPauseActive := FALSE ;
+    S1_CountActionActive    := FALSE ;
+    S2_CountActionActive    := FALSE ;
+    S1_CountLampActiveMask  := 0 ;
+    S2_CountLampActiveMask  := 0 ;
+
+    S1_CountHoldAccum       := 0 ;
+    S2_CountHoldAccum       := 0 ;
+    S1_CountActionActive_Reg := 0 ;
+    S2_CountActionActive_Reg := 0 ;
+
+    CountBandStop_Reg        := 0 ;
+    CountSystemStop_Reg      := 0 ;
+    CountLampLatchedMask     := 0 ;
+    CountDirChangeActive_Reg := 0 ;
+    CountActionSource_Reg    := 0 ;
+    CountDirTarget_Reg       := 0 ;
+    CountPluma1Override_Reg  := 0 ;
+    CountPluma2Override_Reg  := 0 ;
+
+    CountLampGreen  := FALSE ;
+    CountLampYellow := FALSE ;
+    CountLampRed    := FALSE ;
+
+    S1_CountP1Active     := FALSE ;
+    S1_CountP2Active     := FALSE ;
+    S2_CountP1Active     := FALSE ;
+    S2_CountP2Active     := FALSE ;
+    S1_CountP1LatchedCmd := 0 ;
+    S1_CountP2LatchedCmd := 0 ;
+    S2_CountP1LatchedCmd := 0 ;
+    S2_CountP2LatchedCmd := 0 ;
+
+    TimedLampActive       := FALSE ;
+    TimedLampAccum        := 0 ;
+    TimedLampActive_Reg   := 0 ;
+    TimedLampPrev         := TimedLampTrigger ;
+    TimedLampTriggerPulse := FALSE ;
+
+    CountDirChangeActive  := FALSE ;
+    CountDirChangeState   := 0 ;
+    CountDirChangeTimer   := 0 ;
+    CountDirTargetPending := 0 ;
+    CountRequestedDir     := 0 ;
+
+    CfgReady        := FALSE ;
+    CfgReady_Reg    := 0 ;
+
+    VFD_Control     := 1 ;
+    VFD_ResetReg    := 0 ;
+    VFD_FreqCalc    := 0 ;
+    VFD_SpeedDisp   := 0 ;
+
+    BandEnable_Reg  := 0 ;
+    BandStatus      := 0 ;
+
+
+    (* Estados de sensores *)
+
+    S1_StopLatch     := FALSE ;
+    S1_WaitActive    := FALSE ;
+    S1_EventActive   := FALSE ;
+    S1_EventActive_Reg := 0 ;
+
+    S2_StopLatch     := FALSE ;
+    S2_WaitActive    := FALSE ;
+    S2_EventActive   := FALSE ;
+    S2_EventActive_Reg := 0 ;
+
+    S1_TimerAccum    := 0 ;
+    S2_TimerAccum    := 0 ;
+
+
+    (* Inicializacion VFD *)
+
+    InitTimerAccum  := 0 ;
+    tmpDir          := 1 ;
+
+
+    (* Evitar falsos flancos al encender *)
+
+    BtnStartPrev    := PhIn1 ;
+    S1_DetPrev      := NOT PhIn4 ;
+    S2_DetPrev      := NOT PhIn5 ;
+    Prev1s          := Sys1Sec ;
+
+    BtnStartRising   := FALSE ;
+    S1_Rising        := FALSE ;
+    S2_Rising        := FALSE ;
+    S1_ActionTrigger     := FALSE ;
+    S2_ActionTrigger     := FALSE ;
+    S1_CountReachedPulse := FALSE ;
+    S2_CountReachedPulse := FALSE ;
+    Pulse1s              := FALSE ;
+
+
+    (* No interpretar registros viejos como comandos nuevos *)
+
+    NewCfgPrev      := NewCfgFlag ;
+    ResetCmdPrev    := ResetCmd ;
+
+    NewCfgTrigger   := FALSE ;
+    ResetCmdTrigger := FALSE ;
+
+
+    (* Torreta segura *)
+
+    tVerde          := FALSE ;
+    tAmarilla       := FALSE ;
+    tRoja           := FALSE ;
+
+    PhQ3            := FALSE ;
+    PhQ4            := FALSE ;
+    PhQ5            := FALSE ;
+
+    I1_LampMask     := 0 ;
+
+
+    (* Plumas seguras *)
+
+    PhQ6            := FALSE ;
+    PhQ7            := FALSE ;
+    PhQ8            := FALSE ;
+    PhQ9            := FALSE ;
+
+    Pluma1Cmd       := 0 ;
+    Pluma2Cmd       := 0 ;
+
+    EffPluma1Cmd    := 0 ;
+    EffPluma2Cmd    := 0 ;
+
+    Pluma1Status    := 0 ;
+    Pluma2Status    := 0 ;
+
+
+    (* Si existe configuracion valida previa, preparar VFD *)
+
+    IF (R_FreqRequest > 0) AND
+       ((R_DirCmd = 1) OR (R_DirCmd = 2)) THEN
+
+        InitSeqState := 1 ;
+
+    ELSE
+
+        InitSeqState := 0 ;
+
+    END_IF ;
+
+END_IF ;
+
+
+(* ============================================================ *)
+
+
+(* §1 - PULSO DE 1 SEGUNDO                                     *)
+(* %S5 es reloj ciclico; obtenemos solamente su flanco.        *)
+(* ============================================================ *)
+
+Pulse1s := Sys1Sec AND NOT Prev1s ;
+Prev1s  := Sys1Sec ;
+
+
+(* ============================================================ *)
+(* §2 - NORMALIZACION DE ENTRADAS FISICAS                     *)
+(* ============================================================ *)
+
+BtnStart := PhIn1 ;
+
+(* I2 es NC. Queda disponible como entrada auxiliar. *)
+BtnAux   := NOT PhIn2 ;
+
+(* I3 es NC: 0 fisico significa STOP presionado/abierto. *)
+BtnStop  := NOT PhIn3 ;
+
+(* Sensores considerados activos en bajo. *)
+S1_Det   := NOT PhIn4 ;
+S2_Det   := NOT PhIn5 ;
+
+
+(* ============================================================ *)
+(* §3 - VALIDACION DE CONFIGURACION                            *)
+(* ============================================================ *)
+
+(* Una configuracion puede ser solo de sensores/torreta/plumas.
+   Solo exigimos direccion/frecuencia cuando realmente se pide movimiento. *)
+
+MotionCfgPresent :=
+    (DirCmd <> 0) OR
+    (FreqRequest <> 0) ;
+
+CfgValid := TRUE ;
+
+
+(* Decodificar bitmask de acciones del contador. *)
+
+S1_CountDoBandStop   := (S1_CountActionMask MOD 2) = 1 ;
+S1_CountDoSystemStop := ((S1_CountActionMask / 2) MOD 2) = 1 ;
+S1_CountDoLamp       := ((S1_CountActionMask / 4) MOD 2) = 1 ;
+S1_CountDoDir        := ((S1_CountActionMask / 8) MOD 2) = 1 ;
+S1_CountDoPluma1     := ((S1_CountActionMask / 16) MOD 2) = 1 ;
+S1_CountDoPluma2     := ((S1_CountActionMask / 32) MOD 2) = 1 ;
+
+S2_CountDoBandStop   := (S2_CountActionMask MOD 2) = 1 ;
+S2_CountDoSystemStop := ((S2_CountActionMask / 2) MOD 2) = 1 ;
+S2_CountDoLamp       := ((S2_CountActionMask / 4) MOD 2) = 1 ;
+S2_CountDoDir        := ((S2_CountActionMask / 8) MOD 2) = 1 ;
+S2_CountDoPluma1     := ((S2_CountActionMask / 16) MOD 2) = 1 ;
+S2_CountDoPluma2     := ((S2_CountActionMask / 32) MOD 2) = 1 ;
+
+
+(* Direccion/frecuencia de banda *)
+
+IF MotionCfgPresent THEN
+
+    IF NOT ((DirCmd = 1) OR (DirCmd = 2)) THEN
+        CfgValid := FALSE ;
+    END_IF ;
+
+    (* INT maximo 32767 y frecuencia se multiplica por 100. *)
+    IF (FreqRequest <= 0) OR (FreqRequest > 327) THEN
+        CfgValid := FALSE ;
+    END_IF ;
+
+ELSE
+
+    (* 0/0 = configuracion valida sin movimiento de banda. *)
+    IF (DirCmd <> 0) OR (FreqRequest <> 0) THEN
+        CfgValid := FALSE ;
+    END_IF ;
+
+END_IF ;
+
+
+(* Fuentes de paro *)
+
+IF (StopMode < 0) OR (StopMode > 3) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+
+(* Paro automatico *)
+
+IF (AutoStopMode < 0) OR (AutoStopMode > 2) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF AutoStopPreset < 0 THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF (AutoStopMode > 0) AND (AutoStopPreset <= 0) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF (AutoStopMode > 0) AND NOT MotionCfgPresent THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+
+(* Modo de interaccion sensor -> banda.
+   0 = legacy/afecta banda; 1 = event-only/no afecta banda. *)
+
+IF (S1_BandMode < 0) OR (S1_BandMode > 1) OR
+   (S2_BandMode < 0) OR (S2_BandMode > 1) THEN
+
+    CfgValid := FALSE ;
+
+END_IF ;
+
+
+(* Acciones de sensores *)
+
+IF (S1_Action < 0) OR (S1_Action > 4) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF (S2_Action < 0) OR (S2_Action > 4) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+
+(* Timers *)
+
+IF (S1_TimerPreset < 0) OR
+   (S2_TimerPreset < 0) THEN
+
+    CfgValid := FALSE ;
+
+END_IF ;
+
+IF ((S1_Action = 2) OR (S1_Action = 4)) AND
+   (S1_TimerPreset <= 0) THEN
+
+    CfgValid := FALSE ;
+
+END_IF ;
+
+IF ((S2_Action = 2) OR (S2_Action = 4)) AND
+   (S2_TimerPreset <= 0) THEN
+
+    CfgValid := FALSE ;
+
+END_IF ;
+
+
+(* Contadores *)
+
+IF (S1_CountPreset < 0) OR
+   (S2_CountPreset < 0) THEN
+
+    CfgValid := FALSE ;
+
+END_IF ;
+
+
+(* Acciones configurables al alcanzar el conteo. *)
+
+IF (S1_CountActionMask < 0) OR (S1_CountActionMask > 63) OR
+   (S2_CountActionMask < 0) OR (S2_CountActionMask > 63) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF (S1_CountActionMask <> 0) AND (S1_CountPreset <= 0) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF (S2_CountActionMask <> 0) AND (S2_CountPreset <= 0) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF (S1_CountLampMask < 0) OR (S1_CountLampMask > 7) OR
+   (S2_CountLampMask < 0) OR (S2_CountLampMask > 7) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF (S1_CountDirTarget < 0) OR (S1_CountDirTarget > 3) OR
+   (S2_CountDirTarget < 0) OR (S2_CountDirTarget > 3) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF (S1_CountPluma1Cmd < 0) OR (S1_CountPluma1Cmd > 3) OR
+   (S1_CountPluma2Cmd < 0) OR (S1_CountPluma2Cmd > 3) OR
+   (S2_CountPluma1Cmd < 0) OR (S2_CountPluma1Cmd > 3) OR
+   (S2_CountPluma2Cmd < 0) OR (S2_CountPluma2Cmd > 3) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF S1_CountDoLamp AND (S1_CountLampMask = 0) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF S2_CountDoLamp AND (S2_CountLampMask = 0) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF S1_CountDoDir AND
+   ((S1_CountDirTarget = 0) OR NOT MotionCfgPresent) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF S2_CountDoDir AND
+   ((S2_CountDirTarget = 0) OR NOT MotionCfgPresent) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF S1_CountDoPluma1 AND (S1_CountPluma1Cmd = 0) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF S1_CountDoPluma2 AND (S1_CountPluma2Cmd = 0) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF S2_CountDoPluma1 AND (S2_CountPluma1Cmd = 0) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF S2_CountDoPluma2 AND (S2_CountPluma2Cmd = 0) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+
+(* Modo/tiempo de las acciones temporales del contador.
+   HoldMode=0 -> enclavado hasta R5/R6.
+   HoldMode=1 -> pausa/luz/plumas duran HoldPreset segundos. *)
+
+IF (S1_CountHoldMode < 0) OR (S1_CountHoldMode > 1) OR
+   (S2_CountHoldMode < 0) OR (S2_CountHoldMode > 1) THEN
+
+    CfgValid := FALSE ;
+
+END_IF ;
+
+IF (S1_CountHoldPreset < 0) OR
+   (S2_CountHoldPreset < 0) THEN
+
+    CfgValid := FALSE ;
+
+END_IF ;
+
+IF (S1_CountHoldMode = 1) AND
+   (S1_CountDoBandStop OR
+    S1_CountDoLamp OR
+    S1_CountDoPluma1 OR
+    S1_CountDoPluma2) AND
+   (S1_CountHoldPreset <= 0) THEN
+
+    CfgValid := FALSE ;
+
+END_IF ;
+
+IF (S2_CountHoldMode = 1) AND
+   (S2_CountDoBandStop OR
+    S2_CountDoLamp OR
+    S2_CountDoPluma1 OR
+    S2_CountDoPluma2) AND
+   (S2_CountHoldPreset <= 0) THEN
+
+    CfgValid := FALSE ;
+
+END_IF ;
+
+
+(* Lampara temporizada independiente. *)
+
+IF (TimedLampMask < 0) OR (TimedLampMask > 7) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF TimedLampPreset < 0 THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+IF (TimedLampMask <> 0) AND (TimedLampPreset <= 0) THEN
+    CfgValid := FALSE ;
+END_IF ;
+
+
+(* Mascaras de torreta *)
+
+IF (S1_TorretaMask < 0) OR
+   (S1_TorretaMask > 7) THEN
+
+    CfgValid := FALSE ;
+
+END_IF ;
+
+IF (S2_TorretaMask < 0) OR
+   (S2_TorretaMask > 7) THEN
+
+    CfgValid := FALSE ;
+
+END_IF ;
+
+IF (TorretaRun < 0) OR
+   (TorretaRun > 7) THEN
+
+    CfgValid := FALSE ;
+
+END_IF ;
+
+IF (TorretaIdle < 0) OR
+   (TorretaIdle > 7) THEN
+
+    CfgValid := FALSE ;
+
+END_IF ;
+
+IF (I1_LampMask < 0) OR
+   (I1_LampMask > 7) THEN
+
+    CfgValid := FALSE ;
+
+END_IF ;
+
+
+(* Comandos de pluma disparados por sensores:
+   0=sin override, 1=subir, 2=bajar, 3=forzar stop *)
+
+IF (S1_Pluma1Cmd < 0) OR (S1_Pluma1Cmd > 3) OR
+   (S1_Pluma2Cmd < 0) OR (S1_Pluma2Cmd > 3) THEN
+
+    CfgValid := FALSE ;
+
+END_IF ;
+
+IF (S2_Pluma1Cmd < 0) OR (S2_Pluma1Cmd > 3) OR
+   (S2_Pluma2Cmd < 0) OR (S2_Pluma2Cmd > 3) THEN
+
+    CfgValid := FALSE ;
+
+END_IF ;
+
+
+(* Comandos manuales de pluma *)
+
+IF (Pluma1Cmd < 0) OR (Pluma1Cmd > 2) OR
+   (Pluma2Cmd < 0) OR (Pluma2Cmd > 2) THEN
+
+    CfgValid := FALSE ;
+
+END_IF ;
+
+
+(* ============================================================ *)
+
+
+(* §4 - PAROS: I3 PRIORITARIO + I2 + ENCLAVAMIENTO SOFTWARE   *)
+(*                                                            *)
+(* StopMode:                                                   *)
+(* 0=I3, 1=I2+I3, 2=SoftStop+I3, 3=I2+SoftStop+I3            *)
+(* I3 SIEMPRE permanece activo como paro prioritario.          *)
+(* ============================================================ *)
+
+HardStopActive := BtnStop ;
+AuxStopActive  := FALSE ;
+SoftStopActive := FALSE ;
+
+
+IF (StopMode = 1) OR (StopMode = 3) THEN
+    AuxStopActive := BtnAux ;
+END_IF ;
+
+
+IF (StopMode = 2) OR (StopMode = 3) THEN
+    SoftStopActive := (SoftStopCmd <> 0) ;
+END_IF ;
+
+
+SystemStopActive :=
+    HardStopActive OR
+    CountSystemStopLatch ;
+
+GenStop :=
+    HardStopActive OR
+    AuxStopActive OR
+    SoftStopActive OR
+    CountSystemStopLatch ;
+
+
+(* Codigo de diagnostico de causa de paro:
+   0=ninguna, 1=I3, 2=I2, 3=software, 4=auto,
+   5=S1, 6=S2, 7=contador S1, 8=contador S2 *)
+
+IF HardStopActive THEN
+
+    StopReason := 1 ;
+
+ELSIF CountSystemStopLatch OR CountBandStopLatch THEN
+
+    IF CountStopSource = 2 THEN
+        StopReason := 8 ;
+    ELSE
+        StopReason := 7 ;
+    END_IF ;
+
+ELSIF AuxStopActive THEN
+
+    StopReason := 2 ;
+
+ELSIF SoftStopActive THEN
+
+    StopReason := 3 ;
+
+END_IF ;
+
+
+IF GenStop THEN
+
+    (* I2 / SoftStop / I3 siempre detienen la BANDA. *)
+    BandEnable      := FALSE ;
+    BandRunning     := FALSE ;
+
+    AutoStopAccum    := 0 ;
+    AutoStopDone     := FALSE ;
+    AutoStopDone_Reg := 0 ;
+
+    VFD_Control     := 1 ;
+    VFD_ResetReg    := 0 ;
+
+END_IF ;
+
+
+(* I3 es el paro duro fisico.
+   El paro total por contador tambien cancela eventos y movimiento de plumas.
+   I2, SoftStop y CountBandStop solo paran la banda. *)
+
+IF SystemStopActive THEN
+
+    S1_StopLatch       := FALSE ;
+    S2_StopLatch       := FALSE ;
+
+    S1_WaitActive      := FALSE ;
+    S2_WaitActive      := FALSE ;
+
+    S1_EventActive     := FALSE ;
+    S2_EventActive     := FALSE ;
+    S1_EventActive_Reg := 0 ;
+    S2_EventActive_Reg := 0 ;
+
+    S1_TimerAccum      := 0 ;
+    S2_TimerAccum      := 0 ;
+
+    (* Paro duro: exigir un nuevo comando manual de pluma. *)
+    Pluma1Cmd          := 0 ;
+    Pluma2Cmd          := 0 ;
+
+END_IF ;
+
+
+(* ============================================================ *)
+
+
+(* §5 - I1: ARRANQUE / LATCH DE BANDA                         *)
+(* Solo habilita si VFD/configuracion estan listos.             *)
+(* Tras cualquier paro se requiere un nuevo flanco de I1.       *)
+(* ============================================================ *)
+
+BtnStartRising :=
+    BtnStart AND NOT BtnStartPrev ;
+
+
+IF BtnStartRising AND
+   MotionCfgPresent AND
+   CfgReady AND
+   CfgValid AND
+   NOT GenStop THEN
+
+    BandEnable       := TRUE ;
+
+    AutoStopAccum    := 0 ;
+    AutoStopDone     := FALSE ;
+    AutoStopDone_Reg := 0 ;
+
+    StopReason       := 0 ;
+
+END_IF ;
+
+
+BtnStartPrev := BtnStart ;
+
+
+(* ============================================================ *)
+
+
+(* §6 - NUEVA CONFIGURACION DESDE BACKEND                     *)
+(* Detecta tanto 0->1 como 1->2, etc.                          *)
+(* ============================================================ *)
+
+NewCfgTrigger :=
+    (NewCfgFlag <> 0) AND
+    (NewCfgFlag <> NewCfgPrev) ;
+
+
+NewCfgPrev := NewCfgFlag ;
+
+
+IF NewCfgTrigger THEN
+
+    (* No permitir rearranque automatico después de configurar *)
+    BandEnable      := FALSE ;
+    BandRunning     := FALSE ;
+
+    (* Solo inicializar el VFD cuando esta configurado movimiento.
+       Una configuracion de sensores/torreta/plumas queda lista sin tocar VFD. *)
+
+    IF CfgValid AND MotionCfgPresent THEN
+
+        CfgReady     := FALSE ;
+        CfgReady_Reg := 0 ;
+        InitSeqState := 1 ;
+
+    ELSIF CfgValid THEN
+
+        CfgReady     := TRUE ;
+        CfgReady_Reg := 1 ;
+        InitSeqState := 0 ;
+
+    ELSE
+
+        CfgReady     := FALSE ;
+        CfgReady_Reg := 0 ;
+        InitSeqState := 0 ;
+
+    END_IF ;
+
+    InitTimerAccum  := 0 ;
+
+    VFD_Control     := 1 ;
+    VFD_ResetReg    := 0 ;
+
+    S1_StopLatch       := FALSE ;
+    S2_StopLatch       := FALSE ;
+
+    S1_WaitActive      := FALSE ;
+    S2_WaitActive      := FALSE ;
+
+    S1_EventActive     := FALSE ;
+    S2_EventActive     := FALSE ;
+    S1_EventActive_Reg := 0 ;
+    S2_EventActive_Reg := 0 ;
+
+    S1_TimerAccum      := 0 ;
+    S2_TimerAccum      := 0 ;
+
+    (* Nueva secuencia = nuevo conteo *)
+    S1_CountAccum   := 0 ;
+    S2_CountAccum   := 0 ;
+
+    S1_CountDone    := FALSE ;
+    S2_CountDone    := FALSE ;
+
+    AutoStopAccum    := 0 ;
+    AutoStopDone     := FALSE ;
+    AutoStopDone_Reg := 0 ;
+
+    CountBandStopLatch   := FALSE ;
+    CountSystemStopLatch := FALSE ;
+    CountStopSource      := 0 ;
+
+    S1_CountBandPauseActive := FALSE ;
+    S2_CountBandPauseActive := FALSE ;
+    S1_CountActionActive    := FALSE ;
+    S2_CountActionActive    := FALSE ;
+    S1_CountLampActiveMask  := 0 ;
+    S2_CountLampActiveMask  := 0 ;
+    S1_CountHoldAccum       := 0 ;
+    S2_CountHoldAccum       := 0 ;
+    S1_CountActionActive_Reg := 0 ;
+    S2_CountActionActive_Reg := 0 ;
+
+    CountLampGreen       := FALSE ;
+    CountLampYellow      := FALSE ;
+    CountLampRed         := FALSE ;
+
+    S1_CountP1Active     := FALSE ;
+    S1_CountP2Active     := FALSE ;
+    S2_CountP1Active     := FALSE ;
+    S2_CountP2Active     := FALSE ;
+    S1_CountP1LatchedCmd := 0 ;
+    S1_CountP2LatchedCmd := 0 ;
+    S2_CountP1LatchedCmd := 0 ;
+    S2_CountP2LatchedCmd := 0 ;
+
+    CountDirChangeActive  := FALSE ;
+    CountDirChangeState   := 0 ;
+    CountDirChangeTimer   := 0 ;
+    CountDirTargetPending := 0 ;
+    CountRequestedDir     := 0 ;
+
+    TimedLampActive       := FALSE ;
+    TimedLampAccum        := 0 ;
+    TimedLampActive_Reg   := 0 ;
+
+    CountBandStop_Reg        := 0 ;
+    CountSystemStop_Reg      := 0 ;
+    CountLampLatchedMask     := 0 ;
+    CountDirChangeActive_Reg := 0 ;
+    CountActionSource_Reg    := 0 ;
+    CountDirTarget_Reg       := 0 ;
+    CountPluma1Override_Reg  := 0 ;
+    CountPluma2Override_Reg  := 0 ;
+
+    StopReason       := 0 ;
+
+END_IF ;
+
+
+(* ============================================================ *)
+(* §7 - RESET DESDE BACKEND                                    *)
+(* ============================================================ *)
+
+ResetCmdTrigger :=
+    (ResetCmd <> 0) AND
+    (ResetCmd <> ResetCmdPrev) ;
+
+
+ResetCmdPrev := ResetCmd ;
+
+
+IF ResetCmdTrigger THEN
+
+    BandEnable      := FALSE ;
+    BandRunning     := FALSE ;
+
+    (* Solo inicializar el VFD cuando esta configurado movimiento.
+       Una configuracion de sensores/torreta/plumas queda lista sin tocar VFD. *)
+
+    IF CfgValid AND MotionCfgPresent THEN
+
+        CfgReady     := FALSE ;
+        CfgReady_Reg := 0 ;
+        InitSeqState := 1 ;
+
+    ELSIF CfgValid THEN
+
+        CfgReady     := TRUE ;
+        CfgReady_Reg := 1 ;
+        InitSeqState := 0 ;
+
+    ELSE
+
+        CfgReady     := FALSE ;
+        CfgReady_Reg := 0 ;
+        InitSeqState := 0 ;
+
+    END_IF ;
+
+    InitTimerAccum  := 0 ;
+
+    VFD_Control     := 1 ;
+    VFD_ResetReg    := 0 ;
+
+    S1_StopLatch       := FALSE ;
+    S2_StopLatch       := FALSE ;
+
+    S1_WaitActive      := FALSE ;
+    S2_WaitActive      := FALSE ;
+
+    S1_EventActive     := FALSE ;
+    S2_EventActive     := FALSE ;
+    S1_EventActive_Reg := 0 ;
+    S2_EventActive_Reg := 0 ;
+
+    S1_TimerAccum      := 0 ;
+    S2_TimerAccum      := 0 ;
+
+    S1_CountAccum   := 0 ;
+    S2_CountAccum   := 0 ;
+
+    S1_CountDone    := FALSE ;
+    S2_CountDone    := FALSE ;
+
+    AutoStopAccum    := 0 ;
+    AutoStopDone     := FALSE ;
+    AutoStopDone_Reg := 0 ;
+
+    CountBandStopLatch   := FALSE ;
+    CountSystemStopLatch := FALSE ;
+    CountStopSource      := 0 ;
+
+    S1_CountBandPauseActive := FALSE ;
+    S2_CountBandPauseActive := FALSE ;
+    S1_CountActionActive    := FALSE ;
+    S2_CountActionActive    := FALSE ;
+    S1_CountLampActiveMask  := 0 ;
+    S2_CountLampActiveMask  := 0 ;
+    S1_CountHoldAccum       := 0 ;
+    S2_CountHoldAccum       := 0 ;
+    S1_CountActionActive_Reg := 0 ;
+    S2_CountActionActive_Reg := 0 ;
+
+    CountLampGreen       := FALSE ;
+    CountLampYellow      := FALSE ;
+    CountLampRed         := FALSE ;
+
+    S1_CountP1Active     := FALSE ;
+    S1_CountP2Active     := FALSE ;
+    S2_CountP1Active     := FALSE ;
+    S2_CountP2Active     := FALSE ;
+    S1_CountP1LatchedCmd := 0 ;
+    S1_CountP2LatchedCmd := 0 ;
+    S2_CountP1LatchedCmd := 0 ;
+    S2_CountP2LatchedCmd := 0 ;
+
+    CountDirChangeActive  := FALSE ;
+    CountDirChangeState   := 0 ;
+    CountDirChangeTimer   := 0 ;
+    CountDirTargetPending := 0 ;
+    CountRequestedDir     := 0 ;
+
+    TimedLampActive       := FALSE ;
+    TimedLampAccum        := 0 ;
+    TimedLampActive_Reg   := 0 ;
+
+    CountBandStop_Reg        := 0 ;
+    CountSystemStop_Reg      := 0 ;
+    CountLampLatchedMask     := 0 ;
+    CountDirChangeActive_Reg := 0 ;
+    CountActionSource_Reg    := 0 ;
+    CountDirTarget_Reg       := 0 ;
+    CountPluma1Override_Reg  := 0 ;
+    CountPluma2Override_Reg  := 0 ;
+
+    StopReason       := 0 ;
+
+END_IF ;
+
+
+(* ============================================================ *)
+
+
+(* §8 - MAQUINA DE ESTADOS: PREPARACION / RESET VFD           *)
+(* ============================================================ *)
+
+IF NOT CfgValid THEN
+
+    CfgReady     := FALSE ;
+    CfgReady_Reg := 0 ;
+
+    InitSeqState := 0 ;
+
+    VFD_Control  := 1 ;
+    VFD_ResetReg := 0 ;
+    VFD_FreqCalc := 0 ;
+
+
+ELSIF NOT MotionCfgPresent THEN
+
+    (* Configuracion valida sin movimiento: sensores/torreta/plumas
+       pueden trabajar sin inicializar ni ejecutar el VFD. *)
+
+    CfgReady      := TRUE ;
+    CfgReady_Reg  := 1 ;
+    InitSeqState  := 0 ;
+
+    VFD_Control   := 1 ;
+    VFD_ResetReg  := 0 ;
+    VFD_FreqCalc  := 0 ;
+
+
+ELSIF NOT GenStop THEN
+
+
+    (* Estado 0 = VFD listo / sin inicializacion activa *)
+
+    IF InitSeqState = 0 THEN
+
+        VFD_ResetReg := 0 ;
+
+
+    (* Estado 1 = garantizar STOP *)
+
+    ELSIF InitSeqState = 1 THEN
+
+        VFD_Control    := 1 ;
+        VFD_ResetReg   := 0 ;
+
+        InitTimerAccum := 0 ;
+        InitSeqState   := 2 ;
+
+
+    (* Estado 2 = activar reset VFD *)
+
+    ELSIF InitSeqState = 2 THEN
+
+        VFD_Control    := 1 ;
+        VFD_ResetReg   := 2 ;
+
+        InitTimerAccum := 0 ;
+        InitSeqState   := 3 ;
+
+
+    (* Estado 3 = mantener reset durante 2 segundos *)
+
+    ELSIF InitSeqState = 3 THEN
+
+        VFD_Control  := 1 ;
+        VFD_ResetReg := 2 ;
+
+        IF Pulse1s THEN
+            InitTimerAccum := InitTimerAccum + 1 ;
+        END_IF ;
+
+        IF InitTimerAccum >= 2 THEN
+            InitSeqState := 4 ;
+        END_IF ;
+
+
+    (* Estado 4 = liberar reset y cargar frecuencia *)
+
+    ELSIF InitSeqState = 4 THEN
+
+        VFD_ResetReg := 0 ;
+        VFD_Control  := 1 ;
+
+        VFD_FreqCalc :=
+            FreqRequest * INT#100 ;
+
+        CfgReady     := TRUE ;
+        CfgReady_Reg := 1 ;
+
+        InitSeqState := 0 ;
+
+
+    ELSE
+
+        InitSeqState := 0 ;
+
+    END_IF ;
+
+
+ELSE
+
+    (* STOP presionado *)
+
+    VFD_Control  := 1 ;
+    VFD_ResetReg := 0 ;
+
+END_IF ;
+
+
+(* ============================================================ *)
+(* §9 - FRECUENCIA VFD                                        *)
+(* El backend trabaja en Hz; el VFD recibe Hz x100.           *)
+(* Ejemplo: 30 Hz -> 3000.                                    *)
+(* ============================================================ *)
+
+IF MotionCfgPresent AND
+   CfgReady AND
+   CfgValid AND
+   (InitSeqState = 0) AND
+   NOT GenStop THEN
+
+    VFD_FreqCalc :=
+        FreqRequest * INT#100 ;
+
+END_IF ;
+
+
+(* ============================================================ *)
+(* §10 - FEEDBACK DEL VFD                                     *)
+(* Mantener R502 crudo y presentar R8 escalado.                *)
+(* ============================================================ *)
+
+VFD_SpeedDisp :=
+    VFD_SpeedRaw / INT#100 ;
+
+
+
+(* ============================================================ *)
+(* §11 - SENSOR S1 COMO EVENTO GENERAL                         *)
+(*                                                            *)
+(* v5: la accion inmediata y el contador son INDEPENDIENTES.   *)
+(* CADA flanco de S1 puede activar torreta/plumas/pausa segun  *)
+(* S1_Action, aunque S1_CountPreset sea mayor que cero.         *)
+(* En paralelo se incrementa el contador y, al llegar al       *)
+(* objetivo, se genera S1_CountReachedPulse para las acciones  *)
+(* especiales del contador.                                   *)
+(* ============================================================ *)
+
+S1_ActionTrigger     := FALSE ;
+S1_CountReachedPulse := FALSE ;
+
+S1_Rising :=
+    S1_Det AND NOT S1_DetPrev ;
+
+
+IF (S1_Enable <> 0) AND
+   NOT SystemStopActive THEN
+
+
+    (* ---------- CADA NUEVA DETECCION ---------- *)
+
+    IF S1_Rising THEN
+
+        (* La accion inmediata SIEMPRE ocurre en cada deteccion. *)
+        S1_ActionTrigger := TRUE ;
+
+        (* Conteo independiente de la accion inmediata. *)
+        IF S1_CountAccum < 32767 THEN
+            S1_CountAccum := S1_CountAccum + 1 ;
+        END_IF ;
+
+        (* CountPreset>0 dispara una segunda capa de acciones. *)
+        IF (S1_CountPreset > 0) AND
+           NOT S1_CountDone AND
+           (S1_CountAccum >= S1_CountPreset) THEN
+
+            S1_CountDone         := TRUE ;
+            S1_CountReachedPulse := TRUE ;
+
+        END_IF ;
+
+    END_IF ;
+
+
+    (* ---------- INICIAR / RETRIGGER EVENTO INMEDIATO ---------- *)
+
+    IF S1_ActionTrigger THEN
+
+        IF NOT S1_EventActive THEN
+
+            S1_EventActive      := TRUE ;
+            S1_EventActive_Reg  := 1 ;
+            S1_TimerAccum       := 0 ;
+
+            (* Action 2/4 = evento temporizado.
+               Action 0/1/3 = evento sigue presencia fisica. *)
+            IF (S1_Action = 2) OR
+               (S1_Action = 4) THEN
+
+                S1_WaitActive := TRUE ;
+
+            ELSE
+
+                S1_WaitActive := FALSE ;
+
+            END_IF ;
+
+            (* BandMode=1 permite usar sensor/torreta/plumas sin
+               interferir con el movimiento de la banda. *)
+            IF (S1_BandMode = 0) AND
+               (S1_Action > 0) THEN
+
+                S1_StopLatch := TRUE ;
+
+            ELSE
+
+                S1_StopLatch := FALSE ;
+
+            END_IF ;
+
+
+        ELSE
+
+            (* Si llega otra pieza mientras un evento temporizado
+               sigue activo, reiniciar su ventana temporal. *)
+            IF S1_WaitActive THEN
+                S1_TimerAccum := 0 ;
+            END_IF ;
+
+        END_IF ;
+
+    END_IF ;
+
+
+    (* ---------- EVENTO QUE SIGUE PRESENCIA DEL SENSOR ---------- *)
+
+    IF S1_EventActive AND
+       NOT S1_WaitActive AND
+       NOT S1_Det THEN
+
+        S1_EventActive      := FALSE ;
+        S1_EventActive_Reg  := 0 ;
+        S1_StopLatch        := FALSE ;
+
+    END_IF ;
+
+
+ELSE
+
+    S1_EventActive      := FALSE ;
+    S1_EventActive_Reg  := 0 ;
+    S1_StopLatch        := FALSE ;
+    S1_WaitActive       := FALSE ;
+    S1_TimerAccum       := 0 ;
+
+END_IF ;
+
+
+S1_DetPrev := S1_Det ;
+
+
+(* ============================================================ *)
+(* §12 - TIMER DEL EVENTO S1                                  *)
+(* Action 2/4 usa el timer aunque la banda no este habilitada. *)
+(* ============================================================ *)
+
+IF S1_WaitActive AND
+   S1_EventActive AND
+   NOT SystemStopActive THEN
+
+
+    IF Pulse1s THEN
+
+        IF S1_TimerAccum < 32767 THEN
+            S1_TimerAccum := S1_TimerAccum + 1 ;
+        END_IF ;
+
+    END_IF ;
+
+
+    IF (S1_TimerPreset <= 0) OR
+       (S1_TimerAccum >= S1_TimerPreset) THEN
+
+        S1_WaitActive      := FALSE ;
+        S1_EventActive     := FALSE ;
+        S1_EventActive_Reg := 0 ;
+        S1_StopLatch       := FALSE ;
+        S1_TimerAccum      := 0 ;
+
+    END_IF ;
+
+
+ELSIF SystemStopActive THEN
+
+    S1_TimerAccum      := 0 ;
+    S1_WaitActive      := FALSE ;
+    S1_EventActive     := FALSE ;
+    S1_EventActive_Reg := 0 ;
+    S1_StopLatch       := FALSE ;
+
+END_IF ;
+
+
+(* ============================================================ *)
+(* §13 - SENSOR S2 COMO EVENTO GENERAL                         *)
+(* v5: accion inmediata y contador independientes, igual que S1. *)
+(* ============================================================ *)
+
+S2_ActionTrigger     := FALSE ;
+S2_CountReachedPulse := FALSE ;
+
+S2_Rising :=
+    S2_Det AND NOT S2_DetPrev ;
+
+
+IF (S2_Enable <> 0) AND
+   NOT SystemStopActive THEN
+
+
+    IF S2_Rising THEN
+
+        S2_ActionTrigger := TRUE ;
+
+        IF S2_CountAccum < 32767 THEN
+            S2_CountAccum := S2_CountAccum + 1 ;
+        END_IF ;
+
+        IF (S2_CountPreset > 0) AND
+           NOT S2_CountDone AND
+           (S2_CountAccum >= S2_CountPreset) THEN
+
+            S2_CountDone         := TRUE ;
+            S2_CountReachedPulse := TRUE ;
+
+        END_IF ;
+
+    END_IF ;
+
+
+    IF S2_ActionTrigger THEN
+
+        IF NOT S2_EventActive THEN
+
+            S2_EventActive      := TRUE ;
+            S2_EventActive_Reg  := 1 ;
+            S2_TimerAccum       := 0 ;
+
+            IF (S2_Action = 2) OR
+               (S2_Action = 4) THEN
+
+                S2_WaitActive := TRUE ;
+
+            ELSE
+
+                S2_WaitActive := FALSE ;
+
+            END_IF ;
+
+            IF (S2_BandMode = 0) AND
+               (S2_Action > 0) THEN
+
+                S2_StopLatch := TRUE ;
+
+            ELSE
+
+                S2_StopLatch := FALSE ;
+
+            END_IF ;
+
+
+        ELSE
+
+            IF S2_WaitActive THEN
+                S2_TimerAccum := 0 ;
+            END_IF ;
+
+        END_IF ;
+
+    END_IF ;
+
+
+    IF S2_EventActive AND
+       NOT S2_WaitActive AND
+       NOT S2_Det THEN
+
+        S2_EventActive      := FALSE ;
+        S2_EventActive_Reg  := 0 ;
+        S2_StopLatch        := FALSE ;
+
+    END_IF ;
+
+
+ELSE
+
+    S2_EventActive      := FALSE ;
+    S2_EventActive_Reg  := 0 ;
+    S2_StopLatch        := FALSE ;
+    S2_WaitActive       := FALSE ;
+    S2_TimerAccum       := 0 ;
+
+END_IF ;
+
+
+S2_DetPrev := S2_Det ;
+
+
+(* ============================================================ *)
+(* §14 - TIMER DEL EVENTO S2                                  *)
+(* ============================================================ *)
+
+IF S2_WaitActive AND
+   S2_EventActive AND
+   NOT SystemStopActive THEN
+
+
+    IF Pulse1s THEN
+
+        IF S2_TimerAccum < 32767 THEN
+            S2_TimerAccum := S2_TimerAccum + 1 ;
+        END_IF ;
+
+    END_IF ;
+
+
+    IF (S2_TimerPreset <= 0) OR
+       (S2_TimerAccum >= S2_TimerPreset) THEN
+
+        S2_WaitActive      := FALSE ;
+        S2_EventActive     := FALSE ;
+        S2_EventActive_Reg := 0 ;
+        S2_StopLatch       := FALSE ;
+        S2_TimerAccum      := 0 ;
+
+    END_IF ;
+
+
+ELSIF SystemStopActive THEN
+
+    S2_TimerAccum      := 0 ;
+    S2_WaitActive      := FALSE ;
+    S2_EventActive     := FALSE ;
+    S2_EventActive_Reg := 0 ;
+    S2_StopLatch       := FALSE ;
+
+END_IF ;
+
+
+(* ============================================================ *)
+(* §14b - PARO AUTOMATICO DE BANDA                            *)
+(*                                                            *)
+(* AutoStopMode 0 = off                                        *)
+(* AutoStopMode 1 = cuenta solo tiempo de movimiento efectivo  *)
+(* AutoStopMode 2 = cuenta desde START aunque sensor la pause   *)
+(* ============================================================ *)
+
+AutoStopRunIntent :=
+    MotionCfgPresent AND
+    BandEnable AND
+    CfgReady AND
+    CfgValid AND
+    (InitSeqState = 0) AND
+    NOT GenStop AND
+    NOT CountBandStopLatch AND
+    NOT S1_StopLatch AND
+    NOT S2_StopLatch AND
+    ((DirCmd = 1) OR (DirCmd = 2)) ;
+
+
+IF BandEnable AND
+   (AutoStopMode > 0) AND
+   (AutoStopPreset > 0) AND
+   NOT GenStop THEN
+
+    IF Pulse1s THEN
+
+        IF (AutoStopMode = 2) OR
+           ((AutoStopMode = 1) AND AutoStopRunIntent) THEN
+
+            IF AutoStopAccum < 32767 THEN
+                AutoStopAccum := AutoStopAccum + 1 ;
+            END_IF ;
+
+        END_IF ;
+
+    END_IF ;
+
+
+    IF AutoStopAccum >= AutoStopPreset THEN
+
+        BandEnable       := FALSE ;
+        BandRunning      := FALSE ;
+
+        AutoStopDone     := TRUE ;
+        AutoStopDone_Reg := 1 ;
+
+        StopReason       := 4 ;
+
+    END_IF ;
+
+
+ELSIF AutoStopMode = 0 THEN
+
+    AutoStopAccum    := 0 ;
+    AutoStopDone     := FALSE ;
+    AutoStopDone_Reg := 0 ;
+
+END_IF ;
+
+
+IF AutoStopDone THEN
+    AutoStopDone_Reg := 1 ;
+ELSE
+    AutoStopDone_Reg := 0 ;
+END_IF ;
+
+
+(* Si no hay paro fisico/software, reportar pausas por sensor. *)
+
+IF NOT GenStop THEN
+
+    IF CountBandStopLatch THEN
+
+        IF CountStopSource = 2 THEN
+            StopReason := 8 ;
+        ELSE
+            StopReason := 7 ;
+        END_IF ;
+
+    ELSIF AutoStopDone THEN
+
+        StopReason := 4 ;
+
+    ELSIF S2_StopLatch THEN
+
+        StopReason := 6 ;
+
+    ELSIF S1_StopLatch THEN
+
+        StopReason := 5 ;
+
+    ELSE
+
+        StopReason := 0 ;
+
+    END_IF ;
+
+END_IF ;
+
+
+(* ============================================================ *)
+(* §14c - ACCIONES AL ALCANZAR EL CONTEO - COMBINADOR v5      *)
+(*                                                            *)
+(* La accion inmediata del sensor YA ocurrio independientemente. *)
+(* Este bloque es una SEGUNDA CAPA que solo se dispara cuando  *)
+(* CountPreset>0 alcanza el objetivo.                          *)
+(*                                                            *)
+(* ActionMask: 1=pausa banda, 2=stop proceso, 4=luces,         *)
+(* 8=direccion, 16=pluma1, 32=pluma2. Se pueden sumar.         *)
+(*                                                            *)
+(* HoldMode=0: pausa/luz/plumas quedan enclavadas hasta R5/R6. *)
+(* HoldMode=1: pausa/luz/plumas duran HoldPreset segundos y    *)
+(* despues se liberan automaticamente.                         *)
+(*                                                            *)
+(* Stop proceso (bit 2) SIEMPRE queda enclavado hasta R5/R6.  *)
+(* Cambio de direccion (bit 8) es persistente y se hace con    *)
+(* STOP previo cuando la banda estaba corriendo.               *)
+(* ============================================================ *)
+
+CountRequestedDir := 0 ;
+
+
+(* ---------- DISPARO DEL CONTADOR S1 ---------- *)
+
+IF S1_CountReachedPulse AND
+   (S1_CountActionMask <> 0) THEN
+
+    CountActionSource_Reg := 1 ;
+    S1_CountHoldAccum     := 0 ;
+
+    (* Determinar si existe alguna accion temporal/enclavable. *)
+    S1_CountActionActive :=
+        S1_CountDoBandStop OR
+        S1_CountDoLamp OR
+        S1_CountDoPluma1 OR
+        S1_CountDoPluma2 ;
+
+    IF S1_CountDoBandStop THEN
+        S1_CountBandPauseActive := TRUE ;
+        CountStopSource         := 1 ;
+    END_IF ;
+
+    IF S1_CountDoSystemStop THEN
+        CountSystemStopLatch := TRUE ;
+        CountStopSource      := 1 ;
+    END_IF ;
+
+    IF S1_CountDoLamp THEN
+        S1_CountLampActiveMask := S1_CountLampMask ;
+    END_IF ;
+
+    IF S1_CountDoPluma1 THEN
+        S1_CountP1Active     := TRUE ;
+        S1_CountP1LatchedCmd := S1_CountPluma1Cmd ;
+    END_IF ;
+
+    IF S1_CountDoPluma2 THEN
+        S1_CountP2Active     := TRUE ;
+        S1_CountP2LatchedCmd := S1_CountPluma2Cmd ;
+    END_IF ;
+
+    IF S1_CountDoDir THEN
+
+        IF S1_CountDirTarget = 3 THEN
+
+            IF DirCmd = 1 THEN
+                CountRequestedDir := 2 ;
+            ELSIF DirCmd = 2 THEN
+                CountRequestedDir := 1 ;
+            END_IF ;
+
+        ELSE
+
+            CountRequestedDir := S1_CountDirTarget ;
+
+        END_IF ;
+
+    END_IF ;
+
+END_IF ;
+
+
+(* ---------- DISPARO DEL CONTADOR S2 ---------- *)
+(* S2 se procesa despues y gana prioridad si ambos llegan en   *)
+(* el mismo scan para direccion/plumas.                        *)
+
+IF S2_CountReachedPulse AND
+   (S2_CountActionMask <> 0) THEN
+
+    CountActionSource_Reg := 2 ;
+    S2_CountHoldAccum     := 0 ;
+
+    S2_CountActionActive :=
+        S2_CountDoBandStop OR
+        S2_CountDoLamp OR
+        S2_CountDoPluma1 OR
+        S2_CountDoPluma2 ;
+
+    IF S2_CountDoBandStop THEN
+        S2_CountBandPauseActive := TRUE ;
+        CountStopSource         := 2 ;
+    END_IF ;
+
+    IF S2_CountDoSystemStop THEN
+        CountSystemStopLatch := TRUE ;
+        CountStopSource      := 2 ;
+    END_IF ;
+
+    IF S2_CountDoLamp THEN
+        S2_CountLampActiveMask := S2_CountLampMask ;
+    END_IF ;
+
+    IF S2_CountDoPluma1 THEN
+        S2_CountP1Active     := TRUE ;
+        S2_CountP1LatchedCmd := S2_CountPluma1Cmd ;
+    END_IF ;
+
+    IF S2_CountDoPluma2 THEN
+        S2_CountP2Active     := TRUE ;
+        S2_CountP2LatchedCmd := S2_CountPluma2Cmd ;
+    END_IF ;
+
+    IF S2_CountDoDir THEN
+
+        IF S2_CountDirTarget = 3 THEN
+
+            IF DirCmd = 1 THEN
+                CountRequestedDir := 2 ;
+            ELSIF DirCmd = 2 THEN
+                CountRequestedDir := 1 ;
+            END_IF ;
+
+        ELSE
+
+            CountRequestedDir := S2_CountDirTarget ;
+
+        END_IF ;
+
+    END_IF ;
+
+END_IF ;
+
+
+(* ---------- TEMPORIZADOR DE ACCIONES S1 DEL CONTADOR ---------- *)
+
+IF S1_CountActionActive AND
+   (S1_CountHoldMode = 1) THEN
+
+    IF Pulse1s THEN
+        IF S1_CountHoldAccum < 32767 THEN
+            S1_CountHoldAccum := S1_CountHoldAccum + 1 ;
+        END_IF ;
+    END_IF ;
+
+    IF S1_CountHoldAccum >= S1_CountHoldPreset THEN
+
+        S1_CountActionActive    := FALSE ;
+        S1_CountBandPauseActive := FALSE ;
+        S1_CountLampActiveMask  := 0 ;
+
+        S1_CountP1Active        := FALSE ;
+        S1_CountP2Active        := FALSE ;
+        S1_CountP1LatchedCmd    := 0 ;
+        S1_CountP2LatchedCmd    := 0 ;
+
+        S1_CountHoldAccum       := 0 ;
+
+    END_IF ;
+
+END_IF ;
+
+
+(* ---------- TEMPORIZADOR DE ACCIONES S2 DEL CONTADOR ---------- *)
+
+IF S2_CountActionActive AND
+   (S2_CountHoldMode = 1) THEN
+
+    IF Pulse1s THEN
+        IF S2_CountHoldAccum < 32767 THEN
+            S2_CountHoldAccum := S2_CountHoldAccum + 1 ;
+        END_IF ;
+    END_IF ;
+
+    IF S2_CountHoldAccum >= S2_CountHoldPreset THEN
+
+        S2_CountActionActive    := FALSE ;
+        S2_CountBandPauseActive := FALSE ;
+        S2_CountLampActiveMask  := 0 ;
+
+        S2_CountP1Active        := FALSE ;
+        S2_CountP2Active        := FALSE ;
+        S2_CountP1LatchedCmd    := 0 ;
+        S2_CountP2LatchedCmd    := 0 ;
+
+        S2_CountHoldAccum       := 0 ;
+
+    END_IF ;
+
+END_IF ;
+
+
+(* ---------- AGREGAR PAUSAS / LUCES DE AMBOS CONTADORES ---------- *)
+
+CountBandStopLatch :=
+    S1_CountBandPauseActive OR
+    S2_CountBandPauseActive ;
+
+CountLampGreen  := FALSE ;
+CountLampYellow := FALSE ;
+CountLampRed    := FALSE ;
+
+IF (S1_CountLampActiveMask = 1) OR
+   (S1_CountLampActiveMask = 3) OR
+   (S1_CountLampActiveMask = 5) OR
+   (S1_CountLampActiveMask = 7) OR
+   (S2_CountLampActiveMask = 1) OR
+   (S2_CountLampActiveMask = 3) OR
+   (S2_CountLampActiveMask = 5) OR
+   (S2_CountLampActiveMask = 7) THEN
+
+    CountLampGreen := TRUE ;
+
+END_IF ;
+
+IF (S1_CountLampActiveMask = 2) OR
+   (S1_CountLampActiveMask = 3) OR
+   (S1_CountLampActiveMask = 6) OR
+   (S1_CountLampActiveMask = 7) OR
+   (S2_CountLampActiveMask = 2) OR
+   (S2_CountLampActiveMask = 3) OR
+   (S2_CountLampActiveMask = 6) OR
+   (S2_CountLampActiveMask = 7) THEN
+
+    CountLampYellow := TRUE ;
+
+END_IF ;
+
+IF (S1_CountLampActiveMask = 4) OR
+   (S1_CountLampActiveMask = 5) OR
+   (S1_CountLampActiveMask = 6) OR
+   (S1_CountLampActiveMask = 7) OR
+   (S2_CountLampActiveMask = 4) OR
+   (S2_CountLampActiveMask = 5) OR
+   (S2_CountLampActiveMask = 6) OR
+   (S2_CountLampActiveMask = 7) THEN
+
+    CountLampRed := TRUE ;
+
+END_IF ;
+
+
+(* ---------- CAMBIO DE DIRECCION SEGURO ---------- *)
+(* Corriendo: STOP -> espera 1 s -> cambia -> reanuda.         *)
+(* Ya detenida: cambia DirCmd inmediatamente.                  *)
+
+IF (CountRequestedDir = 1) OR
+   (CountRequestedDir = 2) THEN
+
+    CountDirTargetPending := CountRequestedDir ;
+    CountDirTarget_Reg    := CountRequestedDir ;
+
+    IF CountRequestedDir <> DirCmd THEN
+
+        IF BandRunning AND
+           NOT GenStop AND
+           NOT CountDirChangeActive THEN
+
+            CountDirChangeActive := TRUE ;
+            CountDirChangeState  := 1 ;
+            CountDirChangeTimer  := 0 ;
+
+        ELSIF NOT BandRunning AND
+              NOT CountDirChangeActive THEN
+
+            DirCmd := CountRequestedDir ;
+
+        END_IF ;
+
+    END_IF ;
+
+END_IF ;
+
+
+IF CountDirChangeActive THEN
+
+    IF HardStopActive OR
+       AuxStopActive OR
+       SoftStopActive OR
+       CountBandStopLatch OR
+       CountSystemStopLatch OR
+       NOT BandEnable THEN
+
+        (* Si otra accion ya tiene la banda detenida, aplicar la
+           nueva direccion mientras esta parada. *)
+        IF (CountDirTargetPending = 1) OR
+           (CountDirTargetPending = 2) THEN
+            DirCmd := CountDirTargetPending ;
+        END_IF ;
+
+        CountDirChangeActive := FALSE ;
+        CountDirChangeState  := 0 ;
+        CountDirChangeTimer  := 0 ;
+
+    ELSIF CountDirChangeState = 1 THEN
+
+        CountDirChangeState := 2 ;
+        CountDirChangeTimer := 0 ;
+
+    ELSIF CountDirChangeState = 2 THEN
+
+        IF Pulse1s THEN
+            CountDirChangeTimer := CountDirChangeTimer + 1 ;
+        END_IF ;
+
+        IF CountDirChangeTimer >= 1 THEN
+
+            IF (CountDirTargetPending = 1) OR
+               (CountDirTargetPending = 2) THEN
+                DirCmd := CountDirTargetPending ;
+            END_IF ;
+
+            CountDirChangeActive := FALSE ;
+            CountDirChangeState  := 0 ;
+            CountDirChangeTimer  := 0 ;
+
+        END_IF ;
+
+    ELSE
+
+        CountDirChangeActive := FALSE ;
+        CountDirChangeState  := 0 ;
+        CountDirChangeTimer  := 0 ;
+
+    END_IF ;
+
+END_IF ;
+
+
+(* ---------- ACTUALIZAR PAROS DESPUES DE ACCIONES DE CONTEO ---------- *)
+
+SystemStopActive :=
+    HardStopActive OR
+    CountSystemStopLatch ;
+
+GenStop :=
+    HardStopActive OR
+    AuxStopActive OR
+    SoftStopActive OR
+    CountSystemStopLatch ;
+
+
+(* PAUSA de banda por contador:
+   - NO borra BandEnable.
+   - La banda puede reanudar automaticamente al expirar HoldMode=1.
+   - HoldMode=0 la mantiene pausada hasta Reset/Nueva Config. *)
+
+IF CountBandStopLatch THEN
+
+    BandRunning := FALSE ;
+
+    IF CountStopSource = 2 THEN
+        StopReason := 8 ;
+    ELSE
+        StopReason := 7 ;
+    END_IF ;
+
+END_IF ;
+
+
+(* STOP TOTAL de proceso por contador: si borra habilitacion y
+   cancela eventos/plumas. Queda enclavado hasta R5/R6. *)
+
+IF CountSystemStopLatch THEN
+
+    BandEnable  := FALSE ;
+    BandRunning := FALSE ;
+
+    S1_StopLatch       := FALSE ;
+    S2_StopLatch       := FALSE ;
+    S1_WaitActive      := FALSE ;
+    S2_WaitActive      := FALSE ;
+    S1_EventActive     := FALSE ;
+    S2_EventActive     := FALSE ;
+    S1_EventActive_Reg := 0 ;
+    S2_EventActive_Reg := 0 ;
+    S1_TimerAccum      := 0 ;
+    S2_TimerAccum      := 0 ;
+
+END_IF ;
+
+
+(* ---------- FEEDBACK DEL CONTADOR ---------- *)
+
+IF CountBandStopLatch THEN
+    CountBandStop_Reg := 1 ;
+ELSE
+    CountBandStop_Reg := 0 ;
+END_IF ;
+
+IF CountSystemStopLatch THEN
+    CountSystemStop_Reg := 1 ;
+ELSE
+    CountSystemStop_Reg := 0 ;
+END_IF ;
+
+IF S1_CountActionActive THEN
+    S1_CountActionActive_Reg := 1 ;
+ELSE
+    S1_CountActionActive_Reg := 0 ;
+END_IF ;
+
+IF S2_CountActionActive THEN
+    S2_CountActionActive_Reg := 1 ;
+ELSE
+    S2_CountActionActive_Reg := 0 ;
+END_IF ;
+
+CountLampLatchedMask := 0 ;
+
+IF CountLampGreen THEN
+    CountLampLatchedMask := CountLampLatchedMask + 1 ;
+END_IF ;
+
+IF CountLampYellow THEN
+    CountLampLatchedMask := CountLampLatchedMask + 2 ;
+END_IF ;
+
+IF CountLampRed THEN
+    CountLampLatchedMask := CountLampLatchedMask + 4 ;
+END_IF ;
+
+IF CountDirChangeActive THEN
+    CountDirChangeActive_Reg := 1 ;
+ELSE
+    CountDirChangeActive_Reg := 0 ;
+END_IF ;
+
+IF S2_CountP1Active THEN
+    CountPluma1Override_Reg := S2_CountP1LatchedCmd ;
+ELSIF S1_CountP1Active THEN
+    CountPluma1Override_Reg := S1_CountP1LatchedCmd ;
+ELSE
+    CountPluma1Override_Reg := 0 ;
+END_IF ;
+
+IF S2_CountP2Active THEN
+    CountPluma2Override_Reg := S2_CountP2LatchedCmd ;
+ELSIF S1_CountP2Active THEN
+    CountPluma2Override_Reg := S1_CountP2LatchedCmd ;
+ELSE
+    CountPluma2Override_Reg := 0 ;
+END_IF ;
+
+
+(* ============================================================ *)
+
+
+(* §15 - TORRETA / LUCES - COMPOSICION ADITIVA v5             *)
+(*                                                            *)
+(* Ya no se usa ELSIF de prioridad para las luces. Las fuentes *)
+(* se SUMAN (OR logico), porque verde/amarilla/roja pueden ser *)
+(* solicitadas simultaneamente por fuentes distintas:          *)
+(* RUN/IDLE + S1 + S2 + I1 + contador + timer independiente.   *)
+(* I3 / HardStop apaga todas las luces.                        *)
+(* ============================================================ *)
+
+
+(* ---------- LAMPARA TEMPORIZADA INDEPENDIENTE ---------- *)
+
+TimedLampTriggerPulse :=
+    (TimedLampTrigger <> 0) AND
+    (TimedLampTrigger <> TimedLampPrev) ;
+
+TimedLampPrev := TimedLampTrigger ;
+
+IF TimedLampTriggerPulse AND
+   CfgValid AND
+   (TimedLampMask > 0) AND
+   (TimedLampMask <= 7) AND
+   (TimedLampPreset > 0) THEN
+
+    TimedLampActive     := TRUE ;
+    TimedLampAccum      := 0 ;
+    TimedLampActive_Reg := 1 ;
+
+END_IF ;
+
+IF TimedLampActive THEN
+
+    IF Pulse1s THEN
+
+        IF TimedLampAccum < 32767 THEN
+            TimedLampAccum := TimedLampAccum + 1 ;
+        END_IF ;
+
+    END_IF ;
+
+    IF TimedLampAccum >= TimedLampPreset THEN
+
+        TimedLampActive     := FALSE ;
+        TimedLampAccum      := 0 ;
+        TimedLampActive_Reg := 0 ;
+
+    END_IF ;
+
+END_IF ;
+
+IF TimedLampActive THEN
+    TimedLampActive_Reg := 1 ;
+ELSE
+    TimedLampActive_Reg := 0 ;
+END_IF ;
+
+
+(* ---------- COMPOSICION DE TORRETA ---------- *)
+
+tVerde    := FALSE ;
+tAmarilla := FALSE ;
+tRoja     := FALSE ;
+
+
+IF NOT HardStopActive THEN
+
+
+    (* 1) Estado base de la banda: RUN o IDLE. *)
+
+    IF BandRunning THEN
+
+        IF (TorretaRun = 1) OR
+           (TorretaRun = 3) OR
+           (TorretaRun = 5) OR
+           (TorretaRun = 7) THEN
+            tVerde := TRUE ;
+        END_IF ;
+
+        IF (TorretaRun = 2) OR
+           (TorretaRun = 3) OR
+           (TorretaRun = 6) OR
+           (TorretaRun = 7) THEN
+            tAmarilla := TRUE ;
+        END_IF ;
+
+        IF (TorretaRun = 4) OR
+           (TorretaRun = 5) OR
+           (TorretaRun = 6) OR
+           (TorretaRun = 7) THEN
+            tRoja := TRUE ;
+        END_IF ;
+
+    ELSE
+
+        IF (TorretaIdle = 1) OR
+           (TorretaIdle = 3) OR
+           (TorretaIdle = 5) OR
+           (TorretaIdle = 7) THEN
+            tVerde := TRUE ;
+        END_IF ;
+
+        IF (TorretaIdle = 2) OR
+           (TorretaIdle = 3) OR
+           (TorretaIdle = 6) OR
+           (TorretaIdle = 7) THEN
+            tAmarilla := TRUE ;
+        END_IF ;
+
+        IF (TorretaIdle = 4) OR
+           (TorretaIdle = 5) OR
+           (TorretaIdle = 6) OR
+           (TorretaIdle = 7) THEN
+            tRoja := TRUE ;
+        END_IF ;
+
+    END_IF ;
+
+
+    (* 2) Evento S1. *)
+
+    IF S1_EventActive THEN
+
+        IF (S1_TorretaMask = 1) OR
+           (S1_TorretaMask = 3) OR
+           (S1_TorretaMask = 5) OR
+           (S1_TorretaMask = 7) THEN
+            tVerde := TRUE ;
+        END_IF ;
+
+        IF (S1_TorretaMask = 2) OR
+           (S1_TorretaMask = 3) OR
+           (S1_TorretaMask = 6) OR
+           (S1_TorretaMask = 7) THEN
+            tAmarilla := TRUE ;
+        END_IF ;
+
+        IF (S1_TorretaMask = 4) OR
+           (S1_TorretaMask = 5) OR
+           (S1_TorretaMask = 6) OR
+           (S1_TorretaMask = 7) THEN
+            tRoja := TRUE ;
+        END_IF ;
+
+    END_IF ;
+
+
+    (* 3) Evento S2. *)
+
+    IF S2_EventActive THEN
+
+        IF (S2_TorretaMask = 1) OR
+           (S2_TorretaMask = 3) OR
+           (S2_TorretaMask = 5) OR
+           (S2_TorretaMask = 7) THEN
+            tVerde := TRUE ;
+        END_IF ;
+
+        IF (S2_TorretaMask = 2) OR
+           (S2_TorretaMask = 3) OR
+           (S2_TorretaMask = 6) OR
+           (S2_TorretaMask = 7) THEN
+            tAmarilla := TRUE ;
+        END_IF ;
+
+        IF (S2_TorretaMask = 4) OR
+           (S2_TorretaMask = 5) OR
+           (S2_TorretaMask = 6) OR
+           (S2_TorretaMask = 7) THEN
+            tRoja := TRUE ;
+        END_IF ;
+
+    END_IF ;
+
+
+    (* 4) Luces mientras I1 esta fisicamente presionado. *)
+
+    IF BtnStart THEN
+
+        IF (I1_LampMask = 1) OR
+           (I1_LampMask = 3) OR
+           (I1_LampMask = 5) OR
+           (I1_LampMask = 7) THEN
+            tVerde := TRUE ;
+        END_IF ;
+
+        IF (I1_LampMask = 2) OR
+           (I1_LampMask = 3) OR
+           (I1_LampMask = 6) OR
+           (I1_LampMask = 7) THEN
+            tAmarilla := TRUE ;
+        END_IF ;
+
+        IF (I1_LampMask = 4) OR
+           (I1_LampMask = 5) OR
+           (I1_LampMask = 6) OR
+           (I1_LampMask = 7) THEN
+            tRoja := TRUE ;
+        END_IF ;
+
+    END_IF ;
+
+
+    (* 5) Acciones activas del contador. *)
+
+    IF CountLampGreen THEN
+        tVerde := TRUE ;
+    END_IF ;
+
+    IF CountLampYellow THEN
+        tAmarilla := TRUE ;
+    END_IF ;
+
+    IF CountLampRed THEN
+        tRoja := TRUE ;
+    END_IF ;
+
+
+    (* 6) Lampara temporizada independiente. *)
+
+    IF TimedLampActive THEN
+
+        IF (TimedLampMask = 1) OR
+           (TimedLampMask = 3) OR
+           (TimedLampMask = 5) OR
+           (TimedLampMask = 7) THEN
+            tVerde := TRUE ;
+        END_IF ;
+
+        IF (TimedLampMask = 2) OR
+           (TimedLampMask = 3) OR
+           (TimedLampMask = 6) OR
+           (TimedLampMask = 7) THEN
+            tAmarilla := TRUE ;
+        END_IF ;
+
+        IF (TimedLampMask = 4) OR
+           (TimedLampMask = 5) OR
+           (TimedLampMask = 6) OR
+           (TimedLampMask = 7) THEN
+            tRoja := TRUE ;
+        END_IF ;
+
+    END_IF ;
+
+
+END_IF ;
+
+
+PhQ3 := tVerde ;
+PhQ4 := tAmarilla ;
+PhQ5 := tRoja ;
+
+
+(* ============================================================ *)
+
+
+(* §16 - GENERACION DE COMANDO VFD                            *)
+(* ============================================================ *)
+
+tmpDir := 1 ;
+
+
+IF NOT GenStop AND
+   MotionCfgPresent AND
+   BandEnable AND
+   CfgReady AND
+   CfgValid AND
+   (InitSeqState = 0) THEN
+
+
+    (* Cambio de direccion por contador: detener antes de invertir. *)
+
+    IF CountDirChangeActive THEN
+
+        tmpDir      := 1 ;
+        BandRunning := FALSE ;
+
+
+    (* Pausa de banda disparada por contador.
+       NO elimina BandEnable; puede reanudar al terminar HoldMode=1. *)
+
+    ELSIF CountBandStopLatch THEN
+
+        tmpDir      := 1 ;
+        BandRunning := FALSE ;
+
+
+    (* Cualquier sensor con StopLatch gana prioridad *)
+
+    ELSIF S1_StopLatch OR
+          S2_StopLatch THEN
+
+        tmpDir      := 1 ;
+        BandRunning := FALSE ;
+
+
+    ELSE
+
+
+        (* Direccion 1 *)
+
+        IF DirCmd = 1 THEN
+
+            tmpDir      := 18 ;
+            BandRunning := TRUE ;
+
+
+        (* Direccion 2 *)
+
+        ELSIF DirCmd = 2 THEN
+
+            tmpDir      := 34 ;
+            BandRunning := TRUE ;
+
+
+        ELSE
+
+            tmpDir      := 1 ;
+            BandRunning := FALSE ;
+
+        END_IF ;
+
+    END_IF ;
+
+
+ELSE
+
+    tmpDir      := 1 ;
+    BandRunning := FALSE ;
+
+END_IF ;
+
+
+VFD_Control := tmpDir ;
+
+
+(* ============================================================ *)
+(* §17 - CONTROL DE PLUMAS                                    *)
+(*                                                            *)
+(* MAPEO FISICO CONFIRMADO:                                    *)
+(*   Pluma 1: Q8 = SUBIR / Q9 = BAJAR                         *)
+(*   Pluma 2: Q6 = SUBIR / Q7 = BAJAR                         *)
+(*                                                            *)
+(* Comandos manuales R60/R61: 0 stop, 1 subir, 2 bajar.       *)
+(* Sensor commands R28/R29/R38/R39:                           *)
+(*   0=no override, 1=subir, 2=bajar, 3=forzar stop.          *)
+(* Prioridad: I3 HardStop > evento S2 > evento S1 > manual. *)
+(* ============================================================ *)
+
+PhQ6 := FALSE ;
+PhQ7 := FALSE ;
+PhQ8 := FALSE ;
+PhQ9 := FALSE ;
+
+Pluma1Status := 0 ;
+Pluma2Status := 0 ;
+
+
+(* Comando efectivo comienza con el comando manual *)
+
+EffPluma1Cmd := Pluma1Cmd ;
+EffPluma2Cmd := Pluma2Cmd ;
+
+
+(* Evento S1 *)
+
+IF S1_EventActive THEN
+
+    IF S1_Pluma1Cmd = 1 THEN
+        EffPluma1Cmd := 1 ;
+    ELSIF S1_Pluma1Cmd = 2 THEN
+        EffPluma1Cmd := 2 ;
+    ELSIF S1_Pluma1Cmd = 3 THEN
+        EffPluma1Cmd := 0 ;
+    END_IF ;
+
+    IF S1_Pluma2Cmd = 1 THEN
+        EffPluma2Cmd := 1 ;
+    ELSIF S1_Pluma2Cmd = 2 THEN
+        EffPluma2Cmd := 2 ;
+    ELSIF S1_Pluma2Cmd = 3 THEN
+        EffPluma2Cmd := 0 ;
+    END_IF ;
+
+END_IF ;
+
+
+(* Contador S1 gana sobre evento S1. *)
+
+IF S1_CountP1Active THEN
+
+    IF S1_CountP1LatchedCmd = 1 THEN
+        EffPluma1Cmd := 1 ;
+    ELSIF S1_CountP1LatchedCmd = 2 THEN
+        EffPluma1Cmd := 2 ;
+    ELSIF S1_CountP1LatchedCmd = 3 THEN
+        EffPluma1Cmd := 0 ;
+    END_IF ;
+
+END_IF ;
+
+IF S1_CountP2Active THEN
+
+    IF S1_CountP2LatchedCmd = 1 THEN
+        EffPluma2Cmd := 1 ;
+    ELSIF S1_CountP2LatchedCmd = 2 THEN
+        EffPluma2Cmd := 2 ;
+    ELSIF S1_CountP2LatchedCmd = 3 THEN
+        EffPluma2Cmd := 0 ;
+    END_IF ;
+
+END_IF ;
+
+
+(* Evento S2 tiene prioridad sobre S1. *)
+
+IF S2_EventActive THEN
+
+    IF S2_Pluma1Cmd = 1 THEN
+        EffPluma1Cmd := 1 ;
+    ELSIF S2_Pluma1Cmd = 2 THEN
+        EffPluma1Cmd := 2 ;
+    ELSIF S2_Pluma1Cmd = 3 THEN
+        EffPluma1Cmd := 0 ;
+    END_IF ;
+
+    IF S2_Pluma2Cmd = 1 THEN
+        EffPluma2Cmd := 1 ;
+    ELSIF S2_Pluma2Cmd = 2 THEN
+        EffPluma2Cmd := 2 ;
+    ELSIF S2_Pluma2Cmd = 3 THEN
+        EffPluma2Cmd := 0 ;
+    END_IF ;
+
+END_IF ;
+
+
+(* Contador S2 tiene la mayor prioridad automatica. *)
+
+IF S2_CountP1Active THEN
+
+    IF S2_CountP1LatchedCmd = 1 THEN
+        EffPluma1Cmd := 1 ;
+    ELSIF S2_CountP1LatchedCmd = 2 THEN
+        EffPluma1Cmd := 2 ;
+    ELSIF S2_CountP1LatchedCmd = 3 THEN
+        EffPluma1Cmd := 0 ;
+    END_IF ;
+
+END_IF ;
+
+IF S2_CountP2Active THEN
+
+    IF S2_CountP2LatchedCmd = 1 THEN
+        EffPluma2Cmd := 1 ;
+    ELSIF S2_CountP2LatchedCmd = 2 THEN
+        EffPluma2Cmd := 2 ;
+    ELSIF S2_CountP2LatchedCmd = 3 THEN
+        EffPluma2Cmd := 0 ;
+    END_IF ;
+
+END_IF ;
+
+
+IF NOT HardStopActive AND
+   NOT CountSystemStopLatch THEN
+
+
+    (* ---------- PLUMA 1: Q8 UP / Q9 DOWN ---------- *)
+
+    IF EffPluma1Cmd = 1 THEN
+
+        PhQ8         := TRUE ;
+        PhQ9         := FALSE ;
+        Pluma1Status := 1 ;
+
+    ELSIF EffPluma1Cmd = 2 THEN
+
+        PhQ8         := FALSE ;
+        PhQ9         := TRUE ;
+        Pluma1Status := 2 ;
+
+    ELSE
+
+        PhQ8         := FALSE ;
+        PhQ9         := FALSE ;
+        Pluma1Status := 0 ;
+
+    END_IF ;
+
+
+    (* ---------- PLUMA 2: Q6 UP / Q7 DOWN ---------- *)
+
+    IF EffPluma2Cmd = 1 THEN
+
+        PhQ6         := TRUE ;
+        PhQ7         := FALSE ;
+        Pluma2Status := 1 ;
+
+    ELSIF EffPluma2Cmd = 2 THEN
+
+        PhQ6         := FALSE ;
+        PhQ7         := TRUE ;
+        Pluma2Status := 2 ;
+
+    ELSE
+
+        PhQ6         := FALSE ;
+        PhQ7         := FALSE ;
+        Pluma2Status := 0 ;
+
+    END_IF ;
+
+END_IF ;
+
+
+(* ============================================================ *)
+
+
+(* §18 - FEEDBACK AL BACKEND                                  *)
+(* ============================================================ *)
+
+IF BandEnable THEN
+
+    BandEnable_Reg := 1 ;
+
+ELSE
+
+    BandEnable_Reg := 0 ;
+
+END_IF ;
+
+
+IF BandRunning THEN
+
+    IF DirCmd = 2 THEN
+
+        BandStatus := 2 ;
+
+    ELSE
+
+        BandStatus := 1 ;
+
+    END_IF ;
+
+ELSE
+
+    BandStatus := 0 ;
+
+END_IF ;
+
+
+IF S1_EventActive THEN
+    S1_EventActive_Reg := 1 ;
+ELSE
+    S1_EventActive_Reg := 0 ;
+END_IF ;
+
+IF S2_EventActive THEN
+    S2_EventActive_Reg := 1 ;
+ELSE
+    S2_EventActive_Reg := 0 ;
+END_IF ;
+
+
+IF S1_CountDone THEN
+
+    S1_CountDone_Reg := 1 ;
+
+ELSE
+
+    S1_CountDone_Reg := 0 ;
+
+END_IF ;
+
+
+IF S2_CountDone THEN
+
+    S2_CountDone_Reg := 1 ;
+
+ELSE
+
+    S2_CountDone_Reg := 0 ;
+
+END_IF ;
+
+
+
+(* ============================================================ *)
+(* §19 - MONITOREO / DIAGNOSTICO DE ENTRADAS Y SALIDAS        *)
+(*                                                            *)
+(* Registros R100..R121 son SOLO DE MONITOREO.                *)
+(* Permiten comparar el estado fisico con la normalizacion ST. *)
+(* 1 = activo/TRUE, 0 = inactivo/FALSE.                        *)
+(* ============================================================ *)
+
+(* ---------- ENTRADAS FISICAS CRUDAS ---------- *)
+
+IF PhIn1 THEN
+    Mon_I1_Raw := 1 ;
+ELSE
+    Mon_I1_Raw := 0 ;
+END_IF ;
+
+IF PhIn2 THEN
+    Mon_I2_Raw := 1 ;
+ELSE
+    Mon_I2_Raw := 0 ;
+END_IF ;
+
+IF PhIn3 THEN
+    Mon_I3_Raw := 1 ;
+ELSE
+    Mon_I3_Raw := 0 ;
+END_IF ;
+
+IF PhIn4 THEN
+    Mon_I4_Raw := 1 ;
+ELSE
+    Mon_I4_Raw := 0 ;
+END_IF ;
+
+IF PhIn5 THEN
+    Mon_I5_Raw := 1 ;
+ELSE
+    Mon_I5_Raw := 0 ;
+END_IF ;
+
+
+(* ---------- ENTRADAS NORMALIZADAS POR EL ST ---------- *)
+
+IF BtnStart THEN
+    Mon_BtnStart := 1 ;
+ELSE
+    Mon_BtnStart := 0 ;
+END_IF ;
+
+IF BtnAux THEN
+    Mon_BtnAux := 1 ;
+ELSE
+    Mon_BtnAux := 0 ;
+END_IF ;
+
+IF BtnStop THEN
+    Mon_BtnStop := 1 ;
+ELSE
+    Mon_BtnStop := 0 ;
+END_IF ;
+
+IF S1_Det THEN
+    Mon_S1_Det := 1 ;
+ELSE
+    Mon_S1_Det := 0 ;
+END_IF ;
+
+IF S2_Det THEN
+    Mon_S2_Det := 1 ;
+ELSE
+    Mon_S2_Det := 0 ;
+END_IF ;
+
+
+(* ---------- SALIDAS FISICAS ---------- *)
+
+IF PhQ3 THEN
+    Mon_Q3 := 1 ;
+ELSE
+    Mon_Q3 := 0 ;
+END_IF ;
+
+IF PhQ4 THEN
+    Mon_Q4 := 1 ;
+ELSE
+    Mon_Q4 := 0 ;
+END_IF ;
+
+IF PhQ5 THEN
+    Mon_Q5 := 1 ;
+ELSE
+    Mon_Q5 := 0 ;
+END_IF ;
+
+IF PhQ6 THEN
+    Mon_Q6 := 1 ;
+ELSE
+    Mon_Q6 := 0 ;
+END_IF ;
+
+IF PhQ7 THEN
+    Mon_Q7 := 1 ;
+ELSE
+    Mon_Q7 := 0 ;
+END_IF ;
+
+IF PhQ8 THEN
+    Mon_Q8 := 1 ;
+ELSE
+    Mon_Q8 := 0 ;
+END_IF ;
+
+IF PhQ9 THEN
+    Mon_Q9 := 1 ;
+ELSE
+    Mon_Q9 := 0 ;
+END_IF ;
+
+
+(* ---------- ESTADOS INTERNOS IMPORTANTES ---------- *)
+
+IF GenStop THEN
+    Mon_GenStop := 1 ;
+ELSE
+    Mon_GenStop := 0 ;
+END_IF ;
+
+IF BandEnable THEN
+    Mon_BandEnable := 1 ;
+ELSE
+    Mon_BandEnable := 0 ;
+END_IF ;
+
+IF BandRunning THEN
+    Mon_BandRunning := 1 ;
+ELSE
+    Mon_BandRunning := 0 ;
+END_IF ;
+
+IF CfgValid THEN
+    Mon_CfgValid := 1 ;
+ELSE
+    Mon_CfgValid := 0 ;
+END_IF ;
+
+IF CfgReady THEN
+    Mon_CfgReady := 1 ;
+ELSE
+    Mon_CfgReady := 0 ;
+END_IF ;
+
+
+(* ============================================================ *)
+(* ---------- ESTADOS NUEVOS DE SECUENCIA ---------- *)
+
+IF HardStopActive THEN
+    Mon_HardStop := 1 ;
+ELSE
+    Mon_HardStop := 0 ;
+END_IF ;
+
+IF AuxStopActive THEN
+    Mon_AuxStop := 1 ;
+ELSE
+    Mon_AuxStop := 0 ;
+END_IF ;
+
+IF SoftStopActive THEN
+    Mon_SoftStop := 1 ;
+ELSE
+    Mon_SoftStop := 0 ;
+END_IF ;
+
+IF AutoStopDone THEN
+    Mon_AutoStopDone := 1 ;
+ELSE
+    Mon_AutoStopDone := 0 ;
+END_IF ;
+
+Mon_StopReason    := StopReason ;
+Mon_AutoStopAccum := AutoStopAccum ;
+
+
+(* §20 - GUARDAR RETAIN                                       *)
+(* ============================================================ *)
+
+R_DirCmd          := DirCmd ;
+R_FreqRequest     := FreqRequest ;
+
+R_StopMode        := StopMode ;
+R_AutoStopMode    := AutoStopMode ;
+R_AutoStopPreset  := AutoStopPreset ;
+
+R_S1_BandMode     := S1_BandMode ;
+R_S2_BandMode     := S2_BandMode ;
+
+R_S1_Enable       := S1_Enable ;
+R_S1_Action       := S1_Action ;
+R_S1_TimerPreset  := S1_TimerPreset ;
+R_S1_CountPreset  := S1_CountPreset ;
+R_S1_TorretaMask  := S1_TorretaMask ;
+R_S1_CountAccum   := S1_CountAccum ;
+R_S1_Pluma1Cmd    := S1_Pluma1Cmd ;
+R_S1_Pluma2Cmd    := S1_Pluma2Cmd ;
+
+R_S2_Enable       := S2_Enable ;
+R_S2_Action       := S2_Action ;
+R_S2_TimerPreset  := S2_TimerPreset ;
+R_S2_CountPreset  := S2_CountPreset ;
+R_S2_TorretaMask  := S2_TorretaMask ;
+R_S2_CountAccum   := S2_CountAccum ;
+R_S2_Pluma1Cmd    := S2_Pluma1Cmd ;
+R_S2_Pluma2Cmd    := S2_Pluma2Cmd ;
+
+R_S1_CountActionMask := S1_CountActionMask ;
+R_S1_CountLampMask   := S1_CountLampMask ;
+R_S1_CountDirTarget  := S1_CountDirTarget ;
+R_S1_CountPluma1Cmd  := S1_CountPluma1Cmd ;
+R_S1_CountPluma2Cmd  := S1_CountPluma2Cmd ;
+
+R_S2_CountActionMask := S2_CountActionMask ;
+R_S2_CountLampMask   := S2_CountLampMask ;
+R_S2_CountDirTarget  := S2_CountDirTarget ;
+R_S2_CountPluma1Cmd  := S2_CountPluma1Cmd ;
+R_S2_CountPluma2Cmd  := S2_CountPluma2Cmd ;
+
+R_S1_CountHoldMode   := S1_CountHoldMode ;
+R_S1_CountHoldPreset := S1_CountHoldPreset ;
+R_S2_CountHoldMode   := S2_CountHoldMode ;
+R_S2_CountHoldPreset := S2_CountHoldPreset ;
+
+R_TimedLampMask      := TimedLampMask ;
+R_TimedLampPreset    := TimedLampPreset ;
+
+R_TorretaRun      := TorretaRun ;
+R_TorretaIdle     := TorretaIdle ;
+
+R_S1_CountDone    := S1_CountDone ;
+R_S2_CountDone    := S2_CountDone ;

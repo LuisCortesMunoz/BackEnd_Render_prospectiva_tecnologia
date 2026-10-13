@@ -50,6 +50,8 @@ import time
 
 from pymodbus.client import ModbusTcpClient
 
+import banda_motor
+
 
 # ---------------------------------------------------------------------------
 # CONEXION
@@ -220,8 +222,22 @@ def _addr(clave: str) -> int:
 ADDR_ESCRIBIBLES = frozenset(R(n) for n, acc, _ in BAND_REGISTERS.values() if acc in (CFG, TRIG))
 ADDR_SOLO_LECTURA = frozenset(R(n) for n, acc, _ in BAND_REGISTERS.values() if acc not in (CFG, TRIG))
 
-# Bloques contiguos que lee leer_estado(): 5 peticiones Modbus en total.
-LECTURA_BLOQUES = ((1, 41), (50, 1), (60, 40), (100, 28), (500, 7))
+# ST v6 - motor configurable (banda_motor.py): EC = configuracion que escribe
+# el backend (%R200..%R459), ES = estado que publica el ST (%R460..%R499).
+ADDR_MOTOR = frozenset(range(R(banda_motor.ENGINE_BASE),
+                             R(banda_motor.ENGINE_BASE) + banda_motor.ENGINE_LEN))
+ADDR_MOTOR_ESTADO = frozenset(range(R(banda_motor.STATUS_BASE),
+                                    R(banda_motor.STATUS_BASE) + banda_motor.STATUS_LEN))
+ADDR_ESCRIBIBLES = ADDR_ESCRIBIBLES | ADDR_MOTOR
+ADDR_SOLO_LECTURA = ADDR_SOLO_LECTURA | ADDR_MOTOR_ESTADO
+ADDR_ENGINE_MODE = R(banda_motor.ENGINE_BASE + banda_motor.O_MODE)
+
+# Bloques contiguos que lee leer_estado(): 7 peticiones Modbus en total (las
+# dos ultimas son del motor configurable; en un PLC con el ST v5 leen ceros).
+LECTURA_BLOQUES = ((1, 41), (50, 1), (60, 40), (100, 28), (500, 7),
+                   (banda_motor.ENGINE_BASE, 1),
+                   (banda_motor.STATUS_BASE, banda_motor.STATUS_LEN))
+MODBUS_MAX_BLOQUE = 100   # registros por peticion write_registers (limite Modbus 123)
 
 # Nombres historicos (los usan los metodos y app.py).
 ADDR_BAND_ENABLE_REG = _addr("band_enable")
@@ -571,6 +587,26 @@ class BandaPLC:
         """Lee un registro de la banda (holding register)."""
         return self.read_band_block(addr, 1)[0]
 
+    def write_band_block(self, addr: int, valores: list):
+        """Escribe registros consecutivos (write_registers) en peticiones de
+        MODBUS_MAX_BLOQUE. TODOS deben estar en la lista blanca."""
+        valores = [int(v) & 0xFFFF for v in valores]
+        fuera = [a for a in range(addr, addr + len(valores)) if a not in ADDR_ESCRIBIBLES]
+        if fuera:
+            raise ValueError(f"%R{fuera[0] - 2999} no es escribible: el bloque no cabe en "
+                             f"la lista blanca de la banda.")
+        for i in range(0, len(valores), MODBUS_MAX_BLOQUE):
+            trozo = valores[i:i + MODBUS_MAX_BLOQUE]
+            a = addr + i
+            try:
+                r = self.client.write_registers(a, trozo, device_id=self.unit)
+            except TypeError:
+                r = self.client.write_registers(a, trozo, slave=self.unit)
+            if r is None:
+                raise IOError(f"Sin respuesta escribiendo %R{a - 2999}+{len(trozo)}")
+            if hasattr(r, "isError") and r.isError():
+                raise IOError(f"Error escribiendo %R{a - 2999}+{len(trozo)}")
+
     # Alias cortos de uso interno (misma funcion, nombre historico).
     _w = write_band_register
     _r = read_band_register
@@ -859,6 +895,68 @@ class BandaPLC:
         self._w(ADDR_SENSOR[n]["count_accum"], 0)
         print(f"S{n}: contador en 0" + (" (CountDone sigue activo)" if seguia else ""))
         return seguia
+
+    # -- ST v6: motor configurable --------------------------------------
+    def version_st(self) -> int:
+        """6 si el PLC tiene el ST v6 (ES[0] = %R460); 0 con el ST v5."""
+        return _con_signo(self._r(R(banda_motor.STATUS_BASE + banda_motor.S_VERSION)))
+
+    def verificar_st_v6(self):
+        """Se niega a cargar un programa del motor configurable en un PLC que
+        todavia tiene el ST v5: los registros %R200..%R459 no harian nada y la
+        banda se quedaria quieta sin ninguna explicacion."""
+        v = self.version_st()
+        if v != banda_motor.ENGINE_VERSION:
+            raise ValueError(
+                "El PLC de la banda no tiene el programa maestro v6 (motor configurable): "
+                f"%R460 = {v}, se esperaba {banda_motor.ENGINE_VERSION}. Descarga "
+                "ST_banda_v6_motor_configurable.txt con Cscape (ver GUIA_banda_v6.md) "
+                "y vuelve a cargar.")
+        print("ST v6 detectado en el PLC de la banda")
+
+    def configurar_motor(self, registros):
+        """Escribe EC[0..259] (%R200..%R459) y lo relee: si algun registro no
+        conserva su valor, otra variable del ST ocupa esa direccion."""
+        ec = list(registros)
+        if len(ec) != banda_motor.ENGINE_LEN:
+            raise ValueError(f"El bloque del motor debe tener {banda_motor.ENGINE_LEN} registros.")
+        err = banda_motor.error_registros(ec)
+        if err:
+            raise ValueError(f"Bloque del motor invalido en {banda_motor.campo_de_offset(err - 1)}.")
+        base = R(banda_motor.ENGINE_BASE)
+        # El ST relee EC en cada scan: EngineMode va a 0 mientras se escribe el
+        # resto del bloque y a 1 al final, para que nunca corra una
+        # configuracion a medias (con 0 corre v5, con sensores y torreta ya en 0).
+        self._w(base, 0)
+        self.write_band_block(base + 1, ec[1:])
+        self._w(base, ec[0])
+        leido = []
+        for i in range(0, len(ec), MODBUS_MAX_BLOQUE):
+            leido += self.read_band_block(base + i, min(MODBUS_MAX_BLOQUE, len(ec) - i))
+        malos = [i for i, (a, b) in enumerate(zip(ec, leido)) if (a & 0xFFFF) != b]
+        if malos:
+            i = malos[0]
+            raise IOError(f"El PLC no conserva %R{banda_motor.ENGINE_BASE + i} "
+                          f"({banda_motor.campo_de_offset(i)}): escrito {ec[i]}, leido {leido[i]}. "
+                          "Revisa en Cscape que EC este en %R200 y nada mas use ese rango.")
+        print(f"Motor configurable: {sum(1 for v in ec if v)} campos activos escritos")
+
+    def apagar_motor(self):
+        """EngineMode = 0: el PLC usa la logica v5. En un PLC con el ST v5 el
+        registro %R200 esta libre, asi que escribirlo no tiene efecto."""
+        self._w(ADDR_ENGINE_MODE, 0)
+
+    def boton_app(self, n, activo: bool):
+        """Botones virtuales APP1 / APP2 (EC[11] / EC[12]) del motor."""
+        if n not in (1, 2):
+            raise ValueError("Boton de la app no valido: usa 1 o 2.")
+        ofs = banda_motor.O_APP1 if n == 1 else banda_motor.O_APP2
+        self._w(R(banda_motor.ENGINE_BASE + ofs), 1 if activo else 0)
+
+    def leer_motor(self) -> dict:
+        es = [_con_signo(v) for v in
+              self.read_band_block(R(banda_motor.STATUS_BASE), banda_motor.STATUS_LEN)]
+        return banda_motor.estado_desde_es(es)
 
     # -- §15  torreta ------------------------------------------------------
     def configurar_torreta(self, mask_run=None, mask_idle=None, mask_i1=None):
@@ -1196,6 +1294,11 @@ def estado_desde_registros(reg: dict) -> dict:
         if n in reg
     ]
     estado["fase"] = _fase_visual(estado)
+    # ST v6: motor configurable (en un PLC con el ST v5 estos registros valen 0).
+    es = [reg.get(banda_motor.STATUS_BASE + i, 0) for i in range(banda_motor.STATUS_LEN)]
+    estado["st_version"] = es[banda_motor.S_VERSION] or 5
+    estado["engine_mode"] = reg.get(banda_motor.ENGINE_BASE, 0)
+    estado["motor_configurable"] = banda_motor.estado_desde_es(es) if es[0] else {}
     return estado
 
 
@@ -1290,6 +1393,12 @@ def motivos_config_invalida(reg: dict) -> list:
         m.append(f"{r('timed_lamp_preset')} = {g('timed_lamp_preset')}: no puede ser negativo.")
     if g("timed_lamp_mask") and g("timed_lamp_preset") <= 0:
         m.append(f"{r('timed_lamp_mask')} = {g('timed_lamp_mask')} necesita {r('timed_lamp_preset')} mayor que 0.")
+    # ST v6 (§3b): el motor configurable reporta el primer campo invalido en ES[2].
+    if reg.get(banda_motor.ENGINE_BASE, 0) == 1 and reg.get(banda_motor.STATUS_BASE, 0):
+        err = reg.get(banda_motor.STATUS_BASE + banda_motor.S_ERROR, 0)
+        if err:
+            m.append(f"Motor configurable: el campo {banda_motor.campo_de_offset(err - 1)} "
+                     f"(%R{banda_motor.ENGINE_BASE + err - 1}) esta fuera de rango.")
     return m
 
 
@@ -1516,6 +1625,8 @@ def validar_config(cfg) -> list:
     if cfg.get("sequence"):
         errores.append("El PLC de la banda no tiene secuenciador de pasos: "
                        "'sequence' no aplica a este equipo.")
+    if banda_motor.es_motor(band):
+        return errores + _validar_config_motor(band)
 
     # Frecuencia: el ST invalida la configuracion fuera de 1..327 Hz porque
     # multiplica por 100 sobre un INT de 16 bits.
@@ -1619,6 +1730,34 @@ def validar_config(cfg) -> list:
     return errores
 
 
+CAMPOS_V5 = ("s1_action", "s2_action", "wait_s1_s", "wait_s2_s", "count_s1", "count_s2",
+             "torreta_s1", "torreta_s2", "torreta_run", "torreta_idle", "torreta_i1",
+             "s1_pluma1", "s1_pluma2", "s2_pluma1", "s2_pluma2", "timed_lamp_mask",
+             "s1_count_action_mask", "s2_count_action_mask")
+
+
+def _validar_config_motor(band) -> list:
+    """Programa del motor configurable (ST v6): movimiento + band.engine."""
+    errores = []
+    marcha = band.get("enable") is not False
+    if marcha:
+        if band.get("freq_hz") is None:
+            errores.append("La banda debe moverse: indica la frecuencia en Hz (1..327).")
+        else:
+            _entero_en_rango(band["freq_hz"], FREQ_MIN_HZ, FREQ_MAX_HZ, "band.freq_hz (Hz)", errores)
+        d = band.get("direction")
+        if d is not None and (str(d).strip().lower() not in BAND_DIRS
+                              or BAND_DIR[str(d).strip().lower()] == DIR_PARO):
+            errores.append(f"band.direction='{d}' debe ser 1/'derecha' o 2/'izquierda'.")
+    if band.get("stop_mode") is not None and _codigo(band["stop_mode"], STOP_MODES, 0, 3) is None:
+        errores.append(f"band.stop_mode='{band['stop_mode']}' debe ser 0..3.")
+    if _auto_stop(band)[0]:
+        errores.append("Con el motor configurable el paro automatico se hace con un timer "
+                       "(TON sobre BANDA_CORRIENDO conectado a motor.paro), no con auto_stop.")
+    e, _ = banda_motor.validar_motor(band)
+    return errores + e
+
+
 # Valores historicos del anti-retrigger. El editor los usa para DIBUJAR sus
 # rungs (presentacion); el PLC ya no los tiene. Solo se avisa cuando el usuario
 # pidio un tiempo distinto del historico, para no llenar de ruido cada programa.
@@ -1630,6 +1769,18 @@ def avisos_config(cfg) -> list:
     condiciones que el operador tiene que conocer)."""
     avisos = []
     band = (cfg or {}).get("band") or {}
+
+    if banda_motor.es_motor(band):
+        _, avisos = banda_motor.validar_motor(band)
+        avisos = list(avisos)
+        viejos = [c for c in CAMPOS_V5 if band.get(c)]
+        if viejos:
+            avisos.append("Con el motor configurable se ignoran los campos v5: "
+                          + ", ".join("band." + c for c in viejos) + ".")
+        if not sin_marcha(cfg):
+            avisos.append("Tras cargar, la banda queda LISTA pero detenida: arranca con "
+                          f"{boton_start(cfg)} (o con lo que indique el programa).")
+        return avisos
 
     pedidos = [c for c in CAMPOS_IGNORADOS
                if band.get(c) is not None and band.get(c) != RETRIGGER_HISTORICO[c]]
@@ -1783,8 +1934,15 @@ def requiere_start(cfg) -> bool:
 
 
 def boton_start(cfg) -> str:
-    """Boton de arranque de la configuracion (el ST vigente solo acepta I1)."""
+    """Boton de arranque de la configuracion (v5 solo acepta I1; en el motor
+    configurable es la senal de motor.arranque)."""
     band = (cfg or {}).get("band") or {}
+    if banda_motor.es_motor(band):
+        try:
+            ec = banda_motor.compilar_motor(band)
+            return banda_motor.nombre_senal(ec[banda_motor.O_RUN]) or "la secuencia"
+        except ValueError:
+            return START_BUTTONS[0]
     boton = str(band.get("start_button") or "").strip().upper()
     return boton if boton in START_BUTTONS else START_BUTTONS[0]
 
@@ -1815,6 +1973,9 @@ def plan_config(cfg) -> list:
     plan = []
     band = cfg.get("band") or {}
     marcha = not sin_marcha(cfg)
+
+    if banda_motor.es_motor(band):
+        return _plan_motor(band, marcha)
 
     # 1) Estado seguro: nada se reconfigura con la banda en marcha.
     plan.append(("parar", (), {}))
@@ -1876,6 +2037,10 @@ def plan_config(cfg) -> list:
         # 1 o 2 cuando hay movimiento, asi que sin direccion explicita va la 1.
         plan.append(("cambiar_direccion", (band.get("direction") or DIR_1,), {}))
 
+    # ST v6: un programa v5 apaga el motor configurable (EngineMode = 0). En un
+    # PLC que aun tiene el ST v5, %R200 esta libre y escribirlo no hace nada.
+    plan.append(("apagar_motor", (), {}))
+
     # 3) Reset + nueva configuracion SIEMPRE, aunque el usuario no lo pida.
     #    NewCfgFlag va el ultimo para que el PLC nunca lea la config a medias.
     plan.append(("trigger_vfd_reset", (), {}))
@@ -1895,6 +2060,40 @@ def plan_config(cfg) -> list:
         if band.get(f"pluma{n}") is not None:
             plan.append(("command_gate", (n, band.get(f"pluma{n}")), {}))
 
+    return plan
+
+
+class BloqueMotor(list):
+    """EC[0..259] compilado; se imprime corto en el plan legible."""
+    def __repr__(self):
+        return (f"<EC %R{banda_motor.ENGINE_BASE}..%R{banda_motor.ENGINE_BASE + len(self) - 1}: "
+                f"{sum(1 for v in self if v)} campos activos>")
+
+
+def _plan_motor(band, marcha) -> list:
+    """Plan de carga del motor configurable (ST v6).
+
+    Mismo esqueleto que v5 (parar -> configurar -> R6 -> R5 -> CfgReady), pero
+    los registros v5 de sensores, torreta y lampara se dejan en 0 para que §3
+    los de por validos y no hagan nada, y la logica completa viaja en EC."""
+    plan = [("verificar_st_v6", (), {}), ("parar", (), {})]
+    if not marcha:
+        plan.append(("sin_movimiento", (), {}))
+    else:
+        plan.append(("configurar_banda", (), {"frecuencia_hz": band.get("freq_hz")}))
+    plan.append(("configurar_paros", (), {
+        "stop_mode": _codigo(band.get("stop_mode"), STOP_MODES, 0, 3) or STOP_MODE_I3}))
+    plan.append(("configurar_autostop", (), {"modo": AUTO_STOP_OFF, "preset_s": 0}))
+    plan.append(("apagar_sensor", (1,), {}))
+    plan.append(("apagar_sensor", (2,), {}))
+    plan.append(("configurar_torreta", (), {"mask_run": 0, "mask_idle": 0, "mask_i1": 0}))
+    plan.append(("configurar_lampara_temporizada", (), {"mask": 0, "segundos": 0}))
+    plan.append(("configurar_motor", (BloqueMotor(banda_motor.compilar_motor(band)),), {}))
+    if marcha:
+        plan.append(("cambiar_direccion", (band.get("direction") or DIR_1,), {}))
+    plan.append(("trigger_vfd_reset", (), {}))
+    plan.append(("trigger_new_config", (), {}))
+    plan.append(("esperar_config_lista", (), {"esperar_caida": marcha}))
     return plan
 
 

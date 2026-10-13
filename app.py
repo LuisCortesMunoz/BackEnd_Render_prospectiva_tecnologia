@@ -563,6 +563,99 @@ JSON: {"name":"Verde 5 s, pluma 2 abajo y roja con I1","intencion":{
  "luz_temporizada":{"luces":["verde"],"segundos":5},
  "plumas_manual":{"pluma1":null,"pluma2":"bajar"},"no_soportado":[]}}"""
 
+# ─── MOTOR CONFIGURABLE DE LA BANDA (ST v6) ──────────────────────
+# Se usa cuando BANDA_MOTOR_CONFIGURABLE=1 (el PLC de la banda ya tiene el ST
+# v6). El LLM arma BLOQUES CONECTABLES (condiciones, timers, contadores,
+# memorias, secuencia, motor, salidas); banda_motor.py los valida y compila a
+# %R200..%R459. No hay casos especiales: cualquier senal se conecta con
+# cualquier accion.
+BANDA_MOTOR_CONFIGURABLE = os.environ.get("BANDA_MOTOR_CONFIGURABLE", "0").strip() == "1"
+
+SYSTEM_PROMPT_BANDA_MOTOR = """Eres el programador del PLC Horner XL4 de una BANDA TRANSPORTADORA con MOTOR CONFIGURABLE.
+Traduces la instruccion a BLOQUES CONECTABLES en JSON. No escribes registros ni ladder.
+
+HARDWARE
+- Motor con VFD: direccion "derecha" (1) o "izquierda" (2), frecuencia 1..327 Hz.
+- I1 = boton verde de arranque (NA). I2 = boton auxiliar / boton rojo (NC). I3 = paro de emergencia:
+  SIEMPRE detiene todo por si solo; no lo uses para arrancar. S1 y S2 = sensores de presencia (caja/pieza).
+- Salidas: torreta verde, amarilla, roja; pluma1 y pluma2 (subir / bajar).
+
+SENALES (cualquier campo "senal"; antepon "NOT " para negar):
+I1 I2 I3 S1 S2 | BANDA_CORRIENDO BANDA_DETENIDA DIR_1 DIR_2 INVIRTIENDO | APP1 APP2 (botones de la app)
+| SIEMPRE | C1..C8 condicion | T1..T8 timer terminado | CT1..CT8 contador llego | M1..M8 memoria | PASO1..PASO16 paso activo.
+
+BLOQUES (cada uno produce la senal de su id; usa ids desde 1 y define todo lo que uses):
+- condiciones: {"id":"C1","op":"AND"|"OR","entradas":[1..4 senales],"flanco":"nivel"|"subida"|"bajada"}
+  "boton Y sensor" -> AND. "boton O sensor" -> OR.
+- timers: {"id":"T1","tipo":"RETARDO"|"PULSO"|"TON"|"TOF","entrada":senal,"reset":senal|null,"segundos":N}
+  RETARDO: cuando la entrada SE ACTIVA cuenta N s y entonces T1 se activa (aunque la entrada ya se apago);
+           queda activo hasta su reset o el siguiente disparo. Es "espera N s y luego ...".
+  PULSO: cuando la entrada se activa, T1 queda activo N s y se apaga. Es "... durante N s".
+  TON: T1 se activa si la entrada sigue activa N s seguidos. TOF: T1 sigue activo N s despues de apagarse la entrada.
+- contadores: {"id":"CT1","entrada":senal,"reset":senal|null,"preset":N,"modo":"una_vez"|"ciclico"}
+  una_vez: CT1 queda activo al llegar a N hasta su reset. ciclico: pulso cada N piezas y vuelve a 0
+  (conectalo a un PULSO, a motor.invertir o a secuencia.inicio; nunca directo a una luz).
+- memorias: {"id":"M1","set":senal,"reset":senal,"prioridad":"reset"|"set"} -> "mantener ... hasta que ...".
+- motor: {"arranque":senal,"paro":senal,"modo":"enclavado"|"mientras","pausa":senal,"dir_1":senal,
+          "dir_2":senal,"invertir":senal,"paro_inversion_s":2}
+  enclavado: el flanco de arranque la pone en marcha y sigue hasta paro. mientras: corre solo mientras arranque.
+  pausa: detiene mientras su senal este activa y reanuda sola. dir_1/dir_2/invertir actuan en el flanco de su
+  senal; antes de invertir el motor SIEMPRE se detiene paro_inversion_s (minimo 1) y espera velocidad cero.
+- salidas: {"verde":senal,"amarilla":senal,"roja":senal,"pluma1_sube":senal,"pluma1_baja":senal,
+            "pluma2_sube":senal,"pluma2_baja":senal} -> encendida mientras su senal este activa.
+- secuencia (pasos, "luego", "despues"): {"inicio":senal,"paro":senal|null,"reset":senal|null,
+  "modo":"una_vez"|"ciclica","exclusiva":true,"pasos":[{"acciones":[...],"avanza":"tiempo"|"flanco"|"senal"|
+  "tiempo_y_senal"|"senal_o_tiempo","senal":senal|null,"segundos":N|null,"siguiente":null}]}
+  acciones: verde amarilla roja pluma1_sube pluma1_baja pluma2_sube pluma2_baja marcha paro dir_1 dir_2 invertir.
+  Luces, plumas y marcha duran mientras el paso este activo; invertir actua al entrar al paso.
+  avanza "tiempo" = a los N s; "flanco" = cuando la senal SE ACTIVE (usalo con sensores y botones).
+  exclusiva true: mientras corre, la secuencia manda sola sobre motor y salidas (pon "marcha" en cada paso
+  en que la banda deba moverse). Un paso que solo invierte puede durar 0 s.
+- opciones: {"filtro_sensores_s":0.1,"filtro_botones_s":0,"pluma_max_s":0,"luces_paro":[]}
+
+REGLAS
+1. banda.mover = true solo si la instruccion mueve la banda. Si se mueve y no dice los Hz: frecuencia_hz null.
+2. Si la banda se mueve y no dicen como arranca: motor.arranque = "I1".
+3. "espera N s y cambia el sentido" -> RETARDO + motor.invertir. "detente N s y continua" -> PULSO + motor.pausa.
+   "detén la banda" (sin reanudar) -> motor.paro. Todo funciona en CADA deteccion: los bloques se rearman solos.
+4. Usa bloques sueltos para reglas simples y "secuencia" solo para cadenas de pasos.
+5. Lo que este hardware no puede hacer va en "no_soportado" con una frase corta. No inventes tiempos ni conteos.
+
+ESQUEMA (solo JSON, sin texto extra):
+{"name":"corto","banda":{"mover":false,"direccion":"derecha","frecuencia_hz":null,"paros":{"i2":false,"software":false}},
+ "motor":{},"condiciones":[],"timers":[],"contadores":[],"memorias":[],"salidas":{},"secuencia":null,
+ "opciones":{},"no_soportado":[]}
+
+EJEMPLOS
+"Arranca con I1 a la derecha a 30 Hz; cuando S1 detecte una caja espera 3 s y cambia el sentido."
+{"name":"S1 + 3 s invierte","banda":{"mover":true,"direccion":"derecha","frecuencia_hz":30,"paros":{"i2":false,"software":false}},
+ "motor":{"arranque":"I1","invertir":"T1"},"timers":[{"id":"T1","tipo":"RETARDO","entrada":"S1","segundos":3}],"no_soportado":[]}
+
+"Cuando presione el boton verde y S2 este activo enciende la amarilla; S1 cuenta 3 cajas y prende la roja hasta presionar I2."
+{"name":"I1 y S2 amarilla, 3 cajas roja","banda":{"mover":false,"paros":{"i2":false,"software":false}},
+ "condiciones":[{"id":"C1","op":"AND","entradas":["I1","S2"],"flanco":"nivel"}],
+ "contadores":[{"id":"CT1","entrada":"S1","reset":"I2","preset":3,"modo":"una_vez"}],
+ "salidas":{"amarilla":"C1","roja":"CT1"},"no_soportado":[]}
+
+"A 25 Hz arranca con I1; se detiene cuando el boton rojo o S2 detecten. Cuando S1 detecte, sube la pluma 1 por 2 s."
+{"name":"Paro I2 o S2, pluma con S1","banda":{"mover":true,"direccion":"derecha","frecuencia_hz":25,"paros":{"i2":false,"software":false}},
+ "motor":{"arranque":"I1","paro":"C1"},"condiciones":[{"id":"C1","op":"OR","entradas":["I2","S2"],"flanco":"nivel"}],
+ "timers":[{"id":"T1","tipo":"PULSO","entrada":"S1","segundos":2}],"salidas":{"pluma1_sube":"T1"},"no_soportado":[]}
+
+"Cuando S1 detecte una caja: luz amarilla, espera 3 s, luz verde 5 s y apaga."
+{"name":"S1 amarilla 3 s, verde 5 s","banda":{"mover":false,"paros":{"i2":false,"software":false}},
+ "secuencia":{"inicio":"S1","modo":"una_vez","exclusiva":true,"pasos":[
+  {"acciones":["amarilla"],"avanza":"tiempo","senal":null,"segundos":3},
+  {"acciones":["verde"],"avanza":"tiempo","senal":null,"segundos":5}]},"no_soportado":[]}
+
+"Con el boton verde la banda avanza a la derecha a 30 Hz; cuando S1 detecte espera 2 s, prende la amarilla y cambia de sentido; cuando S2 detecte la caja detén la banda y prende la verde."
+{"name":"Ida y vuelta S1 / S2","banda":{"mover":true,"direccion":"derecha","frecuencia_hz":30,"paros":{"i2":false,"software":false}},
+ "secuencia":{"inicio":"I1","modo":"una_vez","exclusiva":true,"pasos":[
+  {"acciones":["marcha","dir_1"],"avanza":"flanco","senal":"S1","segundos":null},
+  {"acciones":["marcha"],"avanza":"tiempo","senal":null,"segundos":2},
+  {"acciones":["marcha","amarilla","invertir"],"avanza":"flanco","senal":"S2","segundos":null},
+  {"acciones":["paro","verde"],"avanza":"flanco","senal":"I1","segundos":null}]},"no_soportado":[]}"""
+
 
 def _expr_de_logica(lg: dict, salida: str) -> str:
     """Deriva un 'expr' legible a partir de la logica del motor (para el
@@ -758,6 +851,11 @@ def validar_logica_banda(cfg: dict) -> list:
     band = cfg.get("band")
     if not isinstance(band, dict):
         return ["Falta el bloque 'band': un programa de la banda debe traerlo."]
+    import banda_motor
+    if banda_motor.es_motor(band):
+        if band.get("enable") is not False and band.get("freq_hz") is None:
+            errores.append("La banda debe moverse: indica la frecuencia en Hz (1..327).")
+        return errores + banda_motor.validar_motor(band)[0]
     if cfg.get("outputs"):
         errores.append("El PLC de la banda no tiene Q10/Q11/Q12 configurables: "
                        "'outputs' debe ir vacio.")
@@ -2121,6 +2219,9 @@ def health():
         "contexto_programas": STATE["contexto_programas"],
         "historia_pares":     len(STATE["history"]) // 2,
         "ejemplos_memoria":   len(cargar_memoria()),
+        # ST v6: si es True, las instrucciones de la banda se generan para el
+        # motor configurable (el PLC debe tener ST_banda_v6_motor_configurable).
+        "banda_motor_configurable": BANDA_MOTOR_CONFIGURABLE,
     }
 
 
@@ -2188,6 +2289,123 @@ async def generar_ladder(req: PromptRequest):
 # propio system prompt, su propio validador y su propio normalizador. Ni una
 # sola linea de esta ruta puede producir registros del maletin.
 
+def _generar_logica_banda_motor(texto: str, req: "LogicaRequest") -> "LogicaResponse":
+    """MOTOR CONFIGURABLE (ST v6): texto -> LLM (bloques conectables) ->
+    banda_motor (validacion + compilacion) -> respuesta.
+
+    Igual que el maletin, los errores del validador se le devuelven al LLM
+    para que se corrija (auto-revision). No hay casos especiales: el LLM
+    conecta senales con acciones y banda_motor.py comprueba el resultado."""
+    import banda_motor
+
+    messages = [{"role": "system", "content": SYSTEM_PROMPT_BANDA_MOTOR}]
+    if req.contexto:
+        previas = "\n".join(f"- {p}" for p in (req.contexto.historial or [])[-4:])
+        prev = None
+        if req.contexto.programa_anterior:
+            prev_cfg = (req.contexto.programa_anterior.get("metadata", {})
+                        .get("engine_config")) or {}
+            if banda_motor.es_motor(prev_cfg):
+                prev = prev_cfg.get("respuesta_llm") or prev_cfg.get("band")
+        if previas or prev:
+            partes = []
+            if previas:
+                partes.append(f"Peticiones anteriores del usuario:\n{previas}")
+            if prev:
+                partes.append("PROGRAMA ACTUAL DE LA BANDA (si la instruccion lo modifica, devuelve "
+                              "el JSON COMPLETO actualizado y conserva lo no pedido; si describe un "
+                              "proceso nuevo, reemplazalo):\n" + json.dumps(prev, ensure_ascii=False))
+            messages.append({"role": "user", "content": "\n\n".join(partes)})
+            messages.append({"role": "assistant", "content":
+                             "Entendido. Devolvere el JSON completo de bloques de la banda."})
+    messages.append({"role": "user", "content":
+                     f"{texto}\n\nResponde SOLO con el JSON del esquema indicado."})
+
+    if AGENT_MEMORY_ENABLED:
+        try:
+            rel = ejemplos_relevantes(texto, filtro=agent_memory.es_ejemplo_banda_motor,
+                                      tags_fn=extraer_tags_banda)
+            bloque = agent_memory.bloque_banda_motor_prompt(rel)
+            if bloque:
+                messages.insert(1, {"role": "system", "content": bloque})
+        except Exception as e:
+            log.warning(f"Memoria de ejemplos del motor de la banda fallo (se ignora): {e}")
+
+    cfg, errores = None, []
+    intentos = max(1, MAX_AUTOREVISIONES)
+    msgs_iter = list(messages)
+    for intento in range(1, intentos + 1):
+        try:
+            candidato = llamar_modelo_json(msgs_iter)
+        except ValueError as e:
+            if intento < intentos:
+                log.warning(f"Motor banda auto-revision {intento}/{intentos}: JSON ilegible — {e}")
+                continue
+            raise HTTPException(422, str(e))
+        except Exception as e:
+            log.error(f"Error generar-logica motor banda (modelo): {e}")
+            raise HTTPException(500, str(e))
+
+        try:
+            cand = banda_motor.cfg_desde_respuesta(candidato)
+            cand["respuesta_llm"] = {k: v for k, v in candidato.items() if k != "no_soportado"}
+            errores = validar_logica_banda(cand)
+        except ValueError as e:
+            cand, errores = None, [str(e)]
+
+        # Falta un dato que no se puede inventar: se pregunta en vez de adivinar.
+        if cand is not None and banda_motor.falta_frecuencia(cand) and all(
+                "frecuencia" in e for e in errores):
+            log.info("/generar-logica motor banda: falta la frecuencia — se pregunta")
+            return LogicaResponse(
+                logic={}, name="", outputs=0, device="banda",
+                status="needs_clarification", questions=[banda_motor.pregunta_frecuencia()],
+                assumptions=[], analysis={"equipo": "banda", "motor_configurable": True})
+
+        if not errores:
+            cfg = cand
+            if intento > 1:
+                log.info(f"Motor banda: auto-revision exitosa en el intento {intento}/{intentos}.")
+            break
+
+        log.warning(f"Motor banda auto-revision {intento}/{intentos}: {errores}")
+        if intento < intentos:
+            msgs_iter = list(messages)
+            msgs_iter.append({"role": "assistant",
+                              "content": json.dumps(candidato, ensure_ascii=False)})
+            msgs_iter.append({"role": "user", "content": (
+                "El JSON anterior tiene estos problemas:\n- " + "\n- ".join(errores)
+                + "\nCorrigelos sin perder ninguna accion pedida y devuelve el JSON COMPLETO "
+                  "del esquema, sin texto extra.")})
+
+    if cfg is None:
+        raise HTTPException(
+            422, "No se pudo generar una configuracion valida para la banda:\n- "
+            + "\n- ".join(errores))
+
+    warnings = avisos_logica_banda(cfg) + [
+        f"No soportado por la banda: {x}" for x in cfg.get("no_soportado", [])]
+    try:
+        guardar_historial(texto, json.dumps(cfg, ensure_ascii=False)[:1500])
+    except Exception as e:
+        log.warning(f"No se pudo guardar historial (motor banda): {e}")
+    ejemplo_id = ""
+    try:
+        ejemplo_id = agregar_ejemplo_banda(texto, cfg)
+    except Exception as e:
+        log.warning(f"No se pudo guardar ejemplo del motor de la banda: {e}")
+
+    nombre_prog = cfg.get("name", "Programa banda")
+    log.info(f"/generar-logica OK (BANDA, motor configurable) — {nombre_prog}")
+    return LogicaResponse(
+        logic=cfg, name=nombre_prog, outputs=0, device="banda",
+        warnings=warnings, ejemplo_id=ejemplo_id,
+        program={"metadata": {"name": nombre_prog, "engine_config": cfg}},
+        analysis={"motor_configurable": True,
+                  "acciones": banda_motor.describir_motor(cfg["band"])},
+    )
+
+
 def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
     """texto -> LLM (intencion estructurada) -> normalizador -> cobertura ->
     validacion contra el ST -> respuesta.
@@ -2196,6 +2414,8 @@ def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
     intencion a los campos del ST y comprueba que ninguna accion se pierda.
     Si algo falla, los motivos se le devuelven al LLM para que corrija su
     lectura (auto-revision), igual que en el maletin."""
+    if BANDA_MOTOR_CONFIGURABLE:
+        return _generar_logica_banda_motor(texto, req)
     import banda_intent
 
     # CAPA A: el prompt de siempre, intacto. Manda sobre todo lo demas.
@@ -3869,6 +4089,32 @@ def banda_paros(req: BandaParosRequest):
     return {"status": "ok", "device": "banda", "plc": f"{ip}:{port}",
             "stop_mode": estado.get("stop_mode"), "soft_stop_cmd": estado.get("soft_stop_cmd"),
             "avisos": avisos, "notas": notas, "estado": estado}
+
+
+class BandaBotonAppRequest(BandaRequestBase):
+    boton: int                          # 1 = APP1 · 2 = APP2
+    activo: bool = True
+
+
+@app.post("/banda/boton-app")
+def banda_boton_app(req: BandaBotonAppRequest):
+    """Botones virtuales APP1 / APP2 del motor configurable (ST v6): el
+    programa los usa como cualquier otra senal (arranque, paso, reset...)."""
+    plc, ip, port, notas = _banda_plc(req)
+    try:
+        plc.verificar_st_v6()
+        plc.boton_app(req.boton, req.activo)
+        estado = _banda_estado(plc)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Error con el PLC de la banda: {e}")
+    finally:
+        plc.close()
+    return {"status": "ok", "plc": f"{ip}:{port}", "boton": req.boton,
+            "activo": req.activo, "notas": notas, "estado": estado}
 
 
 @app.post("/feedback")

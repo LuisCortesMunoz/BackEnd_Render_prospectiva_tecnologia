@@ -38,6 +38,7 @@ El backend cumple **dos roles** según dónde corra:
 | `GROQ_CHAT_MODEL_APRENDIZAJE` | Modelo **solo** del modo Aprendizaje (default `llama-3.3-70b-versatile`). Los demás modos del copiloto siguen con `GROQ_CHAT_MODEL`. | No |
 | `GROQ_STT_MODEL` | Modelo de voz (default `whisper-large-v3`) | No |
 | `ADMIN_TOKEN` | Protege los endpoints `/admin/*` | Recomendada |
+| `BANDA_MOTOR_CONFIGURABLE` | `1` = la banda usa el motor configurable (requiere el ST v6 en el PLC) | No (default `0`) |
 | `ALLOWED_ORIGINS` | Dominios del frontend (CORS) | No |
 
 ## Despliegue en la nube (Render)
@@ -88,6 +89,30 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 python -m http.server 5500 --bind 127.0.0.1
 # luego abre http://127.0.0.1:5500/ladder.html
 ```
+
+## Banda: motor configurable (ST v6)
+
+El programa maestro v6 de la banda (`cscape/ST_banda_v6_motor_configurable.txt`,
+guía en `cscape/GUIA_banda_v6.md`) agrega un **motor configurable**: cualquier
+señal (I1, I2, I3, S1, S2, estados de la banda, botones de la app) se conecta con
+condiciones AND/OR, timers (TON, TOF, PULSO, RETARDO), contadores (una vez o
+cíclicos), memorias set/reset y secuencias de hasta 16 pasos, que manejan el
+motor (marcha, paro, pausa, dirección e inversión segura), la torreta y las plumas.
+
+| Pieza | Archivo |
+|---|---|
+| Contrato, validador y compilador JSON → %R200..%R459 | `banda_motor.py` |
+| Simulador scan a scan (espejo del ST) | `banda_motor_sim.py` |
+| Intérprete del ST real, para probarlo sin PLC | `banda_st_interprete.py` |
+| Carga Modbus (bloque EC, estado ES, verificación v6) | `plc_banda.py` |
+| Generación con IA (`SYSTEM_PROMPT_BANDA_MOTOR`) | `app.py` |
+| Pruebas: escenarios en simulador y ST real, regresión v5 = v6 | `test_banda_motor.py` |
+
+- `BANDA_MOTOR_CONFIGURABLE=1` en Render: las instrucciones de la banda se generan
+  para el motor configurable. Con `0` (por defecto) se mantiene el esquema v5.
+- La carga verifica `%R460 = 6`: si el PLC aún tiene el ST v5, se rechaza con un mensaje claro.
+- `POST /banda/boton-app` `{boton: 1|2, activo}` → botones virtuales APP1/APP2.
+- `GET /banda/estado` incluye `motor_configurable` (motor, dirección, paso, timers, contadores).
 
 ## Instalación local
 
