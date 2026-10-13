@@ -620,6 +620,9 @@ REGLAS
    arranque (varias senales -> condicion OR) y ademas fija la direccion con dir_1 / dir_2.
 3. "espera N s y cambia el sentido" -> RETARDO + motor.invertir. "detente N s y continua" -> PULSO + motor.pausa.
    "detén la banda" (sin reanudar) -> motor.paro. Todo funciona en CADA deteccion: los bloques se rearman solos.
+   "cuando S1 detecte espera N s y sube la pluma" -> RETARDO con entrada S1. Si otra senal la baja con otro
+   RETARDO, cada timer lleva de reset la ENTRADA del otro (T1.reset = "S2", T2.reset = "S1"): un RETARDO
+   queda activo hasta su reset y subir + bajar a la vez apaga la pluma. Nunca pongas reset = el otro timer.
 4. Usa bloques sueltos para reglas simples y "secuencia" solo para cadenas de pasos.
 5. Lo que este hardware no puede hacer va en "no_soportado" con una frase corta. No inventes tiempos ni conteos.
 
@@ -637,6 +640,14 @@ EJEMPLOS
 {"name":"S1 derecha, S2 izquierda","banda":{"mover":true,"direccion":"derecha","frecuencia_hz":30,"paros":{"i2":false,"software":false}},
  "motor":{"arranque":"C1","dir_1":"S1","dir_2":"S2"},
  "condiciones":[{"id":"C1","op":"OR","entradas":["S1","S2"],"flanco":"nivel"}],"no_soportado":[]}
+
+"Mueve la banda a la derecha a 20 Hz; cuando S1 detecte espera 20 s y sube las dos plumas; cuando S2 detecte espera 10 s y bajalas. Verde en movimiento y roja detenida."
+{"name":"S1 sube plumas, S2 las baja","banda":{"mover":true,"direccion":"derecha","frecuencia_hz":20,"paros":{"i2":false,"software":false}},
+ "motor":{"arranque":"I1"},
+ "timers":[{"id":"T1","tipo":"RETARDO","entrada":"S1","reset":"S2","segundos":20},
+           {"id":"T2","tipo":"RETARDO","entrada":"S2","reset":"S1","segundos":10}],
+ "salidas":{"verde":"BANDA_CORRIENDO","roja":"BANDA_DETENIDA","pluma1_sube":"T1","pluma2_sube":"T1",
+            "pluma1_baja":"T2","pluma2_baja":"T2"},"no_soportado":[]}
 
 "Cuando presione el boton verde y S2 este activo enciende la amarilla; S1 cuenta 3 cajas y prende la roja hasta presionar I2."
 {"name":"I1 y S2 amarilla, 3 cajas roja","banda":{"mover":false,"paros":{"i2":false,"software":false}},

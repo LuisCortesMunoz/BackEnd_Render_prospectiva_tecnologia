@@ -339,6 +339,62 @@ def _acciones_paso(lista, tag, errores):
     return out
 
 
+def _retardos_de_plumas(eng):
+    """[(pluma, timer_sube, timer_baja)] cuando una pluma sube con un timer
+    RETARDO y baja con otro. Un RETARDO queda activo hasta su reset: sin
+    reset, los dos acaban activos a la vez y el ST apaga la pluma (falla)."""
+    timers = {}
+    for t in _lista(eng.get("timers")):
+        if isinstance(t, dict) and _norm(t.get("tipo")) == "retardo":
+            n = _id_num(t.get("id"), "T", N_TIMER)
+            if n is not None:
+                timers[f"T{n}"] = t
+    salidas = eng.get("salidas") if isinstance(eng.get("salidas"), dict) else {}
+    out = []
+    for p in (1, 2):
+        a = str(salidas.get(f"pluma{p}_sube") or "").strip().upper()
+        b = str(salidas.get(f"pluma{p}_baja") or "").strip().upper()
+        if a in timers and b in timers and a != b:
+            out.append((p, timers[a], timers[b]))
+    return out
+
+
+def _id_timer(t) -> str:
+    return f"T{_id_num(t.get('id'), 'T', N_TIMER)}"
+
+
+def rearmar_plumas(eng) -> list:
+    """Repara el patron "S1 -> espera -> sube / S2 -> espera -> baja": a cada
+    RETARDO sin reset le pone de reset la ENTRADA del otro, asi la orden
+    vieja se borra cuando llega la nueva. Devuelve las notas de lo ajustado."""
+    notas = []
+    for p, ts, tb in _retardos_de_plumas(eng):
+        for t, otro in ((ts, tb), (tb, ts)):
+            if t.get("reset") in (None, "") and otro.get("entrada") not in (None, ""):
+                t["reset"] = otro["entrada"]
+                notas.append(f"{_id_timer(t)}: reset = {otro['entrada']} (pluma {p} no puede "
+                             f"recibir subir y bajar a la vez)")
+    return notas
+
+
+def _choques_retardo_plumas(eng) -> list:
+    errores = []
+    for p, ts, tb in _retardos_de_plumas(eng):
+        a, b = _id_timer(ts), _id_timer(tb)
+        for t, otro, ido in ((ts, tb, b), (tb, ts, a)):
+            r = str(t.get("reset") or "").strip().upper()
+            if not r:
+                errores.append(
+                    f"pluma {p}: {a} (sube) y {b} (baja) son RETARDO y se quedan activos; juntos "
+                    f"apagan la pluma. Pon en {_id_timer(t)} reset = {otro.get('entrada')} "
+                    f"(la entrada de {ido}).")
+            elif r == ido:
+                errores.append(
+                    f"pluma {p}: {_id_timer(t)} tiene reset = {ido} y se bloquean entre si. "
+                    f"Usa reset = {otro.get('entrada')} (la entrada de {ido}).")
+    return errores
+
+
 def validar_motor(band) -> tuple:
     """Valida band.engine. Devuelve (errores, avisos). Mismas reglas que el
     bloque §3b del ST, mas comprobaciones semanticas que el PLC no puede ver
@@ -431,6 +487,7 @@ def validar_motor(band) -> tuple:
     for p in (1, 2):
         if salidas.get(f"pluma{p}_sube") and salidas.get(f"pluma{p}_sube") == salidas.get(f"pluma{p}_baja"):
             errores.append(f"pluma {p}: la misma senal no puede subirla y bajarla.")
+    errores += _choques_retardo_plumas(eng)
 
     # --- secuencia -----------------------------------------------------------
     seq = eng.get("secuencia")
@@ -918,6 +975,7 @@ def cfg_desde_respuesta(resp) -> dict:
             v = {s: x for s, x in v.items() if x not in (None, "")}
         if not _vacio(v):
             eng[k] = v
+    rearmar_plumas(eng)
     band["engine"] = eng
     return {"name": str(resp.get("name") or "Programa banda")[:80], "device": "banda",
             "band": band, "outputs": [],
