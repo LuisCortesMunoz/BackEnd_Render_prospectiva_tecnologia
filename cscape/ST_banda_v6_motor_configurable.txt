@@ -1,3 +1,45 @@
+(* ============================================================ *)
+(* TAGS DEL MOTOR CONFIGURABLE v6 (solo 7 en la tabla):          *)
+(*   EC  INT[260] %R200 · ES INT[40] %R460 · Sys100ms BOOL %S4    *)
+(*   EI  INT[65]  · EB BOOL[203] · ek INT · ej INT  (internas)     *)
+(* Posiciones de EI / EB (nombre logico de cada una):           *)
+(*   EI[0]=EngineMode  EI[1]=EngError  EI[2]=MotorState *)
+(*   EI[3]=DirActual  EI[4]=DirTarget  EI[5]=BrakeAcc *)
+(*   EI[6]=RevT  EI[7]=DebPre  EI[8]=ESeqStep *)
+(*   EI[9]=ESeqAcc  EI[10]=PlumaFault  EI[11]=eacts *)
+(*   EI[12]=eb  EI[13]=ebit  EI[14]=ecmd *)
+(*   EI[15]=ecnt  EI[16]=eedge  EI[17]=ehi *)
+(*   EI[18]=ehm  EI[19]=elo  EI[20]=emC *)
+(*   EI[21]=emI  EI[22]=emK  EI[23]=emM *)
+(*   EI[24]=emO  EI[25]=emT  EI[26]=emode *)
+(*   EI[27]=enx  EI[28]=eop  EI[29]=epre *)
+(*   EI[30]=er  EI[31]=esb  EI[32]=esc *)
+(*   EI[33]=espd  EI[34]=est  EI[35]=etm *)
+(*   EI[36]=etyp  EI[37]=ev  EI[38..42]=DebAcc *)
+(*   EI[43..50]=TAcc  EI[51..58]=CAcc  EI[59..60]=PlAcc *)
+(*   EI[61..62]=PlPrev  EI[63..64]=PlCmd  EB[0]=Pulse100ms *)
+(*   EB[1]=Prev100ms  EB[2]=EngResetReq  EB[3]=EngFirst *)
+(*   EB[4]=EngValid  EB[5]=RunLatch  EB[6]=ESeqActive *)
+(*   EB[7]=ESeqExcl  EB[8]=ESeqStartPrev  EB[9]=ESeqTransPrev *)
+(*   EB[10]=StepEntry  EB[11]=RunPrev  EB[12]=FwdPrev *)
+(*   EB[13]=RevPrev  EB[14]=TogPrev  EB[15]=eSeqResetV *)
+(*   EB[16]=eSeqStartV  EB[17]=eSeqStopV  EB[18]=ebrakeOk *)
+(*   EB[19]=echk  EB[20]=edn  EB[21]=edone *)
+(*   EB[22]=efwdRise  EB[23]=elampG  EB[24]=elampR *)
+(*   EB[25]=elampY  EB[26]=emotorOK  EB[27]=eout *)
+(*   EB[28]=eres  EB[29]=erevRise  EB[30]=erise *)
+(*   EB[31]=erunRise  EB[32]=eseqRun  EB[33]=eseqStop *)
+(*   EB[34]=esn  EB[35]=esrc  EB[36]=esv *)
+(*   EB[37]=etRise  EB[38]=etimeOk  EB[39]=etogRise *)
+(*   EB[40]=etv  EB[41]=eup  EB[42]=eused *)
+(*   EB[43]=evin  EB[44]=evrst  EB[45]=ewantRun *)
+(*   EB[46..109]=Sig  EB[110..114]=RawIn  EB[115..119]=DebFilt *)
+(*   EB[120..127]=CondPrev  EB[128..135]=TDn  EB[136..143]=TRun *)
+(*   EB[144..151]=TPrevIn  EB[152..159]=CDn  EB[160..167]=CPrevIn *)
+(*   EB[168..175]=MBit  EB[176..187]=ESeqBit  EB[188..194]=OutReq *)
+(*   EB[195..196]=PlTimeout  EB[197..202]=HdrV *)
+(* ============================================================ *)
+
 (* MASTER BANDA - HORNER / CSCAPE ST - v6 MOTOR CONFIGURABLE   *)
 (*                                                            *)
 (* v6 = v5 INTACTO + un MOTOR CONFIGURABLE (secciones §E).     *)
@@ -252,10 +294,10 @@ IF FST_SCN THEN
     S1_DetPrev      := NOT PhIn4 ;
     S2_DetPrev      := NOT PhIn5 ;
     Prev1s          := Sys1Sec ;
-    Prev100ms       := Sys100ms ;
+    EB[1]       := Sys100ms ;
 
     (* v6: el motor configurable arranca en estado seguro *)
-    EngResetReq     := TRUE ;
+    EB[2]     := TRUE ;
 
     BtnStartRising   := FALSE ;
     S1_Rising        := FALSE ;
@@ -333,8 +375,8 @@ Pulse1s := Sys1Sec AND NOT Prev1s ;
 Prev1s  := Sys1Sec ;
 
 (* v6: pulso de 100 ms (T_100MS = %S4) para timers del motor. *)
-Pulse100ms := Sys100ms AND NOT Prev100ms ;
-Prev100ms  := Sys100ms ;
+EB[0] := Sys100ms AND NOT EB[1] ;
+EB[1]  := Sys100ms ;
 
 
 (* ============================================================ *)
@@ -687,97 +729,97 @@ END_IF ;
 (* Codigo de senal valido: 0..63 o 100..163 (NOT).             *)
 (* ============================================================ *)
 
-EngineMode := EC[0] ;
-EngValid   := TRUE ;
-EngError   := 0 ;
+EI[0] := EC[0] ;
+EB[4]   := TRUE ;
+EI[1]   := 0 ;
 
-IF (EngineMode < 0) OR (EngineMode > 1) THEN
+IF (EI[0] < 0) OR (EI[0] > 1) THEN
 
-    EngValid := FALSE ;
-    EngError := 1 ;
+    EB[4] := FALSE ;
+    EI[1] := 1 ;
 
-ELSIF EngineMode = 1 THEN
+ELSIF EI[0] = 1 THEN
 
     FOR ek := 1 TO 259 DO
 
-        esrc := FALSE ;
-        echk := FALSE ;
-        elo  := 0 ;
-        ehi  := 32767 ;
+        EB[35] := FALSE ;
+        EB[19] := FALSE ;
+        EI[19]  := 0 ;
+        EI[17]  := 32767 ;
 
         IF (ek = 1) OR (ek = 2) OR ((ek >= 4) AND (ek <= 7)) THEN
-            esrc := TRUE ; echk := TRUE ;
+            EB[35] := TRUE ; EB[19] := TRUE ;
         ELSIF (ek = 3) OR (ek = 11) OR (ek = 12) OR (ek = 15) THEN
-            echk := TRUE ; ehi := 1 ;
+            EB[19] := TRUE ; EI[17] := 1 ;
         ELSIF (ek = 8) OR (ek = 9) OR (ek = 10) OR (ek = 13) THEN
-            echk := TRUE ;
+            EB[19] := TRUE ;
         ELSIF ek = 14 THEN
-            echk := TRUE ; ehi := 7 ;
+            EB[19] := TRUE ; EI[17] := 7 ;
         ELSIF (ek >= 20) AND (ek <= 26) THEN
-            esrc := TRUE ; echk := TRUE ;
+            EB[35] := TRUE ; EB[19] := TRUE ;
         ELSIF (ek >= 30) AND (ek <= 77) THEN
-            er := (ek - 30) MOD 6 ;
-            IF (er >= 1) AND (er <= 4) THEN
-                esrc := TRUE ; echk := TRUE ;
+            EI[30] := (ek - 30) MOD 6 ;
+            IF (EI[30] >= 1) AND (EI[30] <= 4) THEN
+                EB[35] := TRUE ; EB[19] := TRUE ;
             ELSE
-                echk := TRUE ; ehi := 2 ;
+                EB[19] := TRUE ; EI[17] := 2 ;
             END_IF ;
         ELSIF (ek >= 78) AND (ek <= 109) THEN
-            er := (ek - 78) MOD 4 ;
-            IF (er = 1) OR (er = 2) THEN
-                esrc := TRUE ; echk := TRUE ;
-            ELSIF er = 0 THEN
-                echk := TRUE ; ehi := 4 ;
+            EI[30] := (ek - 78) MOD 4 ;
+            IF (EI[30] = 1) OR (EI[30] = 2) THEN
+                EB[35] := TRUE ; EB[19] := TRUE ;
+            ELSIF EI[30] = 0 THEN
+                EB[19] := TRUE ; EI[17] := 4 ;
             ELSE
-                echk := TRUE ;
+                EB[19] := TRUE ;
             END_IF ;
         ELSIF (ek >= 110) AND (ek <= 141) THEN
-            er := (ek - 110) MOD 4 ;
-            IF er <= 1 THEN
-                esrc := TRUE ; echk := TRUE ;
-            ELSIF er = 2 THEN
-                echk := TRUE ;
+            EI[30] := (ek - 110) MOD 4 ;
+            IF EI[30] <= 1 THEN
+                EB[35] := TRUE ; EB[19] := TRUE ;
+            ELSIF EI[30] = 2 THEN
+                EB[19] := TRUE ;
             ELSE
-                echk := TRUE ; ehi := 1 ;
+                EB[19] := TRUE ; EI[17] := 1 ;
             END_IF ;
         ELSIF (ek >= 142) AND (ek <= 165) THEN
-            er := (ek - 142) MOD 3 ;
-            IF er <= 1 THEN
-                esrc := TRUE ; echk := TRUE ;
+            EI[30] := (ek - 142) MOD 3 ;
+            IF EI[30] <= 1 THEN
+                EB[35] := TRUE ; EB[19] := TRUE ;
             ELSE
-                echk := TRUE ; ehi := 1 ;
+                EB[19] := TRUE ; EI[17] := 1 ;
             END_IF ;
         ELSIF (ek >= 166) AND (ek <= 168) THEN
-            esrc := TRUE ; echk := TRUE ;
+            EB[35] := TRUE ; EB[19] := TRUE ;
         ELSIF ek = 169 THEN
-            echk := TRUE ; ehi := 1 ;
+            EB[19] := TRUE ; EI[17] := 1 ;
         ELSIF ek = 170 THEN
-            echk := TRUE ; ehi := 16 ;
+            EB[19] := TRUE ; EI[17] := 16 ;
         ELSIF (ek >= 172) AND (ek <= 251) THEN
-            er := (ek - 172) MOD 5 ;
-            IF er = 2 THEN
-                esrc := TRUE ; echk := TRUE ;
-            ELSIF er = 0 THEN
-                echk := TRUE ; ehi := 4095 ;
-            ELSIF er = 1 THEN
-                echk := TRUE ; ehi := 4 ;
-            ELSIF er = 3 THEN
-                echk := TRUE ;
+            EI[30] := (ek - 172) MOD 5 ;
+            IF EI[30] = 2 THEN
+                EB[35] := TRUE ; EB[19] := TRUE ;
+            ELSIF EI[30] = 0 THEN
+                EB[19] := TRUE ; EI[17] := 4095 ;
+            ELSIF EI[30] = 1 THEN
+                EB[19] := TRUE ; EI[17] := 4 ;
+            ELSIF EI[30] = 3 THEN
+                EB[19] := TRUE ;
             ELSE
-                echk := TRUE ; ehi := 16 ;
+                EB[19] := TRUE ; EI[17] := 16 ;
             END_IF ;
         END_IF ;
 
-        IF echk AND EngValid THEN
-            ev := EC[ek] ;
-            IF esrc THEN
-                IF NOT (((ev >= 0) AND (ev <= 63)) OR ((ev >= 100) AND (ev <= 163))) THEN
-                    EngValid := FALSE ;
-                    EngError := ek + 1 ;
+        IF EB[19] AND EB[4] THEN
+            EI[37] := EC[ANY_TO_DINT(ek)] ;
+            IF EB[35] THEN
+                IF NOT (((EI[37] >= 0) AND (EI[37] <= 63)) OR ((EI[37] >= 100) AND (EI[37] <= 163))) THEN
+                    EB[4] := FALSE ;
+                    EI[1] := ek + 1 ;
                 END_IF ;
-            ELSIF (ev < elo) OR (ev > ehi) THEN
-                EngValid := FALSE ;
-                EngError := ek + 1 ;
+            ELSIF (EI[37] < EI[19]) OR (EI[37] > EI[17]) THEN
+                EB[4] := FALSE ;
+                EI[1] := ek + 1 ;
             END_IF ;
         END_IF ;
 
@@ -785,7 +827,7 @@ ELSIF EngineMode = 1 THEN
 
 END_IF ;
 
-IF (EngineMode = 1) AND NOT EngValid THEN
+IF (EI[0] = 1) AND NOT EB[4] THEN
     CfgValid := FALSE ;
 END_IF ;
 
@@ -909,7 +951,7 @@ BtnStartRising :=
 
 
 (* v6: con EngineMode = 1 el arranque lo decide el motor (EC[1]). *)
-IF (EngineMode = 0) AND
+IF (EI[0] = 0) AND
    BtnStartRising AND
    MotionCfgPresent AND
    CfgReady AND
@@ -1179,7 +1221,7 @@ END_IF ;
 
 (* v6: una configuracion nueva o un reset reinician el motor configurable. *)
 IF NewCfgTrigger OR ResetCmdTrigger THEN
-    EngResetReq := TRUE ;
+    EB[2] := TRUE ;
 END_IF ;
 
 
@@ -1329,7 +1371,7 @@ VFD_SpeedDisp :=
 (* Con EngineMode=1 corre el MOTOR CONFIGURABLE (§E1..§E10).   *)
 (* ============================================================ *)
 
-IF EngineMode = 0 THEN
+IF EI[0] = 0 THEN
 
 
 (* ============================================================ *)
@@ -2719,8 +2761,8 @@ END_IF ;
 
     (* v5: la direccion real es la que pide DirCmd. El motor     *)
     (* configurable queda listo para reiniciarse si se activa.   *)
-    DirActual   := DirCmd ;
-    EngResetReq := TRUE ;
+    EI[3]   := DirCmd ;
+    EB[2] := TRUE ;
 
 ELSE
 
@@ -2748,43 +2790,43 @@ ELSE
 (* En el scan de reinicio ningun flanco cuenta (EngFirst).     *)
 (* ============================================================ *)
 
-EngFirst := EngResetReq ;
+EB[3] := EB[2] ;
 
-IF EngFirst THEN
+IF EB[3] THEN
 
     FOR ek := 0 TO 7 DO
-        TAcc[ek]  := 0 ;
-        TDn[ek]   := FALSE ;
-        TRun[ek]  := FALSE ;
-        CAcc[ek]  := 0 ;
-        CDn[ek]   := FALSE ;
-        MBit[ek]  := FALSE ;
+        EI[ANY_TO_DINT(43 + ek)]  := 0 ;
+        EB[ANY_TO_DINT(128 + ek)]   := FALSE ;
+        EB[ANY_TO_DINT(136 + ek)]  := FALSE ;
+        EI[ANY_TO_DINT(51 + ek)]  := 0 ;
+        EB[ANY_TO_DINT(152 + ek)]   := FALSE ;
+        EB[ANY_TO_DINT(168 + ek)]  := FALSE ;
     END_FOR ;
 
     FOR ek := 16 TO 63 DO
-        Sig[ek] := FALSE ;
+        EB[ANY_TO_DINT(46 + ek)] := FALSE ;
     END_FOR ;
 
-    ESeqActive := FALSE ;
-    ESeqStep   := 0 ;
-    ESeqAcc    := 0 ;
+    EB[6] := FALSE ;
+    EI[8]   := 0 ;
+    EI[9]    := 0 ;
 
-    RunLatch   := FALSE ;
-    MotorState := 0 ;
+    EB[5]   := FALSE ;
+    EI[2] := 0 ;
 
     IF (DirCmd = 1) OR (DirCmd = 2) THEN
-        DirActual := DirCmd ;
+        EI[3] := DirCmd ;
     ELSE
-        DirActual := 1 ;
+        EI[3] := 1 ;
     END_IF ;
 
-    DirTarget := DirActual ;
-    BrakeAcc  := 32767 ;
+    EI[4] := EI[3] ;
+    EI[5]  := 32767 ;
 
     FOR ek := 0 TO 1 DO
-        PlAcc[ek]     := 0 ;
-        PlTimeout[ek] := FALSE ;
-        PlPrev[ek]    := 0 ;
+        EI[ANY_TO_DINT(59 + ek)]     := 0 ;
+        EB[ANY_TO_DINT(195 + ek)] := FALSE ;
+        EI[ANY_TO_DINT(61 + ek)]    := 0 ;
     END_FOR ;
 
 END_IF ;
@@ -2797,58 +2839,58 @@ END_IF ;
 (* de §4 sigue leyendo la entrada directa.                      *)
 (* ============================================================ *)
 
-RawIn[0] := BtnStart ;
-RawIn[1] := BtnAux ;
-RawIn[2] := BtnStop ;
-RawIn[3] := S1_Det ;
-RawIn[4] := S2_Det ;
+EB[ANY_TO_DINT(110 + 0)] := BtnStart ;
+EB[ANY_TO_DINT(110 + 1)] := BtnAux ;
+EB[ANY_TO_DINT(110 + 2)] := BtnStop ;
+EB[ANY_TO_DINT(110 + 3)] := S1_Det ;
+EB[ANY_TO_DINT(110 + 4)] := S2_Det ;
 
 FOR ek := 0 TO 4 DO
 
     IF ek <= 2 THEN
-        DebPre := EC[10] ;
+        EI[7] := EC[10] ;
     ELSE
-        DebPre := EC[9] ;
+        EI[7] := EC[9] ;
     END_IF ;
 
-    IF (DebPre <= 0) OR EngFirst THEN
-        DebFilt[ek] := RawIn[ek] ;
-        DebAcc[ek]  := 0 ;
-    ELSIF RawIn[ek] = DebFilt[ek] THEN
-        DebAcc[ek]  := 0 ;
+    IF (EI[7] <= 0) OR EB[3] THEN
+        EB[ANY_TO_DINT(115 + ek)] := EB[ANY_TO_DINT(110 + ek)] ;
+        EI[ANY_TO_DINT(38 + ek)]  := 0 ;
+    ELSIF EB[ANY_TO_DINT(110 + ek)] = EB[ANY_TO_DINT(115 + ek)] THEN
+        EI[ANY_TO_DINT(38 + ek)]  := 0 ;
     ELSE
-        IF Pulse100ms THEN
-            DebAcc[ek] := DebAcc[ek] + 1 ;
+        IF EB[0] THEN
+            EI[ANY_TO_DINT(38 + ek)] := EI[ANY_TO_DINT(38 + ek)] + 1 ;
         END_IF ;
-        IF DebAcc[ek] >= DebPre THEN
-            DebFilt[ek] := RawIn[ek] ;
-            DebAcc[ek]  := 0 ;
+        IF EI[ANY_TO_DINT(38 + ek)] >= EI[7] THEN
+            EB[ANY_TO_DINT(115 + ek)] := EB[ANY_TO_DINT(110 + ek)] ;
+            EI[ANY_TO_DINT(38 + ek)]  := 0 ;
         END_IF ;
     END_IF ;
 
 END_FOR ;
 
-espd := VFD_SpeedRaw ;
-IF espd < 0 THEN
-    espd := 0 - espd ;
+EI[33] := VFD_SpeedRaw ;
+IF EI[33] < 0 THEN
+    EI[33] := 0 - EI[33] ;
 END_IF ;
 
-Sig[0]  := FALSE ;
-Sig[1]  := DebFilt[0] ;
-Sig[2]  := DebFilt[1] ;
-Sig[3]  := DebFilt[2] ;
-Sig[4]  := DebFilt[3] ;
-Sig[5]  := DebFilt[4] ;
-Sig[6]  := (MotorState = 1) ;
-Sig[7]  := (MotorState <> 1) ;
-Sig[8]  := (DirActual = 1) ;
-Sig[9]  := (DirActual = 2) ;
-Sig[10] := (MotorState = 2) ;
-Sig[11] := CfgReady ;
-Sig[12] := (espd < 50) ;
-Sig[13] := (EC[11] <> 0) ;
-Sig[14] := (EC[12] <> 0) ;
-Sig[15] := TRUE ;
+EB[ANY_TO_DINT(46 + 0)]  := FALSE ;
+EB[ANY_TO_DINT(46 + 1)]  := EB[ANY_TO_DINT(115 + 0)] ;
+EB[ANY_TO_DINT(46 + 2)]  := EB[ANY_TO_DINT(115 + 1)] ;
+EB[ANY_TO_DINT(46 + 3)]  := EB[ANY_TO_DINT(115 + 2)] ;
+EB[ANY_TO_DINT(46 + 4)]  := EB[ANY_TO_DINT(115 + 3)] ;
+EB[ANY_TO_DINT(46 + 5)]  := EB[ANY_TO_DINT(115 + 4)] ;
+EB[ANY_TO_DINT(46 + 6)]  := (EI[2] = 1) ;
+EB[ANY_TO_DINT(46 + 7)]  := (EI[2] <> 1) ;
+EB[ANY_TO_DINT(46 + 8)]  := (EI[3] = 1) ;
+EB[ANY_TO_DINT(46 + 9)]  := (EI[3] = 2) ;
+EB[ANY_TO_DINT(46 + 10)] := (EI[2] = 2) ;
+EB[ANY_TO_DINT(46 + 11)] := CfgReady ;
+EB[ANY_TO_DINT(46 + 12)] := (EI[33] < 50) ;
+EB[ANY_TO_DINT(46 + 13)] := (EC[11] <> 0) ;
+EB[ANY_TO_DINT(46 + 14)] := (EC[12] <> 0) ;
+EB[ANY_TO_DINT(46 + 15)] := TRUE ;
 
 
 (* ============================================================ *)
@@ -2860,43 +2902,43 @@ Sig[15] := TRUE ;
 
 FOR ek := 0 TO 7 DO
 
-    eb  := 30 + ek * 6 ;
-    eop := EC[eb] ;
+    EI[12]  := 30 + ek * 6 ;
+    EI[28] := EC[ANY_TO_DINT(EI[12])] ;
 
-    IF eop = 0 THEN
-        eres := FALSE ;
+    IF EI[28] = 0 THEN
+        EB[28] := FALSE ;
     ELSE
-        eres  := (eop = 1) ;
-        eused := FALSE ;
+        EB[28]  := (EI[28] = 1) ;
+        EB[42] := FALSE ;
         FOR ej := 1 TO 4 DO
-            esc := EC[eb + ej] ;
-            IF esc <> 0 THEN
-                eused := TRUE ;
-                esn := FALSE ;
-                IF esc >= 100 THEN esn := TRUE ; esc := esc - 100 ; END_IF ;
-                IF (esc >= 0) AND (esc <= 63) THEN esv := Sig[esc] ; ELSE esv := FALSE ; END_IF ;
-                IF esn THEN esv := NOT esv ; END_IF ;
-                IF eop = 1 THEN
-                    eres := eres AND esv ;
+            EI[32] := EC[ANY_TO_DINT(EI[12] + ej)] ;
+            IF EI[32] <> 0 THEN
+                EB[42] := TRUE ;
+                EB[34] := FALSE ;
+                IF EI[32] >= 100 THEN EB[34] := TRUE ; EI[32] := EI[32] - 100 ; END_IF ;
+                IF (EI[32] >= 0) AND (EI[32] <= 63) THEN EB[36] := EB[ANY_TO_DINT(46 + EI[32])] ; ELSE EB[36] := FALSE ; END_IF ;
+                IF EB[34] THEN EB[36] := NOT EB[36] ; END_IF ;
+                IF EI[28] = 1 THEN
+                    EB[28] := EB[28] AND EB[36] ;
                 ELSE
-                    eres := eres OR esv ;
+                    EB[28] := EB[28] OR EB[36] ;
                 END_IF ;
             END_IF ;
         END_FOR ;
-        IF NOT eused THEN
-            eres := FALSE ;
+        IF NOT EB[42] THEN
+            EB[28] := FALSE ;
         END_IF ;
     END_IF ;
 
-    eedge := EC[eb + 5] ;
-    CASE eedge OF
-        1: eout := eres AND NOT CondPrev[ek] AND NOT EngFirst ;
-        2: eout := (NOT eres) AND CondPrev[ek] AND NOT EngFirst ;
-        ELSE eout := eres ;
+    EI[16] := EC[ANY_TO_DINT(EI[12] + 5)] ;
+    CASE EI[16] OF
+        1: EB[27] := EB[28] AND NOT EB[ANY_TO_DINT(120 + ek)] AND NOT EB[3] ;
+        2: EB[27] := (NOT EB[28]) AND EB[ANY_TO_DINT(120 + ek)] AND NOT EB[3] ;
+        ELSE EB[27] := EB[28] ;
     END_CASE ;
 
-    CondPrev[ek] := eres ;
-    Sig[16 + ek] := eout ;
+    EB[ANY_TO_DINT(120 + ek)] := EB[28] ;
+    EB[ANY_TO_DINT(46 + 16 + ek)] := EB[27] ;
 
 END_FOR ;
 
@@ -2914,103 +2956,103 @@ END_FOR ;
 
 FOR ek := 0 TO 7 DO
 
-    eb   := 78 + ek * 4 ;
-    etyp := EC[eb] ;
-    epre := EC[eb + 3] ;
+    EI[12]   := 78 + ek * 4 ;
+    EI[36] := EC[ANY_TO_DINT(EI[12])] ;
+    EI[29] := EC[ANY_TO_DINT(EI[12] + 3)] ;
 
-    esc := EC[eb + 1] ;
-    esn := FALSE ;
-    IF esc >= 100 THEN esn := TRUE ; esc := esc - 100 ; END_IF ;
-    IF (esc >= 0) AND (esc <= 63) THEN esv := Sig[esc] ; ELSE esv := FALSE ; END_IF ;
-    IF esn THEN esv := NOT esv ; END_IF ;
-    evin := esv ;
+    EI[32] := EC[ANY_TO_DINT(EI[12] + 1)] ;
+    EB[34] := FALSE ;
+    IF EI[32] >= 100 THEN EB[34] := TRUE ; EI[32] := EI[32] - 100 ; END_IF ;
+    IF (EI[32] >= 0) AND (EI[32] <= 63) THEN EB[36] := EB[ANY_TO_DINT(46 + EI[32])] ; ELSE EB[36] := FALSE ; END_IF ;
+    IF EB[34] THEN EB[36] := NOT EB[36] ; END_IF ;
+    EB[43] := EB[36] ;
 
-    esc := EC[eb + 2] ;
-    esn := FALSE ;
-    IF esc >= 100 THEN esn := TRUE ; esc := esc - 100 ; END_IF ;
-    IF (esc >= 0) AND (esc <= 63) THEN esv := Sig[esc] ; ELSE esv := FALSE ; END_IF ;
-    IF esn THEN esv := NOT esv ; END_IF ;
-    evrst := esv ;
+    EI[32] := EC[ANY_TO_DINT(EI[12] + 2)] ;
+    EB[34] := FALSE ;
+    IF EI[32] >= 100 THEN EB[34] := TRUE ; EI[32] := EI[32] - 100 ; END_IF ;
+    IF (EI[32] >= 0) AND (EI[32] <= 63) THEN EB[36] := EB[ANY_TO_DINT(46 + EI[32])] ; ELSE EB[36] := FALSE ; END_IF ;
+    IF EB[34] THEN EB[36] := NOT EB[36] ; END_IF ;
+    EB[44] := EB[36] ;
 
-    erise := evin AND NOT TPrevIn[ek] AND NOT EngFirst ;
-    TPrevIn[ek] := evin ;
+    EB[30] := EB[43] AND NOT EB[ANY_TO_DINT(144 + ek)] AND NOT EB[3] ;
+    EB[ANY_TO_DINT(144 + ek)] := EB[43] ;
 
-    IF evrst OR (etyp = 0) THEN
+    IF EB[44] OR (EI[36] = 0) THEN
 
-        TAcc[ek] := 0 ;
-        TDn[ek]  := FALSE ;
-        TRun[ek] := FALSE ;
+        EI[ANY_TO_DINT(43 + ek)] := 0 ;
+        EB[ANY_TO_DINT(128 + ek)]  := FALSE ;
+        EB[ANY_TO_DINT(136 + ek)] := FALSE ;
 
-    ELSIF etyp = 1 THEN
+    ELSIF EI[36] = 1 THEN
 
-        IF evin THEN
-            IF Pulse100ms AND (TAcc[ek] < epre) THEN
-                TAcc[ek] := TAcc[ek] + 1 ;
+        IF EB[43] THEN
+            IF EB[0] AND (EI[ANY_TO_DINT(43 + ek)] < EI[29]) THEN
+                EI[ANY_TO_DINT(43 + ek)] := EI[ANY_TO_DINT(43 + ek)] + 1 ;
             END_IF ;
-            TDn[ek] := (TAcc[ek] >= epre) ;
+            EB[ANY_TO_DINT(128 + ek)] := (EI[ANY_TO_DINT(43 + ek)] >= EI[29]) ;
         ELSE
-            TAcc[ek] := 0 ;
-            TDn[ek]  := FALSE ;
+            EI[ANY_TO_DINT(43 + ek)] := 0 ;
+            EB[ANY_TO_DINT(128 + ek)]  := FALSE ;
         END_IF ;
 
-    ELSIF etyp = 2 THEN
+    ELSIF EI[36] = 2 THEN
 
-        IF evin THEN
-            TAcc[ek] := 0 ;
-            TDn[ek]  := TRUE ;
-            TRun[ek] := TRUE ;
-        ELSIF TRun[ek] THEN
-            IF Pulse100ms AND (TAcc[ek] < epre) THEN
-                TAcc[ek] := TAcc[ek] + 1 ;
+        IF EB[43] THEN
+            EI[ANY_TO_DINT(43 + ek)] := 0 ;
+            EB[ANY_TO_DINT(128 + ek)]  := TRUE ;
+            EB[ANY_TO_DINT(136 + ek)] := TRUE ;
+        ELSIF EB[ANY_TO_DINT(136 + ek)] THEN
+            IF EB[0] AND (EI[ANY_TO_DINT(43 + ek)] < EI[29]) THEN
+                EI[ANY_TO_DINT(43 + ek)] := EI[ANY_TO_DINT(43 + ek)] + 1 ;
             END_IF ;
-            IF TAcc[ek] >= epre THEN
-                TRun[ek] := FALSE ;
-                TDn[ek]  := FALSE ;
+            IF EI[ANY_TO_DINT(43 + ek)] >= EI[29] THEN
+                EB[ANY_TO_DINT(136 + ek)] := FALSE ;
+                EB[ANY_TO_DINT(128 + ek)]  := FALSE ;
             END_IF ;
         ELSE
-            TDn[ek] := FALSE ;
+            EB[ANY_TO_DINT(128 + ek)] := FALSE ;
         END_IF ;
 
-    ELSIF etyp = 3 THEN
+    ELSIF EI[36] = 3 THEN
 
-        IF erise AND NOT TRun[ek] THEN
-            TRun[ek] := TRUE ;
-            TAcc[ek] := 0 ;
+        IF EB[30] AND NOT EB[ANY_TO_DINT(136 + ek)] THEN
+            EB[ANY_TO_DINT(136 + ek)] := TRUE ;
+            EI[ANY_TO_DINT(43 + ek)] := 0 ;
         END_IF ;
-        IF TRun[ek] THEN
-            IF Pulse100ms AND (TAcc[ek] < epre) THEN
-                TAcc[ek] := TAcc[ek] + 1 ;
+        IF EB[ANY_TO_DINT(136 + ek)] THEN
+            IF EB[0] AND (EI[ANY_TO_DINT(43 + ek)] < EI[29]) THEN
+                EI[ANY_TO_DINT(43 + ek)] := EI[ANY_TO_DINT(43 + ek)] + 1 ;
             END_IF ;
-            IF TAcc[ek] >= epre THEN
-                TRun[ek] := FALSE ;
-                TDn[ek]  := FALSE ;
+            IF EI[ANY_TO_DINT(43 + ek)] >= EI[29] THEN
+                EB[ANY_TO_DINT(136 + ek)] := FALSE ;
+                EB[ANY_TO_DINT(128 + ek)]  := FALSE ;
             ELSE
-                TDn[ek]  := TRUE ;
+                EB[ANY_TO_DINT(128 + ek)]  := TRUE ;
             END_IF ;
         ELSE
-            TDn[ek] := FALSE ;
+            EB[ANY_TO_DINT(128 + ek)] := FALSE ;
         END_IF ;
 
-    ELSIF etyp = 4 THEN
+    ELSIF EI[36] = 4 THEN
 
-        IF erise THEN
-            TRun[ek] := TRUE ;
-            TAcc[ek] := 0 ;
-            TDn[ek]  := FALSE ;
+        IF EB[30] THEN
+            EB[ANY_TO_DINT(136 + ek)] := TRUE ;
+            EI[ANY_TO_DINT(43 + ek)] := 0 ;
+            EB[ANY_TO_DINT(128 + ek)]  := FALSE ;
         END_IF ;
-        IF TRun[ek] THEN
-            IF Pulse100ms AND (TAcc[ek] < epre) THEN
-                TAcc[ek] := TAcc[ek] + 1 ;
+        IF EB[ANY_TO_DINT(136 + ek)] THEN
+            IF EB[0] AND (EI[ANY_TO_DINT(43 + ek)] < EI[29]) THEN
+                EI[ANY_TO_DINT(43 + ek)] := EI[ANY_TO_DINT(43 + ek)] + 1 ;
             END_IF ;
-            IF TAcc[ek] >= epre THEN
-                TRun[ek] := FALSE ;
-                TDn[ek]  := TRUE ;
+            IF EI[ANY_TO_DINT(43 + ek)] >= EI[29] THEN
+                EB[ANY_TO_DINT(136 + ek)] := FALSE ;
+                EB[ANY_TO_DINT(128 + ek)]  := TRUE ;
             END_IF ;
         END_IF ;
 
     END_IF ;
 
-    Sig[24 + ek] := TDn[ek] ;
+    EB[ANY_TO_DINT(46 + 24 + ek)] := EB[ANY_TO_DINT(128 + ek)] ;
 
 END_FOR ;
 
@@ -3026,53 +3068,53 @@ END_FOR ;
 
 FOR ek := 0 TO 7 DO
 
-    eb    := 110 + ek * 4 ;
-    epre  := EC[eb + 2] ;
-    emode := EC[eb + 3] ;
+    EI[12]    := 110 + ek * 4 ;
+    EI[29]  := EC[ANY_TO_DINT(EI[12] + 2)] ;
+    EI[26] := EC[ANY_TO_DINT(EI[12] + 3)] ;
 
-    esc := EC[eb] ;
-    esn := FALSE ;
-    IF esc >= 100 THEN esn := TRUE ; esc := esc - 100 ; END_IF ;
-    IF (esc >= 0) AND (esc <= 63) THEN esv := Sig[esc] ; ELSE esv := FALSE ; END_IF ;
-    IF esn THEN esv := NOT esv ; END_IF ;
-    evin := esv ;
+    EI[32] := EC[ANY_TO_DINT(EI[12])] ;
+    EB[34] := FALSE ;
+    IF EI[32] >= 100 THEN EB[34] := TRUE ; EI[32] := EI[32] - 100 ; END_IF ;
+    IF (EI[32] >= 0) AND (EI[32] <= 63) THEN EB[36] := EB[ANY_TO_DINT(46 + EI[32])] ; ELSE EB[36] := FALSE ; END_IF ;
+    IF EB[34] THEN EB[36] := NOT EB[36] ; END_IF ;
+    EB[43] := EB[36] ;
 
-    esc := EC[eb + 1] ;
-    esn := FALSE ;
-    IF esc >= 100 THEN esn := TRUE ; esc := esc - 100 ; END_IF ;
-    IF (esc >= 0) AND (esc <= 63) THEN esv := Sig[esc] ; ELSE esv := FALSE ; END_IF ;
-    IF esn THEN esv := NOT esv ; END_IF ;
-    evrst := esv ;
+    EI[32] := EC[ANY_TO_DINT(EI[12] + 1)] ;
+    EB[34] := FALSE ;
+    IF EI[32] >= 100 THEN EB[34] := TRUE ; EI[32] := EI[32] - 100 ; END_IF ;
+    IF (EI[32] >= 0) AND (EI[32] <= 63) THEN EB[36] := EB[ANY_TO_DINT(46 + EI[32])] ; ELSE EB[36] := FALSE ; END_IF ;
+    IF EB[34] THEN EB[36] := NOT EB[36] ; END_IF ;
+    EB[44] := EB[36] ;
 
-    erise := evin AND NOT CPrevIn[ek] AND NOT EngFirst ;
-    CPrevIn[ek] := evin ;
+    EB[30] := EB[43] AND NOT EB[ANY_TO_DINT(160 + ek)] AND NOT EB[3] ;
+    EB[ANY_TO_DINT(160 + ek)] := EB[43] ;
 
-    IF evrst OR (EC[eb] = 0) THEN
+    IF EB[44] OR (EC[ANY_TO_DINT(EI[12])] = 0) THEN
 
-        CAcc[ek] := 0 ;
-        CDn[ek]  := FALSE ;
+        EI[ANY_TO_DINT(51 + ek)] := 0 ;
+        EB[ANY_TO_DINT(152 + ek)]  := FALSE ;
 
     ELSE
 
-        IF emode = 1 THEN
-            CDn[ek] := FALSE ;
+        IF EI[26] = 1 THEN
+            EB[ANY_TO_DINT(152 + ek)] := FALSE ;
         END_IF ;
 
-        IF erise THEN
-            IF CAcc[ek] < 32767 THEN
-                CAcc[ek] := CAcc[ek] + 1 ;
+        IF EB[30] THEN
+            IF EI[ANY_TO_DINT(51 + ek)] < 32767 THEN
+                EI[ANY_TO_DINT(51 + ek)] := EI[ANY_TO_DINT(51 + ek)] + 1 ;
             END_IF ;
-            IF (epre > 0) AND (CAcc[ek] >= epre) THEN
-                CDn[ek] := TRUE ;
-                IF emode = 1 THEN
-                    CAcc[ek] := 0 ;
+            IF (EI[29] > 0) AND (EI[ANY_TO_DINT(51 + ek)] >= EI[29]) THEN
+                EB[ANY_TO_DINT(152 + ek)] := TRUE ;
+                IF EI[26] = 1 THEN
+                    EI[ANY_TO_DINT(51 + ek)] := 0 ;
                 END_IF ;
             END_IF ;
         END_IF ;
 
     END_IF ;
 
-    Sig[32 + ek] := CDn[ek] ;
+    EB[ANY_TO_DINT(46 + 32 + ek)] := EB[ANY_TO_DINT(152 + ek)] ;
 
 END_FOR ;
 
@@ -3085,45 +3127,45 @@ END_FOR ;
 
 FOR ek := 0 TO 7 DO
 
-    eb := 142 + ek * 3 ;
+    EI[12] := 142 + ek * 3 ;
 
-    IF (EC[eb] = 0) AND (EC[eb + 1] = 0) THEN
+    IF (EC[ANY_TO_DINT(EI[12])] = 0) AND (EC[ANY_TO_DINT(EI[12] + 1)] = 0) THEN
 
-        MBit[ek] := FALSE ;
+        EB[ANY_TO_DINT(168 + ek)] := FALSE ;
 
     ELSE
 
-        esc := EC[eb] ;
-        esn := FALSE ;
-        IF esc >= 100 THEN esn := TRUE ; esc := esc - 100 ; END_IF ;
-        IF (esc >= 0) AND (esc <= 63) THEN esv := Sig[esc] ; ELSE esv := FALSE ; END_IF ;
-        IF esn THEN esv := NOT esv ; END_IF ;
-        evin := esv ;
+        EI[32] := EC[ANY_TO_DINT(EI[12])] ;
+        EB[34] := FALSE ;
+        IF EI[32] >= 100 THEN EB[34] := TRUE ; EI[32] := EI[32] - 100 ; END_IF ;
+        IF (EI[32] >= 0) AND (EI[32] <= 63) THEN EB[36] := EB[ANY_TO_DINT(46 + EI[32])] ; ELSE EB[36] := FALSE ; END_IF ;
+        IF EB[34] THEN EB[36] := NOT EB[36] ; END_IF ;
+        EB[43] := EB[36] ;
 
-        esc := EC[eb + 1] ;
-        esn := FALSE ;
-        IF esc >= 100 THEN esn := TRUE ; esc := esc - 100 ; END_IF ;
-        IF (esc >= 0) AND (esc <= 63) THEN esv := Sig[esc] ; ELSE esv := FALSE ; END_IF ;
-        IF esn THEN esv := NOT esv ; END_IF ;
-        evrst := esv ;
+        EI[32] := EC[ANY_TO_DINT(EI[12] + 1)] ;
+        EB[34] := FALSE ;
+        IF EI[32] >= 100 THEN EB[34] := TRUE ; EI[32] := EI[32] - 100 ; END_IF ;
+        IF (EI[32] >= 0) AND (EI[32] <= 63) THEN EB[36] := EB[ANY_TO_DINT(46 + EI[32])] ; ELSE EB[36] := FALSE ; END_IF ;
+        IF EB[34] THEN EB[36] := NOT EB[36] ; END_IF ;
+        EB[44] := EB[36] ;
 
-        IF EC[eb + 2] = 1 THEN
-            IF evin THEN
-                MBit[ek] := TRUE ;
-            ELSIF evrst THEN
-                MBit[ek] := FALSE ;
+        IF EC[ANY_TO_DINT(EI[12] + 2)] = 1 THEN
+            IF EB[43] THEN
+                EB[ANY_TO_DINT(168 + ek)] := TRUE ;
+            ELSIF EB[44] THEN
+                EB[ANY_TO_DINT(168 + ek)] := FALSE ;
             END_IF ;
         ELSE
-            IF evrst THEN
-                MBit[ek] := FALSE ;
-            ELSIF evin THEN
-                MBit[ek] := TRUE ;
+            IF EB[44] THEN
+                EB[ANY_TO_DINT(168 + ek)] := FALSE ;
+            ELSIF EB[43] THEN
+                EB[ANY_TO_DINT(168 + ek)] := TRUE ;
             END_IF ;
         END_IF ;
 
     END_IF ;
 
-    Sig[40 + ek] := MBit[ek] ;
+    EB[ANY_TO_DINT(46 + 40 + ek)] := EB[ANY_TO_DINT(168 + ek)] ;
 
 END_FOR ;
 
@@ -3143,105 +3185,105 @@ END_FOR ;
 (* rearranca solo al soltar un paro.                            *)
 (* ============================================================ *)
 
-ecnt := EC[170] ;
+EI[15] := EC[170] ;
 
-esc := EC[166] ;
-esn := FALSE ;
-IF esc >= 100 THEN esn := TRUE ; esc := esc - 100 ; END_IF ;
-IF (esc >= 0) AND (esc <= 63) THEN esv := Sig[esc] ; ELSE esv := FALSE ; END_IF ;
-IF esn THEN esv := NOT esv ; END_IF ;
-eSeqStartV := esv ;
+EI[32] := EC[166] ;
+EB[34] := FALSE ;
+IF EI[32] >= 100 THEN EB[34] := TRUE ; EI[32] := EI[32] - 100 ; END_IF ;
+IF (EI[32] >= 0) AND (EI[32] <= 63) THEN EB[36] := EB[ANY_TO_DINT(46 + EI[32])] ; ELSE EB[36] := FALSE ; END_IF ;
+IF EB[34] THEN EB[36] := NOT EB[36] ; END_IF ;
+EB[16] := EB[36] ;
 
-esc := EC[167] ;
-esn := FALSE ;
-IF esc >= 100 THEN esn := TRUE ; esc := esc - 100 ; END_IF ;
-IF (esc >= 0) AND (esc <= 63) THEN esv := Sig[esc] ; ELSE esv := FALSE ; END_IF ;
-IF esn THEN esv := NOT esv ; END_IF ;
-eSeqStopV := esv ;
+EI[32] := EC[167] ;
+EB[34] := FALSE ;
+IF EI[32] >= 100 THEN EB[34] := TRUE ; EI[32] := EI[32] - 100 ; END_IF ;
+IF (EI[32] >= 0) AND (EI[32] <= 63) THEN EB[36] := EB[ANY_TO_DINT(46 + EI[32])] ; ELSE EB[36] := FALSE ; END_IF ;
+IF EB[34] THEN EB[36] := NOT EB[36] ; END_IF ;
+EB[17] := EB[36] ;
 
-esc := EC[168] ;
-esn := FALSE ;
-IF esc >= 100 THEN esn := TRUE ; esc := esc - 100 ; END_IF ;
-IF (esc >= 0) AND (esc <= 63) THEN esv := Sig[esc] ; ELSE esv := FALSE ; END_IF ;
-IF esn THEN esv := NOT esv ; END_IF ;
-eSeqResetV := esv ;
+EI[32] := EC[168] ;
+EB[34] := FALSE ;
+IF EI[32] >= 100 THEN EB[34] := TRUE ; EI[32] := EI[32] - 100 ; END_IF ;
+IF (EI[32] >= 0) AND (EI[32] <= 63) THEN EB[36] := EB[ANY_TO_DINT(46 + EI[32])] ; ELSE EB[36] := FALSE ; END_IF ;
+IF EB[34] THEN EB[36] := NOT EB[36] ; END_IF ;
+EB[15] := EB[36] ;
 
-StepEntry := FALSE ;
+EB[10] := FALSE ;
 
-IF (ecnt < 1) OR (ecnt > 16) OR eSeqResetV OR eSeqStopV OR
-   GenStop OR EngFirst THEN
+IF (EI[15] < 1) OR (EI[15] > 16) OR EB[15] OR EB[17] OR
+   GenStop OR EB[3] THEN
 
-    ESeqActive := FALSE ;
-    ESeqStep   := 0 ;
-    ESeqAcc    := 0 ;
+    EB[6] := FALSE ;
+    EI[8]   := 0 ;
+    EI[9]    := 0 ;
 
 ELSE
 
-    IF eSeqStartV AND NOT ESeqStartPrev AND NOT ESeqActive THEN
+    IF EB[16] AND NOT EB[8] AND NOT EB[6] THEN
 
-        ESeqActive := TRUE ;
-        ESeqStep   := 1 ;
-        ESeqAcc    := 0 ;
-        StepEntry := TRUE ;
+        EB[6] := TRUE ;
+        EI[8]   := 1 ;
+        EI[9]    := 0 ;
+        EB[10] := TRUE ;
 
-    ELSIF ESeqActive THEN
+    ELSIF EB[6] THEN
 
-        IF (ESeqStep < 1) OR (ESeqStep > ecnt) THEN
-            ESeqStep := 1 ;
+        IF (EI[8] < 1) OR (EI[8] > EI[15]) THEN
+            EI[8] := 1 ;
         END_IF ;
 
-        esb := 172 + (ESeqStep - 1) * 5 ;
-        etm := EC[esb + 1] ;
-        est := EC[esb + 3] ;
+        EI[31] := 172 + (EI[8] - 1) * 5 ;
+        EI[35] := EC[ANY_TO_DINT(EI[31] + 1)] ;
+        EI[34] := EC[ANY_TO_DINT(EI[31] + 3)] ;
 
-        esc := EC[esb + 2] ;
-        esn := FALSE ;
-        IF esc >= 100 THEN esn := TRUE ; esc := esc - 100 ; END_IF ;
-        IF (esc >= 0) AND (esc <= 63) THEN esv := Sig[esc] ; ELSE esv := FALSE ; END_IF ;
-        IF esn THEN esv := NOT esv ; END_IF ;
-        etv := esv ;
+        EI[32] := EC[ANY_TO_DINT(EI[31] + 2)] ;
+        EB[34] := FALSE ;
+        IF EI[32] >= 100 THEN EB[34] := TRUE ; EI[32] := EI[32] - 100 ; END_IF ;
+        IF (EI[32] >= 0) AND (EI[32] <= 63) THEN EB[36] := EB[ANY_TO_DINT(46 + EI[32])] ; ELSE EB[36] := FALSE ; END_IF ;
+        IF EB[34] THEN EB[36] := NOT EB[36] ; END_IF ;
+        EB[40] := EB[36] ;
 
-        IF Pulse100ms AND (ESeqAcc < 32767) THEN
-            ESeqAcc := ESeqAcc + 1 ;
+        IF EB[0] AND (EI[9] < 32767) THEN
+            EI[9] := EI[9] + 1 ;
         END_IF ;
 
-        etimeOk := (ESeqAcc >= est) ;
-        etRise  := etv AND NOT ESeqTransPrev ;
-        ESeqTransPrev := etv ;
+        EB[38] := (EI[9] >= EI[34]) ;
+        EB[37]  := EB[40] AND NOT EB[9] ;
+        EB[9] := EB[40] ;
 
-        CASE etm OF
-            0: edone := etimeOk ;
-            1: edone := etv ;
-            2: edone := etimeOk AND etv ;
-            3: edone := etv OR ((est > 0) AND etimeOk) ;
-            4: edone := etRise ;
-            ELSE edone := FALSE ;
+        CASE EI[35] OF
+            0: EB[21] := EB[38] ;
+            1: EB[21] := EB[40] ;
+            2: EB[21] := EB[38] AND EB[40] ;
+            3: EB[21] := EB[40] OR ((EI[34] > 0) AND EB[38]) ;
+            4: EB[21] := EB[37] ;
+            ELSE EB[21] := FALSE ;
         END_CASE ;
 
-        IF edone THEN
+        IF EB[21] THEN
 
-            enx := EC[esb + 4] ;
-            IF enx <= 0 THEN
-                enx := ESeqStep + 1 ;
+            EI[27] := EC[ANY_TO_DINT(EI[31] + 4)] ;
+            IF EI[27] <= 0 THEN
+                EI[27] := EI[8] + 1 ;
             END_IF ;
 
-            IF enx > ecnt THEN
+            IF EI[27] > EI[15] THEN
                 IF EC[169] = 1 THEN
-                    enx := 1 ;
+                    EI[27] := 1 ;
                 ELSE
-                    enx := 0 ;
+                    EI[27] := 0 ;
                 END_IF ;
             END_IF ;
 
-            IF enx = 0 THEN
-                ESeqActive := FALSE ;
-                ESeqStep   := 0 ;
+            IF EI[27] = 0 THEN
+                EB[6] := FALSE ;
+                EI[8]   := 0 ;
             ELSE
-                ESeqStep   := enx ;
-                StepEntry := TRUE ;
+                EI[8]   := EI[27] ;
+                EB[10] := TRUE ;
             END_IF ;
 
-            ESeqAcc := 0 ;
+            EI[9] := 0 ;
 
         END_IF ;
 
@@ -3249,33 +3291,33 @@ ELSE
 
     (* Al entrar a un paso, una senal que YA estaba activa no cuenta
        como flanco: TransMode 4 espera un evento NUEVO. *)
-    IF StepEntry THEN
-        esb := 172 + (ESeqStep - 1) * 5 ;
-        esc := EC[esb + 2] ;
-        esn := FALSE ;
-        IF esc >= 100 THEN esn := TRUE ; esc := esc - 100 ; END_IF ;
-        IF (esc >= 0) AND (esc <= 63) THEN esv := Sig[esc] ; ELSE esv := FALSE ; END_IF ;
-        IF esn THEN esv := NOT esv ; END_IF ;
-        ESeqTransPrev := esv ;
+    IF EB[10] THEN
+        EI[31] := 172 + (EI[8] - 1) * 5 ;
+        EI[32] := EC[ANY_TO_DINT(EI[31] + 2)] ;
+        EB[34] := FALSE ;
+        IF EI[32] >= 100 THEN EB[34] := TRUE ; EI[32] := EI[32] - 100 ; END_IF ;
+        IF (EI[32] >= 0) AND (EI[32] <= 63) THEN EB[36] := EB[ANY_TO_DINT(46 + EI[32])] ; ELSE EB[36] := FALSE ; END_IF ;
+        IF EB[34] THEN EB[36] := NOT EB[36] ; END_IF ;
+        EB[9] := EB[36] ;
     END_IF ;
 
 END_IF ;
 
-ESeqStartPrev := eSeqStartV ;
+EB[8] := EB[16] ;
 
 FOR ek := 0 TO 15 DO
-    Sig[48 + ek] := ESeqActive AND (ESeqStep = ek + 1) ;
+    EB[ANY_TO_DINT(46 + 48 + ek)] := EB[6] AND (EI[8] = ek + 1) ;
 END_FOR ;
 
-IF ESeqActive THEN
-    eacts := EC[172 + (ESeqStep - 1) * 5] ;
+IF EB[6] THEN
+    EI[11] := EC[ANY_TO_DINT(172 + (EI[8] - 1) * 5)] ;
 ELSE
-    eacts := 0 ;
+    EI[11] := 0 ;
 END_IF ;
 
 FOR ej := 0 TO 11 DO
-    ESeqBit[ej] := ((eacts MOD 2) = 1) ;
-    eacts := eacts / 2 ;
+    EB[ANY_TO_DINT(176 + ej)] := ((EI[11] MOD 2) = 1) ;
+    EI[11] := EI[11] / 2 ;
 END_FOR ;
 
 
@@ -3298,134 +3340,134 @@ END_FOR ;
 
 FOR ek := 0 TO 5 DO
     CASE ek OF
-        0: esc := EC[1] ;
-        1: esc := EC[2] ;
-        2: esc := EC[4] ;
-        3: esc := EC[5] ;
-        4: esc := EC[6] ;
-        ELSE esc := EC[7] ;
+        0: EI[32] := EC[1] ;
+        1: EI[32] := EC[2] ;
+        2: EI[32] := EC[4] ;
+        3: EI[32] := EC[5] ;
+        4: EI[32] := EC[6] ;
+        ELSE EI[32] := EC[7] ;
     END_CASE ;
-    esn := FALSE ;
-    IF esc >= 100 THEN esn := TRUE ; esc := esc - 100 ; END_IF ;
-    IF (esc >= 0) AND (esc <= 63) THEN esv := Sig[esc] ; ELSE esv := FALSE ; END_IF ;
-    IF esn THEN esv := NOT esv ; END_IF ;
-    HdrV[ek] := esv ;
+    EB[34] := FALSE ;
+    IF EI[32] >= 100 THEN EB[34] := TRUE ; EI[32] := EI[32] - 100 ; END_IF ;
+    IF (EI[32] >= 0) AND (EI[32] <= 63) THEN EB[36] := EB[ANY_TO_DINT(46 + EI[32])] ; ELSE EB[36] := FALSE ; END_IF ;
+    IF EB[34] THEN EB[36] := NOT EB[36] ; END_IF ;
+    EB[ANY_TO_DINT(197 + ek)] := EB[36] ;
 END_FOR ;
 
-erunRise := HdrV[0] AND NOT RunPrev AND NOT EngFirst ;
-efwdRise := HdrV[3] AND NOT FwdPrev AND NOT EngFirst ;
-erevRise := HdrV[4] AND NOT RevPrev AND NOT EngFirst ;
-etogRise := HdrV[5] AND NOT TogPrev AND NOT EngFirst ;
-RunPrev := HdrV[0] ;
-FwdPrev := HdrV[3] ;
-RevPrev := HdrV[4] ;
-TogPrev := HdrV[5] ;
+EB[31] := EB[ANY_TO_DINT(197 + 0)] AND NOT EB[11] AND NOT EB[3] ;
+EB[22] := EB[ANY_TO_DINT(197 + 3)] AND NOT EB[12] AND NOT EB[3] ;
+EB[29] := EB[ANY_TO_DINT(197 + 4)] AND NOT EB[13] AND NOT EB[3] ;
+EB[39] := EB[ANY_TO_DINT(197 + 5)] AND NOT EB[14] AND NOT EB[3] ;
+EB[11] := EB[ANY_TO_DINT(197 + 0)] ;
+EB[12] := EB[ANY_TO_DINT(197 + 3)] ;
+EB[13] := EB[ANY_TO_DINT(197 + 4)] ;
+EB[14] := EB[ANY_TO_DINT(197 + 5)] ;
 
-emotorOK := MotionCfgPresent AND CfgReady AND CfgValid AND
+EB[26] := MotionCfgPresent AND CfgReady AND CfgValid AND
             (InitSeqState = 0) AND NOT GenStop ;
 
-IF NOT emotorOK THEN
-    RunLatch := FALSE ;
+IF NOT EB[26] THEN
+    EB[5] := FALSE ;
 ELSIF EC[3] = 1 THEN
-    RunLatch := HdrV[0] AND NOT HdrV[1] ;
-ELSIF HdrV[1] THEN
-    RunLatch := FALSE ;
-ELSIF erunRise THEN
-    RunLatch := TRUE ;
+    EB[5] := EB[ANY_TO_DINT(197 + 0)] AND NOT EB[ANY_TO_DINT(197 + 1)] ;
+ELSIF EB[ANY_TO_DINT(197 + 1)] THEN
+    EB[5] := FALSE ;
+ELSIF EB[31] THEN
+    EB[5] := TRUE ;
 END_IF ;
 
-IF efwdRise THEN
-    DirTarget := 1 ;
+IF EB[22] THEN
+    EI[4] := 1 ;
 END_IF ;
-IF erevRise THEN
-    DirTarget := 2 ;
+IF EB[29] THEN
+    EI[4] := 2 ;
 END_IF ;
-IF etogRise THEN
-    IF DirTarget = 1 THEN DirTarget := 2 ; ELSE DirTarget := 1 ; END_IF ;
+IF EB[39] THEN
+    IF EI[4] = 1 THEN EI[4] := 2 ; ELSE EI[4] := 1 ; END_IF ;
 END_IF ;
 
-IF ESeqActive THEN
-    IF ESeqBit[9] THEN
-        DirTarget := 1 ;
+IF EB[6] THEN
+    IF EB[ANY_TO_DINT(176 + 9)] THEN
+        EI[4] := 1 ;
     END_IF ;
-    IF ESeqBit[10] THEN
-        DirTarget := 2 ;
+    IF EB[ANY_TO_DINT(176 + 10)] THEN
+        EI[4] := 2 ;
     END_IF ;
-    IF ESeqBit[11] AND StepEntry THEN
-        IF DirTarget = 1 THEN DirTarget := 2 ; ELSE DirTarget := 1 ; END_IF ;
+    IF EB[ANY_TO_DINT(176 + 11)] AND EB[10] THEN
+        IF EI[4] = 1 THEN EI[4] := 2 ; ELSE EI[4] := 1 ; END_IF ;
     END_IF ;
 END_IF ;
 
-ESeqExcl  := (EC[15] <> 0) ;
-eseqRun  := ESeqActive AND ESeqBit[7] ;
-eseqStop := ESeqActive AND ESeqBit[8] ;
+EB[7]  := (EC[15] <> 0) ;
+EB[32]  := EB[6] AND EB[ANY_TO_DINT(176 + 7)] ;
+EB[33] := EB[6] AND EB[ANY_TO_DINT(176 + 8)] ;
 
-IF ESeqActive AND ESeqExcl THEN
-    ewantRun := eseqRun AND NOT eseqStop ;
+IF EB[6] AND EB[7] THEN
+    EB[45] := EB[32] AND NOT EB[33] ;
 ELSE
-    ewantRun := (RunLatch OR eseqRun) AND NOT eseqStop ;
+    EB[45] := (EB[5] OR EB[32]) AND NOT EB[33] ;
 END_IF ;
 
-IF HdrV[2] OR NOT emotorOK THEN
-    ewantRun := FALSE ;
+IF EB[ANY_TO_DINT(197 + 2)] OR NOT EB[26] THEN
+    EB[45] := FALSE ;
 END_IF ;
 
-RevT := EC[8] ;
-IF RevT < 10 THEN
-    RevT := 10 ;
+EI[6] := EC[8] ;
+IF EI[6] < 10 THEN
+    EI[6] := 10 ;
 END_IF ;
 
-IF (NOT emotorOK) AND (MotorState <> 0) THEN
-    MotorState := 0 ;
-    BrakeAcc   := 0 ;
+IF (NOT EB[26]) AND (EI[2] <> 0) THEN
+    EI[2] := 0 ;
+    EI[5]   := 0 ;
 END_IF ;
 
-IF Pulse100ms AND (MotorState <> 1) AND (BrakeAcc < 32767) THEN
-    BrakeAcc := BrakeAcc + 1 ;
+IF EB[0] AND (EI[2] <> 1) AND (EI[5] < 32767) THEN
+    EI[5] := EI[5] + 1 ;
 END_IF ;
 
-ebrakeOk := (BrakeAcc >= RevT) AND ((espd < 50) OR (BrakeAcc >= RevT + 50)) ;
+EB[18] := (EI[5] >= EI[6]) AND ((EI[33] < 50) OR (EI[5] >= EI[6] + 50)) ;
 
-IF MotorState = 0 THEN
+IF EI[2] = 0 THEN
 
-    IF (DirTarget <> DirActual) AND ebrakeOk THEN
-        DirActual := DirTarget ;
+    IF (EI[4] <> EI[3]) AND EB[18] THEN
+        EI[3] := EI[4] ;
     END_IF ;
-    IF ewantRun AND (DirTarget = DirActual) THEN
-        MotorState := 1 ;
-    END_IF ;
-
-ELSIF MotorState = 1 THEN
-
-    IF NOT ewantRun THEN
-        MotorState := 0 ;
-        BrakeAcc   := 0 ;
-    ELSIF DirTarget <> DirActual THEN
-        MotorState := 2 ;
-        BrakeAcc   := 0 ;
+    IF EB[45] AND (EI[4] = EI[3]) THEN
+        EI[2] := 1 ;
     END_IF ;
 
-ELSIF MotorState = 2 THEN
+ELSIF EI[2] = 1 THEN
 
-    IF ebrakeOk THEN
-        DirActual := DirTarget ;
-        IF ewantRun THEN
-            MotorState := 1 ;
+    IF NOT EB[45] THEN
+        EI[2] := 0 ;
+        EI[5]   := 0 ;
+    ELSIF EI[4] <> EI[3] THEN
+        EI[2] := 2 ;
+        EI[5]   := 0 ;
+    END_IF ;
+
+ELSIF EI[2] = 2 THEN
+
+    IF EB[18] THEN
+        EI[3] := EI[4] ;
+        IF EB[45] THEN
+            EI[2] := 1 ;
         ELSE
-            MotorState := 0 ;
+            EI[2] := 0 ;
         END_IF ;
-    ELSIF NOT ewantRun THEN
-        MotorState := 0 ;
+    ELSIF NOT EB[45] THEN
+        EI[2] := 0 ;
     END_IF ;
 
 ELSE
 
-    MotorState := 0 ;
+    EI[2] := 0 ;
 
 END_IF ;
 
-IF MotorState = 1 THEN
-    IF DirActual = 2 THEN
+IF EI[2] = 1 THEN
+    IF EI[3] = 2 THEN
         VFD_Control := 34 ;
     ELSE
         VFD_Control := 18 ;
@@ -3436,7 +3478,7 @@ ELSE
     BandRunning := FALSE ;
 END_IF ;
 
-BandEnable := RunLatch ;
+BandEnable := EB[5] ;
 
 IF NOT GenStop THEN
     StopReason := 0 ;
@@ -3455,163 +3497,163 @@ END_IF ;
 (* ============================================================ *)
 
 FOR ek := 0 TO 6 DO
-    esc := EC[20 + ek] ;
-    esn := FALSE ;
-    IF esc >= 100 THEN esn := TRUE ; esc := esc - 100 ; END_IF ;
-    IF (esc >= 0) AND (esc <= 63) THEN esv := Sig[esc] ; ELSE esv := FALSE ; END_IF ;
-    IF esn THEN esv := NOT esv ; END_IF ;
-    IF ESeqActive AND ESeqExcl THEN
-        OutReq[ek] := ESeqBit[ek] ;
-    ELSIF ESeqActive THEN
-        OutReq[ek] := esv OR ESeqBit[ek] ;
+    EI[32] := EC[ANY_TO_DINT(20 + ek)] ;
+    EB[34] := FALSE ;
+    IF EI[32] >= 100 THEN EB[34] := TRUE ; EI[32] := EI[32] - 100 ; END_IF ;
+    IF (EI[32] >= 0) AND (EI[32] <= 63) THEN EB[36] := EB[ANY_TO_DINT(46 + EI[32])] ; ELSE EB[36] := FALSE ; END_IF ;
+    IF EB[34] THEN EB[36] := NOT EB[36] ; END_IF ;
+    IF EB[6] AND EB[7] THEN
+        EB[ANY_TO_DINT(188 + ek)] := EB[ANY_TO_DINT(176 + ek)] ;
+    ELSIF EB[6] THEN
+        EB[ANY_TO_DINT(188 + ek)] := EB[36] OR EB[ANY_TO_DINT(176 + ek)] ;
     ELSE
-        OutReq[ek] := esv ;
+        EB[ANY_TO_DINT(188 + ek)] := EB[36] ;
     END_IF ;
 END_FOR ;
 
-PlumaFault := 0 ;
+EI[10] := 0 ;
 
 FOR ek := 0 TO 1 DO
 
-    eup := OutReq[3 + ek * 2] ;
-    edn := OutReq[4 + ek * 2] ;
+    EB[41] := EB[ANY_TO_DINT(188 + 3 + ek * 2)] ;
+    EB[20] := EB[ANY_TO_DINT(188 + 4 + ek * 2)] ;
 
-    IF eup AND edn THEN
-        ecmd := 0 ;
-        IF ek = 0 THEN PlumaFault := PlumaFault + 1 ; ELSE PlumaFault := PlumaFault + 4 ; END_IF ;
-    ELSIF eup THEN
-        ecmd := 1 ;
-    ELSIF edn THEN
-        ecmd := 2 ;
+    IF EB[41] AND EB[20] THEN
+        EI[14] := 0 ;
+        IF ek = 0 THEN EI[10] := EI[10] + 1 ; ELSE EI[10] := EI[10] + 4 ; END_IF ;
+    ELSIF EB[41] THEN
+        EI[14] := 1 ;
+    ELSIF EB[20] THEN
+        EI[14] := 2 ;
     ELSE
-        ecmd := 0 ;
+        EI[14] := 0 ;
     END_IF ;
 
-    IF (ecmd = 0) AND NOT (eup AND edn) THEN
+    IF (EI[14] = 0) AND NOT (EB[41] AND EB[20]) THEN
         IF ek = 0 THEN
-            IF (Pluma1Cmd = 1) OR (Pluma1Cmd = 2) THEN ecmd := Pluma1Cmd ; END_IF ;
+            IF (Pluma1Cmd = 1) OR (Pluma1Cmd = 2) THEN EI[14] := Pluma1Cmd ; END_IF ;
         ELSE
-            IF (Pluma2Cmd = 1) OR (Pluma2Cmd = 2) THEN ecmd := Pluma2Cmd ; END_IF ;
+            IF (Pluma2Cmd = 1) OR (Pluma2Cmd = 2) THEN EI[14] := Pluma2Cmd ; END_IF ;
         END_IF ;
     END_IF ;
 
-    IF ecmd <> PlPrev[ek] THEN
-        PlAcc[ek]     := 0 ;
-        PlTimeout[ek] := FALSE ;
+    IF EI[14] <> EI[ANY_TO_DINT(61 + ek)] THEN
+        EI[ANY_TO_DINT(59 + ek)]     := 0 ;
+        EB[ANY_TO_DINT(195 + ek)] := FALSE ;
     END_IF ;
-    PlPrev[ek] := ecmd ;
+    EI[ANY_TO_DINT(61 + ek)] := EI[14] ;
 
-    IF ecmd <> 0 THEN
-        IF Pulse100ms AND (PlAcc[ek] < 32767) THEN
-            PlAcc[ek] := PlAcc[ek] + 1 ;
+    IF EI[14] <> 0 THEN
+        IF EB[0] AND (EI[ANY_TO_DINT(59 + ek)] < 32767) THEN
+            EI[ANY_TO_DINT(59 + ek)] := EI[ANY_TO_DINT(59 + ek)] + 1 ;
         END_IF ;
-        IF (EC[13] > 0) AND (PlAcc[ek] >= EC[13]) THEN
-            PlTimeout[ek] := TRUE ;
+        IF (EC[13] > 0) AND (EI[ANY_TO_DINT(59 + ek)] >= EC[13]) THEN
+            EB[ANY_TO_DINT(195 + ek)] := TRUE ;
         END_IF ;
     END_IF ;
 
-    IF PlTimeout[ek] THEN
-        ecmd := 0 ;
-        IF ek = 0 THEN PlumaFault := PlumaFault + 2 ; ELSE PlumaFault := PlumaFault + 8 ; END_IF ;
+    IF EB[ANY_TO_DINT(195 + ek)] THEN
+        EI[14] := 0 ;
+        IF ek = 0 THEN EI[10] := EI[10] + 2 ; ELSE EI[10] := EI[10] + 8 ; END_IF ;
     END_IF ;
 
-    PlCmd[ek] := ecmd ;
+    EI[ANY_TO_DINT(63 + ek)] := EI[14] ;
 
 END_FOR ;
 
-elampG := OutReq[0] ;
-elampY := OutReq[1] ;
-elampR := OutReq[2] ;
+EB[23] := EB[ANY_TO_DINT(188 + 0)] ;
+EB[25] := EB[ANY_TO_DINT(188 + 1)] ;
+EB[24] := EB[ANY_TO_DINT(188 + 2)] ;
 
 IF SystemStopActive THEN
-    ehm    := EC[14] ;
-    elampG := ((ehm MOD 2) = 1) ;
-    elampY := (((ehm / 2) MOD 2) = 1) ;
-    elampR := (((ehm / 4) MOD 2) = 1) ;
-    PlCmd[0] := 0 ;
-    PlCmd[1] := 0 ;
+    EI[18]    := EC[14] ;
+    EB[23] := ((EI[18] MOD 2) = 1) ;
+    EB[25] := (((EI[18] / 2) MOD 2) = 1) ;
+    EB[24] := (((EI[18] / 4) MOD 2) = 1) ;
+    EI[ANY_TO_DINT(63 + 0)] := 0 ;
+    EI[ANY_TO_DINT(63 + 1)] := 0 ;
 END_IF ;
 
-PhQ3 := elampG ;
-PhQ4 := elampY ;
-PhQ5 := elampR ;
+PhQ3 := EB[23] ;
+PhQ4 := EB[25] ;
+PhQ5 := EB[24] ;
 
-PhQ8 := (PlCmd[0] = 1) ;
-PhQ9 := (PlCmd[0] = 2) ;
-PhQ6 := (PlCmd[1] = 1) ;
-PhQ7 := (PlCmd[1] = 2) ;
+PhQ8 := (EI[ANY_TO_DINT(63 + 0)] = 1) ;
+PhQ9 := (EI[ANY_TO_DINT(63 + 0)] = 2) ;
+PhQ6 := (EI[ANY_TO_DINT(63 + 1)] = 1) ;
+PhQ7 := (EI[ANY_TO_DINT(63 + 1)] = 2) ;
 
-Pluma1Status := PlCmd[0] ;
-Pluma2Status := PlCmd[1] ;
+Pluma1Status := EI[ANY_TO_DINT(63 + 0)] ;
+Pluma2Status := EI[ANY_TO_DINT(63 + 1)] ;
 
-tVerde    := elampG ;
-tAmarilla := elampY ;
-tRoja     := elampR ;
+tVerde    := EB[23] ;
+tAmarilla := EB[25] ;
+tRoja     := EB[24] ;
 
 
 (* ============================================================ *)
 (* §E10 - ESTADO DEL MOTOR -> ES (%R460..%R499)                 *)
 (* ============================================================ *)
 
-ES[3]  := MotorState ;
-ES[4]  := DirActual ;
-ES[5]  := DirTarget ;
-IF RunLatch THEN ES[6] := 1 ; ELSE ES[6] := 0 ; END_IF ;
-IF ESeqActive THEN ES[7] := 1 ; ELSE ES[7] := 0 ; END_IF ;
-ES[8]  := ESeqStep ;
-ES[9]  := ESeqAcc ;
+ES[3]  := EI[2] ;
+ES[4]  := EI[3] ;
+ES[5]  := EI[4] ;
+IF EB[5] THEN ES[6] := 1 ; ELSE ES[6] := 0 ; END_IF ;
+IF EB[6] THEN ES[7] := 1 ; ELSE ES[7] := 0 ; END_IF ;
+ES[8]  := EI[8] ;
+ES[9]  := EI[9] ;
 
-emC := 0 ; emT := 0 ; emK := 0 ; emM := 0 ;
-ebit := 1 ;
+EI[20] := 0 ; EI[25] := 0 ; EI[22] := 0 ; EI[23] := 0 ;
+EI[13] := 1 ;
 FOR ek := 0 TO 7 DO
-    IF Sig[16 + ek] THEN emC := emC + ebit ; END_IF ;
-    IF TDn[ek]      THEN emT := emT + ebit ; END_IF ;
-    IF CDn[ek]      THEN emK := emK + ebit ; END_IF ;
-    IF MBit[ek]     THEN emM := emM + ebit ; END_IF ;
-    ES[16 + ek] := TAcc[ek] ;
-    ES[24 + ek] := CAcc[ek] ;
-    ebit := ebit * 2 ;
+    IF EB[ANY_TO_DINT(46 + 16 + ek)] THEN EI[20] := EI[20] + EI[13] ; END_IF ;
+    IF EB[ANY_TO_DINT(128 + ek)]      THEN EI[25] := EI[25] + EI[13] ; END_IF ;
+    IF EB[ANY_TO_DINT(152 + ek)]      THEN EI[22] := EI[22] + EI[13] ; END_IF ;
+    IF EB[ANY_TO_DINT(168 + ek)]     THEN EI[23] := EI[23] + EI[13] ; END_IF ;
+    ES[ANY_TO_DINT(16 + ek)] := EI[ANY_TO_DINT(43 + ek)] ;
+    ES[ANY_TO_DINT(24 + ek)] := EI[ANY_TO_DINT(51 + ek)] ;
+    EI[13] := EI[13] * 2 ;
 END_FOR ;
-ES[10] := emC ;
-ES[11] := emT ;
-ES[12] := emK ;
-ES[13] := emM ;
+ES[10] := EI[20] ;
+ES[11] := EI[25] ;
+ES[12] := EI[22] ;
+ES[13] := EI[23] ;
 
-emO := 0 ;
-IF PhQ3 THEN emO := emO + 1 ; END_IF ;
-IF PhQ4 THEN emO := emO + 2 ; END_IF ;
-IF PhQ5 THEN emO := emO + 4 ; END_IF ;
-IF PhQ8 THEN emO := emO + 8 ; END_IF ;
-IF PhQ9 THEN emO := emO + 16 ; END_IF ;
-IF PhQ6 THEN emO := emO + 32 ; END_IF ;
-IF PhQ7 THEN emO := emO + 64 ; END_IF ;
-ES[14] := emO ;
+EI[24] := 0 ;
+IF PhQ3 THEN EI[24] := EI[24] + 1 ; END_IF ;
+IF PhQ4 THEN EI[24] := EI[24] + 2 ; END_IF ;
+IF PhQ5 THEN EI[24] := EI[24] + 4 ; END_IF ;
+IF PhQ8 THEN EI[24] := EI[24] + 8 ; END_IF ;
+IF PhQ9 THEN EI[24] := EI[24] + 16 ; END_IF ;
+IF PhQ6 THEN EI[24] := EI[24] + 32 ; END_IF ;
+IF PhQ7 THEN EI[24] := EI[24] + 64 ; END_IF ;
+ES[14] := EI[24] ;
 
-emI := 0 ;
-ebit := 1 ;
+EI[21] := 0 ;
+EI[13] := 1 ;
 FOR ek := 0 TO 4 DO
-    IF DebFilt[ek] THEN emI := emI + ebit ; END_IF ;
-    ebit := ebit * 2 ;
+    IF EB[ANY_TO_DINT(115 + ek)] THEN EI[21] := EI[21] + EI[13] ; END_IF ;
+    EI[13] := EI[13] * 2 ;
 END_FOR ;
-ES[15] := emI ;
+ES[15] := EI[21] ;
 
-ES[32] := PlumaFault ;
-ES[33] := BrakeAcc ;
+ES[32] := EI[10] ;
+ES[33] := EI[5] ;
 
 
-    EngResetReq := FALSE ;
+    EB[2] := FALSE ;
 
 END_IF ;
 
 
 (* v6: identificacion y validez del motor (siempre). *)
 ES[0] := 6 ;
-IF EngValid THEN
+IF EB[4] THEN
     ES[1] := 1 ;
 ELSE
     ES[1] := 0 ;
 END_IF ;
-ES[2] := EngError ;
+ES[2] := EI[1] ;
 
 
 (* ============================================================ *)
@@ -3633,7 +3675,7 @@ END_IF ;
 
 IF BandRunning THEN
 
-    IF DirActual = 2 THEN
+    IF EI[3] = 2 THEN
 
         BandStatus := 2 ;
 

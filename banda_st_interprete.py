@@ -31,7 +31,9 @@ _TOKEN = re.compile(r"""
   | (?P<id>[A-Za-z_][A-Za-z0-9_]*)
 """, re.X)
 _KW_EXPR = {"AND": " and ", "OR": " or ", "NOT": " not ", "MOD": " % ",
-            "TRUE": "True", "FALSE": "False"}
+            "TRUE": "True", "FALSE": "False",
+            # conversiones de tipo de Cscape (los indices de arreglo son DINT)
+            "ANY_TO_DINT": "int", "ANY_TO_INT": "int"}
 
 
 class _Arr(dict):
@@ -211,6 +213,18 @@ def compilar_st(texto):
 _CACHE = {}
 
 
+def leyenda(ruta=ST_V6):
+    """Posiciones de EI / EB del ST empaquetado: {nombre: (arreglo, base)}.
+    Las lee de la leyenda que encabeza el archivo ("EI[3]=MotorState",
+    "EB[48..111]=Sig")."""
+    with open(ruta, encoding="utf-8") as f:
+        cab = f.read(20000)
+    out = {}
+    for arr, a, _b, nombre in re.findall(r"(EI|EB)\[(\d+)(?:\.\.(\d+))?\]=([A-Za-z_][A-Za-z0-9_]*)", cab):
+        out[nombre.upper()] = (arr, int(a))
+    return out
+
+
 def _programa(ruta=ST_V6):
     if ruta not in _CACHE:
         with open(ruta, encoding="utf-8") as f:
@@ -241,6 +255,7 @@ class SimST:
         V["R_FREQREQUEST"] = V["FREQREQUEST"]
         V["R_STOPMODE"] = stop_mode
         self.u = {"I1": False, "I2": False, "I3": False, "S1": False, "S2": False}
+        self._ley = leyenda(ruta)
         self.rampa = rampa_hz_s
         self.vfd_hz = 0.0
         self.n = 0
@@ -274,16 +289,25 @@ class SimST:
         sube, baja = ("PHQ8", "PHQ9") if n == 1 else ("PHQ6", "PHQ7")
         return "sube" if V[sube] else "baja" if V[baja] else "stop"
 
+    def var(self, nombre, i=0):
+        """Variable logica del motor (aunque el ST la tenga dentro de EI/EB)."""
+        n = nombre.upper()
+        if n in self._ley:
+            arr, base = self._ley[n]
+            return self.V[arr][base + i]
+        v = self.V[n]
+        return v[i] if isinstance(v, dict) else v
+
     # atributos que leen las pruebas (mismos nombres que SimBanda)
     CfgReady = property(lambda s: bool(s.V["CFGREADY"]))
-    MotorState = property(lambda s: s.V["MOTORSTATE"])
-    DirActual = property(lambda s: s.V["DIRACTUAL"])
-    DirTarget = property(lambda s: s.V["DIRTARGET"])
-    RunLatch = property(lambda s: bool(s.V["RUNLATCH"]))
-    SeqActive = property(lambda s: bool(s.V["ESEQACTIVE"]))
-    SeqStep = property(lambda s: s.V["ESEQSTEP"])
-    PlumaFault = property(lambda s: s.V["PLUMAFAULT"])
-    CAcc = property(lambda s: [s.V["CACC"][i] for i in range(8)])
+    MotorState = property(lambda s: s.var("MotorState"))
+    DirActual = property(lambda s: s.var("DirActual"))
+    DirTarget = property(lambda s: s.var("DirTarget"))
+    RunLatch = property(lambda s: bool(s.var("RunLatch")))
+    SeqActive = property(lambda s: bool(s.var("ESeqActive")))
+    SeqStep = property(lambda s: s.var("ESeqStep"))
+    PlumaFault = property(lambda s: s.var("PlumaFault"))
+    CAcc = property(lambda s: [s.var("CAcc", i) for i in range(8)])
     ES = property(lambda s: [s.V["ES"][i] for i in range(bm.STATUS_LEN)])
 
     # ------------------------------------------------------------ un scan

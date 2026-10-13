@@ -20,14 +20,21 @@ v6 da **exactamente** las mismas salidas que el v5, scan por scan
 
 1. Abre `ladder_maestro_banda.csp` y **guárdalo como copia** (`ladder_maestro_banda_v6.csp`).
    El original queda como respaldo para volver atrás.
-2. Crea las variables de **`TAGS_banda_v6.csv`** (109 tags) en la tabla de variables globales:
-   - `EC` : arreglo **INT[260]** en **%R200** (configuración; la escribe el backend).
-   - `ES` : arreglo **INT[40]** en **%R460** (estado; lo lee el backend).
-   - `Sys100ms` : BOOL en **%S4** (reloj T_100MS).
-   - El resto son internas (sin dirección, no retentivas): 14 arreglos BOOL, 6 arreglos INT y escalares.
-   Si tu Cscape permite importar la tabla de variables desde CSV, úsalo; si no, créalas a mano
-   con los nombres, tipos y tamaños de la tabla.
-   El rango %R128–%R499 estaba libre en tu `.csp` (verificado); nada del v5 se mueve.
+2. Crea **solo estas 7 variables** en la tabla de variables globales (también en `TAGS_banda_v6.csv`):
+
+   | Nombre | Tipo | Dirección | Arreglo |
+   |---|---|---|---|
+   | `EC` | INT | %R200 | 260 |
+   | `ES` | INT | %R460 | 40 |
+   | `Sys100ms` | BOOL | %S4 | — |
+   | `EI` | INT | (interna) | 65 |
+   | `EB` | BOOL | (interna) | 203 |
+   | `ek` | INT | (interna) | — |
+   | `ej` | INT | (interna) | — |
+
+   Todas las variables internas del motor viven dentro de `EI` (enteros) y `EB` (booleanos). El
+   encabezado del ST tiene la leyenda con el nombre lógico de cada posición (p. ej. `EI[2]=MotorState`).
+   Ninguna es retentiva. El rango %R128–%R499 estaba libre en tu `.csp` (verificado); nada del v5 se mueve.
 3. Reemplaza el texto del programa ST por el contenido completo de `ST_banda_v6_motor_configurable.txt`.
 4. Compila. Si Cscape marca un error de tipo, revisa esa variable en la tabla
    (el nombre y el tipo exactos están en el CSV).

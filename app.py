@@ -615,7 +615,9 @@ BLOQUES (cada uno produce la senal de su id; usa ids desde 1 y define todo lo qu
 
 REGLAS
 1. banda.mover = true solo si la instruccion mueve la banda. Si se mueve y no dice los Hz: frecuencia_hz null.
-2. Si la banda se mueve y no dicen como arranca: motor.arranque = "I1".
+2. Si la banda se mueve y no dicen como arranca: motor.arranque = "I1". Pero si la instruccion dice que la
+   banda se mueve CUANDO una senal ocurre ("cuando S1 detecte se mueve a la derecha"), esa senal es el
+   arranque (varias senales -> condicion OR) y ademas fija la direccion con dir_1 / dir_2.
 3. "espera N s y cambia el sentido" -> RETARDO + motor.invertir. "detente N s y continua" -> PULSO + motor.pausa.
    "detén la banda" (sin reanudar) -> motor.paro. Todo funciona en CADA deteccion: los bloques se rearman solos.
 4. Usa bloques sueltos para reglas simples y "secuencia" solo para cadenas de pasos.
@@ -630,6 +632,11 @@ EJEMPLOS
 "Arranca con I1 a la derecha a 30 Hz; cuando S1 detecte una caja espera 3 s y cambia el sentido."
 {"name":"S1 + 3 s invierte","banda":{"mover":true,"direccion":"derecha","frecuencia_hz":30,"paros":{"i2":false,"software":false}},
  "motor":{"arranque":"I1","invertir":"T1"},"timers":[{"id":"T1","tipo":"RETARDO","entrada":"S1","segundos":3}],"no_soportado":[]}
+
+"A 30 Hz: cuando el sensor 1 detecte la banda se mueve a la derecha y cuando el sensor 2 detecte se mueve a la izquierda."
+{"name":"S1 derecha, S2 izquierda","banda":{"mover":true,"direccion":"derecha","frecuencia_hz":30,"paros":{"i2":false,"software":false}},
+ "motor":{"arranque":"C1","dir_1":"S1","dir_2":"S2"},
+ "condiciones":[{"id":"C1","op":"OR","entradas":["S1","S2"],"flanco":"nivel"}],"no_soportado":[]}
 
 "Cuando presione el boton verde y S2 este activo enciende la amarilla; S1 cuenta 3 cajas y prende la roja hasta presionar I2."
 {"name":"I1 y S2 amarilla, 3 cajas roja","banda":{"mover":false,"paros":{"i2":false,"software":false}},
