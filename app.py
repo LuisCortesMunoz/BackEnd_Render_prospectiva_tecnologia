@@ -578,6 +578,8 @@ HARDWARE
 - Motor con VFD: direccion "derecha" (1) o "izquierda" (2), frecuencia 1..327 Hz.
 - I1 = boton verde de arranque (NA). I2 = boton auxiliar / boton rojo (NC). I3 = paro de emergencia:
   SIEMPRE detiene todo por si solo; no lo uses para arrancar. S1 y S2 = sensores de presencia (caja/pieza).
+  La voz transcribe los botones como numeros: "11", "12", "13" (o "I 2", "boton 12") son I1, I2, I3.
+  Si piden arrancar con I2, hazlo: motor.arranque = "I2" y paros.i2 = false (I2 no puede arrancar y parar).
 - Salidas: torreta verde, amarilla, roja; pluma1 y pluma2 (subir / bajar).
 
 SENALES (cualquier campo "senal"; antepon "NOT " para negar):

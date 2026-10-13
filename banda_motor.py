@@ -215,6 +215,10 @@ def codigo_senal(nombre):
     if m:
         neg, t = True, m.group(2).strip()
     t = re.sub(r"\s+", "_", t)
+    # La voz transcribe "I2" como "12" (o "I 2", "boton 12"): entradas I1..I5.
+    m = re.match(r"^(?:BOTON_|BTN_|ENTRADA_)?(?:I_?|1)([1-5])$", t)
+    if m:
+        t = f"I{m.group(1)}"
     t = ALIAS_SENAL.get(t, t)
     m = re.match(r"^(C|T|CT|M|PASO)_?(\d+)(\.DN)?$", t)
     if m:
@@ -565,6 +569,14 @@ def validar_motor(band) -> tuple:
     try:
         if codigo_senal(motor.get("arranque")) in (SENALES["I3"], SENALES["I3"] + NOT_OFFSET):
             errores.append("I3 es el paro prioritario: no puede arrancar la banda.")
+        if (codigo_senal(motor.get("arranque")) == SENALES["I2"]
+                and band.get("stop_mode") in (1, 3)):
+            errores.append("I2 arranca la banda pero tambien esta como paro (paros.i2 = true): "
+                           "el mismo boton la arranca y la detiene y nunca se mueve. "
+                           "Si I2 es el arranque, pon paros.i2 = false.")
+        if (motor.get("arranque") not in (None, "")
+                and codigo_senal(motor.get("arranque")) == codigo_senal(motor.get("paro"))):
+            errores.append("motor: la misma senal no puede arrancar y detener la banda.")
         if codigo_senal(motor.get("arranque")) == SENALES["I2"]:
             avisos.append("I2 es NC: si su cable se corta, el PLC lo ve presionado y "
                           "arrancaria la banda. Mejor usa I1 para arrancar.")
