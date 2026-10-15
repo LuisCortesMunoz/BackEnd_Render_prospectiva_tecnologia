@@ -193,7 +193,9 @@ def es_motor(cfg_o_band) -> bool:
     if not isinstance(cfg_o_band, dict):
         return False
     band = cfg_o_band.get("band", cfg_o_band)
-    return isinstance(band, dict) and isinstance(band.get("engine"), dict)
+    # Un bloque con "version": 7 es del motor LAVO v7 (lavo_motor.py), no del v6.
+    return (isinstance(band, dict) and isinstance(band.get("engine"), dict)
+            and str(band["engine"].get("version")) != "7")
 
 
 # ---------------------------------------------------------------------------

@@ -26,7 +26,7 @@ ST_V6 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cscape",
                      "ST_banda_v6_motor_configurable.txt")
 
 _TOKEN = re.compile(r"""
-    (?P<num>INT\#-?\d+|\d+)
+    (?P<num>D?INT\#-?\d+|\d+)
   | (?P<op>:=|<>|<=|>=|[-+*/=<>();:\[\],])
   | (?P<id>[A-Za-z_][A-Za-z0-9_]*)
 """, re.X)
@@ -51,7 +51,7 @@ def _tokens(texto):
     out = []
     for m in _TOKEN.finditer(texto):
         if m.group("num"):
-            out.append(("num", m.group("num").replace("INT#", "")))
+            out.append(("num", m.group("num").replace("DINT#", "").replace("INT#", "")))
         elif m.group("op"):
             out.append(("op", m.group("op")))
         else:
@@ -214,13 +214,14 @@ _CACHE = {}
 
 
 def leyenda(ruta=ST_V6):
-    """Posiciones de EI / EB del ST empaquetado: {nombre: (arreglo, base)}.
+    """Posiciones de EI / EB (v6) o LI / LB (v7) del ST empaquetado:
+    {nombre: (arreglo, base)}.
     Las lee de la leyenda que encabeza el archivo ("EI[3]=MotorState",
     "EB[48..111]=Sig")."""
     with open(ruta, encoding="utf-8") as f:
         cab = f.read(20000)
     out = {}
-    for arr, a, _b, nombre in re.findall(r"(EI|EB)\[(\d+)(?:\.\.(\d+))?\]=([A-Za-z_][A-Za-z0-9_]*)", cab):
+    for arr, a, _b, nombre in re.findall(r"(EI|EB|LI|LB)\[(\d+)(?:\.\.(\d+))?\]=([A-Za-z_][A-Za-z0-9_]*)", cab):
         out[nombre.upper()] = (arr, int(a))
     return out
 

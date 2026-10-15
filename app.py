@@ -677,6 +677,124 @@ EJEMPLOS
   {"acciones":["paro","verde"],"avanza":"flanco","senal":"I1","segundos":null}]},"no_soportado":[]}"""
 
 
+# ─── MOTOR LAVO v7 DE LA BANDA (programa maestro general) ────────
+# Se usa cuando BANDA_MOTOR_V7=1 (el PLC tiene LAVO_Main_ST.txt). El LLM arma
+# bloques genericos y, si la instruccion no se puede cumplir tal cual, la
+# alternativa mas cercana con su analisis; lavo_motor.py valida, compila a
+# %R1010..%R1649 y decide si hace falta confirmacion humana.
+BANDA_MOTOR_V7 = os.environ.get("BANDA_MOTOR_V7", "0").strip() == "1"
+
+SYSTEM_PROMPT_BANDA_V7 = """Eres el programador del PLC Horner XL4 de una BANDA TRANSPORTADORA con el programa maestro LAVO v7.
+El PLC ejecuta un MOTOR GENERAL: tu trabajo es CONSTRUIR el comportamiento pedido conectando bloques, no elegir
+un ejemplo de una lista. Responde SOLO con JSON.
+
+PROCESO (siempre en este orden)
+1. Entiende la INTENCION: que debe pasar, en que orden, con que entradas y salidas.
+2. Constrúyela con los bloques de abajo. Casi todo se puede combinar: secuencias, timers, contadores, memorias,
+   condiciones AND/OR/XOR/NAND/NOR, flancos, ciclos y repeticiones.
+3. Si algo no existe en este hardware, construye la ALTERNATIVA mas cercana que sea segura y explicala en
+   "analisis" (conservado / modificado / simplificado / no_soportado) con requiere_confirmacion = true.
+4. Si falta un dato imprescindible que no se puede suponer, pregunta en "preguntas" (y deja lo demas vacio).
+5. Nunca inventes capacidades, nunca quites el paro de emergencia y no cambies tiempos o conteos pedidos.
+
+HARDWARE (fijo; NA/NC lo resuelve el PLC: "I2" activo = boton presionado)
+- I1 boton verde (NA) · I2 boton rojo (NC) · I3 PARO DE EMERGENCIA: solo como condicion de lectura; nunca
+  arranca el motor ni inicia secuencias; SIEMPRE detiene motor, secuencias y plumas por si solo.
+- I4 = sensor S1 · I5 = sensor S2 (presencia de caja). La voz escribe "11/12/13" por I1/I2/I3.
+- Cualquier entrada puede ser arranque, paro, reset, pausa, condicion o disparo: depende de lo que se pida.
+- Salidas: Q3 torreta verde · Q4 torreta amarilla · Q5 torreta roja · Q8 pluma 1 sube · Q9 pluma 1 baja ·
+  Q6 pluma 2 sube · Q7 pluma 2 baja. Una pluma nunca sube y baja a la vez.
+- Motor con VFD: direccion derecha/izquierda, 1..327 Hz (fija mientras corre).
+- NO EXISTEN en esta banda: Q1, Q2, Q10, Q11, Q12, I6..I12, otros sensores, analogicas, velocidad variable, PID.
+
+SENALES (en cualquier campo de senal; antepon "NOT " para negar)
+I1..I5 (o S1/S2) | Q3..Q9 (salida encendida) | SIEMPRE | BANDA_CORRIENDO BANDA_DETENIDA DIR_1 DIR_2 INVIRTIENDO
+VFD_CERO CFG_LISTA PRIMER_CICLO | APP1..APP4 (botones de la app) | PARO_SOFTWARE |
+C1..C16 condicion | M1..M16 memoria | T1..T16 timer | CT1..CT16 contador |
+SQ1_ACTIVA SQ1_PAUSADA SQ1_FIN SQ1_CICLO SQ1_PASO1..SQ1_PASO16 (igual SQ2).
+
+BLOQUES (cada uno produce la senal de su id; define todo lo que uses)
+- condiciones: {"id":"C1","op":"AND"|"OR"|"XOR"|"NAND"|"NOR","entradas":[1..4 senales],"flanco":"nivel"|"subida"|"bajada"}
+  Para mas de 4 entradas o mezclas (A Y (B O C)) anida condiciones.
+- memorias: {"id":"M1","set":senal,"reset":senal,"prioridad":"reset"|"set"} = enclavamiento / bandera interna.
+- timers: {"id":"T1","tipo":TIPO,"entrada":senal,"reset":senal|null,"segundos":N,"segundos_off":N|null}
+  TON = activo si la entrada sigue activa N s · TOF = sigue N s despues de soltar · PULSO = al activarse la
+  entrada, activo N s · RETARDO = N s despues del flanco se activa y se queda hasta reset/otro flanco ·
+  TONR = acumula tiempo (no se borra al soltar) · INTERMITENTE = parpadea N s encendido / segundos_off apagado.
+- contadores: {"id":"CT1","entrada":senal,"descuenta":senal|null,"reset":senal|null,"preset":N,"modo":"una_vez"|"ciclico"|"nivel"}
+  una_vez = activo al llegar a N hasta reset · ciclico = pulso cada N y vuelve a 0 (no directo a una luz) ·
+  nivel = activo mientras la cuenta >= N. Cuenta flancos de cualquier senal (cajas, botones, SQ1_CICLO...).
+- motor: {"arranque","paro","modo":"enclavado"|"mientras","pausa","dir_1","dir_2","invertir","paro_inversion_s":2}
+  enclavado = flanco de arranque y sigue hasta paro · mientras = solo mientras la senal. pausa detiene y reanuda.
+  Antes de invertir SIEMPRE frena paro_inversion_s (minimo 1 s) y espera velocidad cero.
+- salidas: {"Q3":senal,...} = salida encendida mientras su senal este activa.
+- secuencias (hasta 2, SQ1 y SQ2, independientes; 16 pasos c/u):
+  {"id":"SQ1","inicio":senal,"paro":senal|null,"reset":senal|null,"pausa":senal|null,
+   "modo":"una_vez"|"infinita"|"repetir","repeticiones":N|null,"exclusiva":true,"pausa_apaga":true,
+   "pasos":[{"salidas":["Q3"],"motor":["marcha"],"avanza":"tiempo"|"flanco"|"senal"|"tiempo_y_senal"|"senal_o_tiempo",
+             "senal":senal|null,"segundos":N|null,"siguiente":null|N|"fin","alternativa":{"senal":S,"ir_a":N|"fin"}|null}]}
+  Cada paso enciende SOLO sus salidas mientras esta activo (las del paso anterior se apagan). Varias salidas
+  juntas = varias en el mismo paso. motor del paso: marcha, paro, dir_1, dir_2, invertir (al entrar).
+  inicio por flanco; paro detiene; reset la reinicia; pausa congela el paso. exclusiva = manda sola sobre las
+  salidas/motor que usa. "alternativa" = rama: si esa senal se activa, salta a ir_a.
+
+GUIA RAPIDA
+"durante N s" -> PULSO o un paso de N s · "despues de N s" -> RETARDO o TON · "parpadea" -> INTERMITENTE ·
+"cuenta N y ..." -> contador · "cada N" -> ciclico · "mantener hasta" -> memoria · "N veces" -> modo repetir ·
+"siempre / hasta que se pare" -> infinita con paro · "si la entrada esta activa ve a..." -> alternativa.
+Luces una tras otra / banda que avanza, para y repite -> secuencia. Torreta y banda a la vez con ritmos
+distintos -> SQ1 y SQ2. Reglas sueltas (Q4 con I1 Y S2) -> condiciones + salidas.
+Si la banda se mueve y no dicen los Hz, frecuencia_hz = null (se preguntara). Si se mueve y nada la arranca,
+motor.arranque = "I1". Si piden Q10/Q11/Q12 (no existen aqui) usa Q3/Q4/Q5 en el mismo orden y reportalo.
+
+ESQUEMA
+{"name":"corto","banda":{"mover":false,"direccion":"derecha","frecuencia_hz":null},
+ "motor":{},"condiciones":[],"memorias":[],"timers":[],"contadores":[],"salidas":{},"secuencias":[],"opciones":{},
+ "analisis":{"intencion":"una frase","compatibilidad":"total"|"parcial"|"ninguna","conservado":[],"modificado":[],
+             "simplificado":[],"no_soportado":[],"requiere_confirmacion":false},
+ "preguntas":[]}
+opciones: {"filtro_sensores_s":0.1,"filtro_botones_s":0,"pluma_max_s":0,"luces_paro":["Q5"]}
+preguntas: [{"campo":"...","pregunta":"...","opciones":["...","..."]}]
+
+EJEMPLOS
+"Enciende la verde, luego la amarilla y luego la roja, 5 s cada una; repite hasta presionar I2. Arranca con I1."
+{"name":"Torreta V-A-R ciclica","banda":{"mover":false},
+ "secuencias":[{"id":"SQ1","inicio":"I1","paro":"I2","modo":"infinita","exclusiva":true,"pasos":[
+  {"salidas":["Q3"],"avanza":"tiempo","segundos":5},{"salidas":["Q4"],"avanza":"tiempo","segundos":5},
+  {"salidas":["Q5"],"avanza":"tiempo","segundos":5}]}],
+ "analisis":{"intencion":"torreta en secuencia ciclica","compatibilidad":"total","conservado":["orden y 5 s por luz","inicio I1, paro I2"],
+             "modificado":[],"simplificado":[],"no_soportado":[],"requiere_confirmacion":false},"preguntas":[]}
+
+"A 30 Hz: con I1 la banda avanza 5 s, se detiene 3 s y repite 4 veces; la verde encendida mientras corre."
+{"name":"Banda 5/3 x4","banda":{"mover":true,"direccion":"derecha","frecuencia_hz":30},
+ "secuencias":[{"id":"SQ1","inicio":"I1","modo":"repetir","repeticiones":4,"exclusiva":true,"pasos":[
+  {"motor":["marcha"],"avanza":"tiempo","segundos":5},{"motor":["paro"],"avanza":"tiempo","segundos":3}]}],
+ "salidas":{"Q3":"BANDA_CORRIENDO"},
+ "analisis":{"intencion":"ciclos de marcha y paro","compatibilidad":"total","conservado":["5 s / 3 s, 4 ciclos","verde en marcha"],
+             "modificado":[],"simplificado":[],"no_soportado":[],"requiere_confirmacion":false},"preguntas":[]}
+
+"I1 arranca la banda a 25 Hz y S1 cuenta cajas; a la 3a caja para la banda y prende la roja; I2 reinicia la cuenta."
+{"name":"3 cajas y para","banda":{"mover":true,"direccion":"derecha","frecuencia_hz":25},
+ "motor":{"arranque":"I1","paro":"CT1"},
+ "contadores":[{"id":"CT1","entrada":"S1","reset":"I2","preset":3,"modo":"una_vez"}],"salidas":{"Q5":"CT1"},
+ "analisis":{"intencion":"contar 3 cajas y detener","compatibilidad":"total","conservado":["conteo 3","paro y roja","reset I2"],
+             "modificado":[],"simplificado":[],"no_soportado":[],"requiere_confirmacion":false},"preguntas":[]}
+
+"Enciende Q10 3 s, apagala y enciende Q12 5 s."
+{"name":"Q10 3 s, Q12 5 s (en torreta)","banda":{"mover":false},
+ "secuencias":[{"id":"SQ1","inicio":"PRIMER_CICLO","modo":"una_vez","exclusiva":true,"pasos":[
+  {"salidas":["Q3"],"avanza":"tiempo","segundos":3},{"salidas":["Q5"],"avanza":"tiempo","segundos":5}]}],
+ "analisis":{"intencion":"una luz 3 s y otra 5 s","compatibilidad":"parcial","conservado":["tiempos 3 s y 5 s","orden"],
+             "modificado":["Q10 y Q12 no existen en la banda: se usan Q3 (verde) y Q5 (roja)",
+                           "no se dijo como inicia: arranca al cargar el programa (PRIMER_CICLO)"],
+             "simplificado":[],"no_soportado":[],"requiere_confirmacion":true},"preguntas":[]}
+
+"Que la banda haga lo de siempre."
+{"name":"","banda":{"mover":false},"analisis":{"intencion":"no definida","compatibilidad":"total","conservado":[],"modificado":[],
+ "simplificado":[],"no_soportado":[],"requiere_confirmacion":false},
+ "preguntas":[{"campo":"comportamiento","pregunta":"¿Qué debe hacer la banda?","opciones":["Avanzar con I1 y parar con I2","Secuencia de torreta","Contar cajas con S1"]}]}"""
+
+
 def _expr_de_logica(lg: dict, salida: str) -> str:
     """Deriva un 'expr' legible a partir de la logica del motor (para el
     frontend). El motor sigue siendo la fuente de verdad."""
@@ -872,6 +990,9 @@ def validar_logica_banda(cfg: dict) -> list:
     if not isinstance(band, dict):
         return ["Falta el bloque 'band': un programa de la banda debe traerlo."]
     import banda_motor
+    import lavo_motor
+    if lavo_motor.es_motor_v7(band):
+        return errores + lavo_motor.validar_motor(band)[0]
     if banda_motor.es_motor(band):
         if band.get("enable") is not False and band.get("freq_hz") is None:
             errores.append("La banda debe moverse: indica la frecuencia en Hz (1..327).")
@@ -2242,6 +2363,8 @@ def health():
         # ST v6: si es True, las instrucciones de la banda se generan para el
         # motor configurable (el PLC debe tener ST_banda_v6_motor_configurable).
         "banda_motor_configurable": BANDA_MOTOR_CONFIGURABLE,
+        # ST v7: programa maestro general (LAVO_Main_ST.txt).
+        "banda_motor_v7": BANDA_MOTOR_V7,
     }
 
 
@@ -2426,6 +2549,161 @@ def _generar_logica_banda_motor(texto: str, req: "LogicaRequest") -> "LogicaResp
     )
 
 
+def _programa_previo_v7(req) -> Optional[dict]:
+    """Programa anterior de la banda en formato v7 (si el editor manda uno)."""
+    import banda_motor
+    import lavo_motor
+    if not (req.contexto and req.contexto.programa_anterior):
+        return None
+    prev_cfg = (req.contexto.programa_anterior.get("metadata", {}) or {}).get("engine_config") or {}
+    band = prev_cfg.get("band") if isinstance(prev_cfg, dict) else None
+    if lavo_motor.es_motor_v7(prev_cfg):
+        return prev_cfg.get("respuesta_llm") or {"banda": {"mover": band.get("enable") is not False,
+                                                          "direccion": band.get("direction"),
+                                                          "frecuencia_hz": band.get("freq_hz")},
+                                                 **band["engine"]}
+    if banda_motor.es_motor(prev_cfg):
+        return {"banda": {"mover": band.get("enable") is not False, "direccion": band.get("direction"),
+                          "frecuencia_hz": band.get("freq_hz")}, **lavo_motor.desde_v6(band["engine"])}
+    return None
+
+
+def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaResponse":
+    """MOTOR LAVO v7: texto -> LLM (bloques + analisis) -> lavo_motor
+    (validacion, compilacion determinista, compatibilidad) -> respuesta.
+
+    Estados de la respuesta:
+      ok                  -> programa compatible: el editor lo carga y el
+                             usuario decide cuando mandarlo al PLC.
+      needs_confirmation  -> alternativa que CAMBIA algo de lo pedido: se
+                             explica que se conservo / modifico / simplifico y
+                             el PLC no la acepta sin confirmacion explicita.
+      needs_clarification -> falta un dato imprescindible.
+      not_supported       -> no hay alternativa segura: se informa por que."""
+    import lavo_motor
+
+    messages = [{"role": "system", "content": SYSTEM_PROMPT_BANDA_V7}]
+    previas = "\n".join(f"- {p}" for p in ((req.contexto.historial if req.contexto else None) or [])[-4:])
+    prev = _programa_previo_v7(req)
+    if previas or prev:
+        partes = []
+        if previas:
+            partes.append(f"Peticiones anteriores del usuario:\n{previas}")
+        if prev:
+            partes.append("PROGRAMA ACTUAL DE LA BANDA (si la instruccion lo modifica, devuelve el JSON "
+                          "COMPLETO actualizado y conserva lo no pedido; si describe un proceso nuevo, "
+                          "reemplazalo):\n" + json.dumps(prev, ensure_ascii=False))
+        messages.append({"role": "user", "content": "\n\n".join(partes)})
+        messages.append({"role": "assistant", "content": "Entendido. Devolvere el JSON completo del motor v7."})
+    messages.append({"role": "user", "content": f"{texto}\n\nResponde SOLO con el JSON del esquema indicado."})
+
+    cfg, errores, candidato = None, [], {}
+    intentos = max(1, MAX_AUTOREVISIONES)
+    msgs_iter = list(messages)
+    for intento in range(1, intentos + 1):
+        try:
+            candidato = llamar_modelo_json(msgs_iter)
+        except ValueError as e:
+            if intento < intentos:
+                log.warning(f"Banda v7 auto-revision {intento}/{intentos}: JSON ilegible — {e}")
+                continue
+            raise HTTPException(422, str(e))
+        except Exception as e:
+            log.error(f"Error generar-logica banda v7 (modelo): {e}")
+            raise HTTPException(500, str(e))
+
+        preguntas = [q for q in (candidato.get("preguntas") or []) if isinstance(q, dict)]
+        if preguntas:
+            log.info("/generar-logica banda v7: el modelo pide aclaracion")
+            return LogicaResponse(
+                logic={}, name="", outputs=0, device="banda", status="needs_clarification",
+                questions=[{"id": q.get("campo") or f"q{i}", "campo": q.get("campo") or "",
+                            "pregunta": q.get("pregunta") or "", "opciones": q.get("opciones") or []}
+                           for i, q in enumerate(preguntas)],
+                assumptions=[], analysis={"equipo": "banda", "motor_v7": True,
+                                          "analisis": candidato.get("analisis") or {}})
+        try:
+            cand = lavo_motor.cfg_desde_respuesta(candidato)
+            cand["respuesta_llm"] = {k: v for k, v in candidato.items()
+                                     if k not in ("analisis", "preguntas", "no_soportado")}
+            errores = validar_logica_banda(cand)
+        except (ValueError, TypeError) as e:
+            cand, errores = None, [str(e)]
+
+        if cand is not None and lavo_motor.falta_frecuencia(cand) and all("frecuencia" in e for e in errores):
+            return LogicaResponse(
+                logic={}, name="", outputs=0, device="banda", status="needs_clarification",
+                questions=[lavo_motor.pregunta_frecuencia()], assumptions=[],
+                analysis={"equipo": "banda", "motor_v7": True})
+        if not errores:
+            cfg = cand
+            break
+        log.warning(f"Banda v7 auto-revision {intento}/{intentos}: {errores}")
+        if intento < intentos:
+            msgs_iter = list(messages)
+            msgs_iter.append({"role": "assistant", "content": json.dumps(candidato, ensure_ascii=False)})
+            msgs_iter.append({"role": "user", "content": (
+                "El JSON anterior no se puede cargar en el PLC por esto:\n- " + "\n- ".join(errores)
+                + "\nCorrigelo sin perder nada de lo pedido. Si algo no existe en este hardware, usa la "
+                  "alternativa segura mas cercana y explicala en 'analisis' con requiere_confirmacion = "
+                  "true. Devuelve el JSON COMPLETO, sin texto extra.")})
+
+    analisis_llm = candidato.get("analisis") if isinstance(candidato, dict) else {}
+    if cfg is None:
+        compat = lavo_motor.analizar_compatibilidad(texto, {"enable": False, "engine": {}}, analisis_llm)
+        compat["no_soportado"] = compat["no_soportado"] + errores
+        compat["compatibilidad"] = "ninguna"
+        return LogicaResponse(
+            logic={}, name="", outputs=0, device="banda", status="not_supported",
+            warnings=["No se encontro una configuracion segura para esta instruccion: "
+                      + "; ".join(errores)],
+            analysis={"equipo": "banda", "motor_v7": True, "compatibilidad": compat})
+
+    compat = lavo_motor.analizar_compatibilidad(texto, cfg["band"], analisis_llm)
+    cfg["compatibilidad"] = compat
+    bloque = lavo_motor.compilar_motor(cfg["band"])
+    registros = {"id": bloque[lavo_motor.H_ID], "checksum": bloque[lavo_motor.H_CHK],
+                 "campos_activos": sum(1 for v in bloque if v),
+                 "rango": f"%R{lavo_motor.STAGE_BASE}..%R{lavo_motor.STAGE_BASE + lavo_motor.CFG_LEN - 1}"}
+    analysis = {"equipo": "banda", "motor_v7": True, "acciones": lavo_motor.describir_motor(cfg["band"]),
+                "compatibilidad": compat, "registros": registros,
+                "recursos": lavo_motor.recursos_usados(cfg["band"]["engine"])}
+    warnings = avisos_logica_banda(cfg) + [f"No soportado: {x}" for x in compat["no_soportado"]]
+
+    if compat["compatibilidad"] == "ninguna":
+        return LogicaResponse(logic={}, name="", outputs=0, device="banda", status="not_supported",
+                              warnings=warnings, analysis=analysis)
+
+    nombre_prog = cfg.get("name", "Programa banda")
+    try:
+        guardar_historial(texto, json.dumps(cfg, ensure_ascii=False)[:1500])
+    except Exception as e:
+        log.warning(f"No se pudo guardar historial (banda v7): {e}")
+    ejemplo_id = ""
+    try:
+        ejemplo_id = agregar_ejemplo_banda(texto, cfg)
+    except Exception as e:
+        log.warning(f"No se pudo guardar ejemplo (banda v7): {e}")
+
+    status, questions = "ok", []
+    if compat["requiere_confirmacion"]:
+        status = "needs_confirmation"
+        cfg["requiere_confirmacion"] = True
+        cfg["confirmado"] = False
+        cfg["band"]["engine"]["requiere_confirmacion"] = True
+        cfg["band"]["engine"]["confirmado"] = False
+        questions = [{"id": "confirmar_alternativa", "campo": "confirmar_alternativa",
+                      "pregunta": "La instruccion no se puede cumplir exactamente. ¿Usar esta alternativa?",
+                      "opciones": ["Usar la alternativa", "Cancelar"]}]
+    log.info(f"/generar-logica OK (BANDA v7, {status}) — {nombre_prog}")
+    return LogicaResponse(
+        logic=cfg, name=nombre_prog, outputs=0, device="banda", status=status, questions=questions,
+        warnings=warnings, ejemplo_id=ejemplo_id,
+        assumptions=[str(x) for x in compat["modificado"] + compat["simplificado"]],
+        program={"metadata": {"name": nombre_prog, "engine_config": cfg}},
+        analysis=analysis)
+
+
 def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
     """texto -> LLM (intencion estructurada) -> normalizador -> cobertura ->
     validacion contra el ST -> respuesta.
@@ -2434,6 +2712,8 @@ def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
     intencion a los campos del ST y comprueba que ninguna accion se pierda.
     Si algo falla, los motivos se le devuelven al LLM para que corrija su
     lectura (auto-revision), igual que en el maletin."""
+    if BANDA_MOTOR_V7:
+        return _generar_logica_banda_v7(texto, req)
     if BANDA_MOTOR_CONFIGURABLE:
         return _generar_logica_banda_motor(texto, req)
     import banda_intent
@@ -3551,6 +3831,21 @@ def _aplicar_plc_maletin(cfg: dict, req: AplicarPLCRequest):
             "notas": notas}
 
 
+def _guardia_confirmacion(cfg: dict):
+    """Motor v7: una ALTERNATIVA (algo distinto de lo pedido) no llega al PLC
+    sin que el usuario la haya aceptado expresamente. La marca viaja dentro de
+    band.engine porque el panel de la banda solo reenvia el bloque 'band'."""
+    band = (cfg or {}).get("band") or {}
+    eng = band.get("engine") if isinstance(band.get("engine"), dict) else {}
+    pide = bool(cfg.get("requiere_confirmacion") or eng.get("requiere_confirmacion"))
+    ok = cfg.get("confirmado") is True or eng.get("confirmado") is True
+    if pide and not ok:
+        cambios = ((cfg.get("compatibilidad") or {}).get("modificado") or [])
+        raise HTTPException(409, "Este programa es una alternativa que cambia lo pedido"
+                            + (": " + "; ".join(cambios) if cambios else "")
+                            + ". Acepta la alternativa en el editor antes de cargarla al PLC.")
+
+
 def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
     """MODO BANDA: PLC independiente (plc_banda / clase BandaPLC).
 
@@ -3579,6 +3874,8 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
                 "salidas": 0, "plan": plan_legible, "avisos": avisos,
                 "requiere_start": plc_banda.requiere_start(cfg),
                 "boton_start": plc_banda.boton_start(cfg)}
+
+    _guardia_confirmacion(cfg)
 
     # El PLC destino lo elige el USUARIO: el backend no adivina cual es la
     # banda (sin autodeteccion) ni decide que IP pertenece a que equipo.
@@ -3798,6 +4095,8 @@ def banda_config(req: BandaConfigRequest):
     ]
     avisos = plc_banda.avisos_config(cfg)
 
+    if not req.dry_run:
+        _guardia_confirmacion(cfg)
     if req.dry_run:
         return {"status": "dry-run", "enviado": False, "device": "banda",
                 "plan": plan_legible, "avisos": avisos,
@@ -4118,12 +4417,16 @@ class BandaBotonAppRequest(BandaRequestBase):
 
 @app.post("/banda/boton-app")
 def banda_boton_app(req: BandaBotonAppRequest):
-    """Botones virtuales APP1 / APP2 del motor configurable (ST v6): el
-    programa los usa como cualquier otra senal (arranque, paso, reset...)."""
+    """Botones virtuales de la app: APP1 / APP2 en el motor configurable v6,
+    APP1..APP4 en el motor LAVO v7. El programa los usa como cualquier otra
+    senal (arranque, paso, reset...)."""
     plc, ip, port, notas = _banda_plc(req)
     try:
-        plc.verificar_st_v6()
-        plc.boton_app(req.boton, req.activo)
+        if plc.version_programa() == 7:
+            plc.boton_app_v7(req.boton, req.activo)
+        else:
+            plc.verificar_st_v6()
+            plc.boton_app(req.boton, req.activo)
         estado = _banda_estado(plc)
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -4135,6 +4438,81 @@ def banda_boton_app(req: BandaBotonAppRequest):
         plc.close()
     return {"status": "ok", "plc": f"{ip}:{port}", "boton": req.boton,
             "activo": req.activo, "notas": notas, "estado": estado}
+
+
+# ─── MOTOR LAVO v7: catalogo, registros y mandos en vivo ──────────
+@app.get("/banda/capacidades")
+def banda_capacidades():
+    """Catalogo de lo que el programa maestro v7 puede hacer en esta banda:
+    recursos fisicos, bloques, limites y rangos de registros."""
+    import lavo_motor
+    return lavo_motor.capacidades()
+
+
+class BandaRegistrosRequest(BaseModel):
+    logic: Optional[dict] = None
+    band: Optional[dict] = None
+
+
+@app.post("/banda/v7/registros")
+def banda_v7_registros(req: BandaRegistrosRequest):
+    """JSON del motor v7 -> las 640 palabras EXACTAS que se escribiran en
+    %R1010..%R1649 (sin tocar el PLC). Misma funcion que usa la carga."""
+    import lavo_motor
+    band = req.band or ((req.logic or {}).get("band"))
+    if not lavo_motor.es_motor_v7(band or {}):
+        raise HTTPException(400, "Manda un bloque 'band' con engine.version = 7.")
+    try:
+        bloque = lavo_motor.compilar_motor(band)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return {"id": bloque[lavo_motor.H_ID], "checksum": bloque[lavo_motor.H_CHK],
+            "base": lavo_motor.STAGE_BASE, "palabras": bloque,
+            "campos": [{"offset": i, "registro": f"%R{lavo_motor.STAGE_BASE + i}",
+                        "campo": lavo_motor.campo_de_offset(i), "valor": v,
+                        "senal": lavo_motor.nombre_senal(v) if lavo_motor._es_senal(i) else ""}
+                       for i, v in enumerate(bloque) if v]}
+
+
+class BandaV7MandoRequest(BandaRequestBase):
+    activo: bool = True
+
+
+def _mando_v7(req, fn):
+    plc, ip, port, notas = _banda_plc(req)
+    try:
+        plc.verificar_st_v7()
+        fn(plc)
+        estado = _banda_estado(plc)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Error con el PLC de la banda: {e}")
+    finally:
+        plc.close()
+    return {"status": "ok", "plc": f"{ip}:{port}", "notas": notas, "estado": estado}
+
+
+@app.post("/banda/v7/paro")
+def banda_v7_paro(req: BandaV7MandoRequest):
+    """Paro por software del motor v7 (activo=true detiene motor, secuencias
+    y plumas; activo=false lo libera, pero nada arranca solo)."""
+    return _mando_v7(req, lambda plc: plc.paro_software_v7(req.activo))
+
+
+@app.post("/banda/v7/reset")
+def banda_v7_reset(req: BandaRequestBase):
+    """Reinicia timers, contadores, memorias y secuencias del motor v7 sin
+    cambiar su configuracion."""
+    return _mando_v7(req, lambda plc: plc.reset_motor_v7())
+
+
+@app.post("/banda/v7/descargar")
+def banda_v7_descargar(req: BandaRequestBase):
+    """UNLOAD: el PLC deja el motor v7 y vuelve a la logica v5."""
+    return _mando_v7(req, lambda plc: plc.descargar_v7())
 
 
 @app.post("/feedback")

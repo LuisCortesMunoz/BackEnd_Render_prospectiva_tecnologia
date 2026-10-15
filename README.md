@@ -114,6 +114,45 @@ motor (marcha, paro, pausa, dirección e inversión segura), la torreta y las pl
 - `POST /banda/boton-app` `{boton: 1|2, activo}` → botones virtuales APP1/APP2.
 - `GET /banda/estado` incluye `motor_configurable` (motor, dirección, paso, timers, contadores).
 
+## Banda: programa maestro general (ST v7, motor LAVO)
+
+El v7 (`cscape/ST_banda_v7_lavo.txt` = `LAVO_Main_ST.txt` en *Archivos Cscape*)
+conserva el v5 intacto y sustituye el motor v6 por un **motor general**: las
+entradas no tienen papel fijo (I1 puede ser arranque, paro, reset o condición),
+hay 16 condiciones AND/OR/XOR/NAND/NOR con flancos, 16 memorias, 16 timers (TON,
+TOF, PULSO, RETARDO, TONR, INTERMITENTE), 16 contadores (sube/baja, una vez,
+cíclico, nivel) y **2 secuencias** independientes de 16 pasos (una vez, infinita
+o N repeticiones; inicio, paro, reset y pausa por señal; transiciones por
+tiempo, nivel o flanco y una rama alterna por paso). I3 (paro de emergencia), NA/NC
+y el enclavamiento de las plumas son fijos en el ST (`§L0`) y no se configuran por Modbus.
+
+La configuración se carga **por transacción**: BEGIN → 640 palabras en el área de
+espera (%R1010..%R1649) → relectura → COMMIT (el PLC valida checksum, rangos y
+reglas de seguridad y aplica en un solo scan) → confirmación (id, checksum y
+relectura de la config activa en %R2000..). Un corte de comunicación nunca deja
+una configuración a medias.
+
+| Pieza | Archivo |
+|---|---|
+| Contrato, validador, compilador determinista, compatibilidad | `lavo_motor.py` |
+| Generador del ST y de `LAVO_Variables_Cscape.txt` (mismas constantes) | `cscape/generar_st_v7.py` |
+| Simulador que ejecuta el ST real + Modbus simulado | `lavo_sim.py` |
+| Carga transaccional, mandos en vivo, detección de versión | `plc_banda.py` |
+| Generación con IA y alternativas con confirmación (`SYSTEM_PROMPT_BANDA_V7`) | `app.py` |
+| Pruebas (16 escenarios + regresión v5 + equivalencia ST/Python) | `test_lavo_v7.py` |
+
+- `BANDA_MOTOR_V7=1` activa el v7 (tiene prioridad sobre `BANDA_MOTOR_CONFIGURABLE`).
+  Con `0` el backend se comporta exactamente como antes.
+- Si la instrucción no se puede cumplir tal cual, `/generar-logica` responde
+  `needs_confirmation` con lo conservado / modificado / simplificado; `/aplicar-plc`
+  y `/banda/config` responden **409** hasta que el usuario acepta la alternativa.
+  Sin alternativa segura responde `not_supported`.
+- `GET /banda/capacidades`, `POST /banda/v7/registros` (registros exactos sin tocar el PLC),
+  `POST /banda/v7/paro`, `/banda/v7/reset`, `/banda/v7/descargar`; `/banda/boton-app` acepta APP1..APP4.
+- Si cambias `lavo_motor.py`: `python cscape/generar_st_v7.py --destino "<Archivos Cscape>"`
+  y vuelve a descargar el ST.
+- Pruebas: `python test_lavo_v7.py` (backend) y, en el frontend, `node tests/test_motor_v7.mjs`.
+
 ## Instalación local
 
 ```powershell

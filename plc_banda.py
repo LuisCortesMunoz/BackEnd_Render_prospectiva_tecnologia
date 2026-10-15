@@ -51,6 +51,7 @@ import time
 from pymodbus.client import ModbusTcpClient
 
 import banda_motor
+import lavo_motor
 
 
 # ---------------------------------------------------------------------------
@@ -232,11 +233,24 @@ ADDR_ESCRIBIBLES = ADDR_ESCRIBIBLES | ADDR_MOTOR
 ADDR_SOLO_LECTURA = ADDR_SOLO_LECTURA | ADDR_MOTOR_ESTADO
 ADDR_ENGINE_MODE = R(banda_motor.ENGINE_BASE + banda_motor.O_MODE)
 
+# ST v7 - motor LAVO general (lavo_motor.py): LCMD (comandos) y LSTG (area de
+# espera) los escribe el backend; LSTA (estado) y las copias internas del ST
+# (LACT config activa, LPEN buffer, LI, LD) solo se leen.
+ADDR_V7_CMD = frozenset(range(R(lavo_motor.CMD_BASE), R(lavo_motor.CMD_BASE) + lavo_motor.CMD_LEN))
+ADDR_V7_STAGE = frozenset(range(R(lavo_motor.STAGE_BASE), R(lavo_motor.STAGE_BASE) + lavo_motor.CFG_LEN))
+ADDR_V7_LECTURA = frozenset(range(R(lavo_motor.STATUS_BASE), R(lavo_motor.STATUS_BASE) + lavo_motor.STATUS_LEN))     | frozenset(range(R(lavo_motor.ACT_BASE), R(lavo_motor.ACT_BASE) + lavo_motor.CFG_LEN))     | frozenset(range(R(lavo_motor.PEN_BASE), R(lavo_motor.PEN_BASE) + lavo_motor.CFG_LEN))     | frozenset(range(R(lavo_motor.LI_BASE), R(lavo_motor.LD_BASE) + 8))
+ADDR_ESCRIBIBLES = ADDR_ESCRIBIBLES | ADDR_V7_CMD | ADDR_V7_STAGE
+ADDR_SOLO_LECTURA = ADDR_SOLO_LECTURA | ADDR_V7_LECTURA
+V7_TIMEOUT_ACK_S = 2.0       # el PLC confirma un comando en pocos scans
+V7_TIMEOUT_COMMIT_S = 3.0    # 640 palabras / 128 por scan = 5 scans + aplicar
+V7_POLL_S = 0.05
+
 # Bloques contiguos que lee leer_estado(): 7 peticiones Modbus en total (las
 # dos ultimas son del motor configurable; en un PLC con el ST v5 leen ceros).
 LECTURA_BLOQUES = ((1, 41), (50, 1), (60, 40), (100, 28), (500, 7),
                    (banda_motor.ENGINE_BASE, 1),
-                   (banda_motor.STATUS_BASE, banda_motor.STATUS_LEN))
+                   (banda_motor.STATUS_BASE, banda_motor.STATUS_LEN),
+                   (lavo_motor.STATUS_BASE, lavo_motor.STATUS_LEN))
 MODBUS_MAX_BLOQUE = 100   # registros por peticion write_registers (limite Modbus 123)
 
 # Nombres historicos (los usan los metodos y app.py).
@@ -958,6 +972,167 @@ class BandaPLC:
               self.read_band_block(R(banda_motor.STATUS_BASE), banda_motor.STATUS_LEN)]
         return banda_motor.estado_desde_es(es)
 
+    # -- ST v7: motor LAVO general (carga transaccional) --------------------
+    def _esperar(self, segundos):
+        """Pausa entre sondeos. Las pruebas la sustituyen por scans simulados."""
+        time.sleep(segundos)
+
+    def _status_v7(self) -> list:
+        return [_con_signo(v) for v in
+                self.read_band_block(R(lavo_motor.STATUS_BASE), lavo_motor.STATUS_LEN)]
+
+    def version_programa(self) -> int:
+        """7 si el PLC corre el ST v7 (LSTA[0] = 7 y la firma de LAVO), 6 si
+        corre el v6 (%R460 = 6), 5 en otro caso. Se pregunta primero por el v7:
+        tras migrar, %R460 puede conservar un 6 viejo."""
+        st = self._status_v7()
+        if st[lavo_motor.S_VERSION] == lavo_motor.ENGINE_VERSION and st[lavo_motor.S_MAGIC] == lavo_motor.MAGIC:
+            return 7
+        return 6 if self.version_st() == banda_motor.ENGINE_VERSION else 5
+
+    def verificar_st_v7(self) -> list:
+        """Se niega a cargar el motor v7 si el PLC no tiene ese programa o si
+        su perfil de hardware (§L0) no es el que conoce el backend."""
+        st = self._status_v7()
+        if st[lavo_motor.S_VERSION] != lavo_motor.ENGINE_VERSION or st[lavo_motor.S_MAGIC] != lavo_motor.MAGIC:
+            raise ValueError(
+                "El PLC de la banda no tiene el programa maestro v7 (motor LAVO): "
+                f"%R{lavo_motor.STATUS_BASE} = {st[lavo_motor.S_VERSION]}. Descarga LAVO_Main_ST.txt "
+                "con sus variables (LAVO_Variables_Cscape.txt) y vuelve a cargar.")
+        if st[lavo_motor.S_CFGLEN] != lavo_motor.CFG_LEN:
+            raise ValueError(f"El ST v7 del PLC usa bloques de {st[lavo_motor.S_CFGLEN]} palabras; "
+                             f"el backend espera {lavo_motor.CFG_LEN}. Regenera y descarga el ST.")
+        if (st[lavo_motor.S_HW_OUT] != lavo_motor.hw_out_mask()
+                or st[lavo_motor.S_HW_LAMP] != lavo_motor.hw_lamp_mask()):
+            raise ValueError(
+                "El perfil de hardware del PLC (§L0) no coincide con el del backend: salidas "
+                f"{st[lavo_motor.S_HW_OUT]} vs {lavo_motor.hw_out_mask()}, lamparas "
+                f"{st[lavo_motor.S_HW_LAMP]} vs {lavo_motor.hw_lamp_mask()}. Actualiza HW_BANDA "
+                "en lavo_motor.py o el ST para que describan el mismo cableado.")
+        print("ST v7 detectado en el PLC de la banda")
+        return st
+
+    def comando_v7(self, codigo, arg=0, timeout=V7_TIMEOUT_ACK_S) -> list:
+        """Ejecuta un comando de LCMD y espera a que el PLC lo confirme
+        (LSTA[ACK] = numero de secuencia). Devuelve el estado leido."""
+        base = R(lavo_motor.CMD_BASE)
+        actual = _con_signo(self._r(base + lavo_motor.C_SEQ))
+        seq = (actual % 32000) + 1
+        self.write_band_block(base + lavo_motor.C_CODE, [int(codigo), int(arg)])
+        self._w(base + lavo_motor.C_SEQ, seq)
+        limite = time.time() + float(timeout)
+        while True:
+            st = self._status_v7()
+            if st[lavo_motor.S_ACK] == seq:
+                return st
+            if time.time() > limite:
+                raise IOError(f"El PLC no confirmo el comando {lavo_motor.CMD_NOMBRE.get(codigo, codigo)} "
+                              f"(seq {seq}) en {timeout} s.")
+            self._esperar(V7_POLL_S)
+
+    def cargar_motor_v7(self, bloque) -> dict:
+        """Carga TRANSACCIONAL de la configuracion v7.
+
+          1. BEGIN  : el PLC abre la transaccion (la config activa sigue).
+          2. escribe: 640 palabras en el area de espera (%R1010..%R1649).
+          3. relee  : el area de espera debe ser identica a lo enviado.
+          4. COMMIT : el PLC copia, calcula el checksum, valida y aplica en
+                      un solo scan; o rechaza y conserva la config anterior.
+          5. confirma: id + checksum activos y relectura de la config activa.
+
+        Si la comunicacion se corta antes del COMMIT, el PLC nunca aplica nada
+        (y a los 60 s cierra la transaccion por TIMEOUT)."""
+        cfg = [int(v) for v in bloque]
+        if len(cfg) != lavo_motor.CFG_LEN:
+            raise ValueError(f"El bloque v7 debe tener {lavo_motor.CFG_LEN} palabras.")
+        err = lavo_motor.error_plc(cfg)
+        if err[0]:
+            raise ValueError("Bloque v7 invalido: " + lavo_motor.explicar_error(*err))
+        cfg_id = cfg[lavo_motor.H_ID]
+        stage = R(lavo_motor.STAGE_BASE)
+        # Botones virtuales y paro software en reposo antes de cambiar de programa.
+        self.write_band_block(R(lavo_motor.CMD_BASE + lavo_motor.C_APP), [0] * (lavo_motor.N_APP + 1))
+        st = self.comando_v7(lavo_motor.CMD_BEGIN)
+        if st[lavo_motor.S_TX] != lavo_motor.TX_RX:
+            raise IOError("El PLC no abrio la transaccion (estado "
+                          f"{lavo_motor.TX_NOMBRE.get(st[lavo_motor.S_TX], st[lavo_motor.S_TX])}).")
+        try:
+            self.write_band_block(stage, cfg)
+            leido = []
+            for i in range(0, len(cfg), MODBUS_MAX_BLOQUE):
+                leido += self.read_band_block(stage + i, min(MODBUS_MAX_BLOQUE, len(cfg) - i))
+            malos = [i for i, (a, b) in enumerate(zip(cfg, leido)) if (a & 0xFFFF) != b]
+            if malos:
+                raise IOError(f"El area de espera no conserva %R{lavo_motor.STAGE_BASE + malos[0]} "
+                              f"({lavo_motor.campo_de_offset(malos[0])}): revisa en Cscape que LSTG "
+                              f"este en %R{lavo_motor.STAGE_BASE} y nada mas use ese rango.")
+        except Exception:
+            try:
+                self.comando_v7(lavo_motor.CMD_ABORT)
+            except Exception:
+                pass            # sin comunicacion: el PLC la cierra solo por TIMEOUT
+            raise
+        st = self.comando_v7(lavo_motor.CMD_COMMIT, cfg_id)
+        limite = time.time() + V7_TIMEOUT_COMMIT_S
+        while st[lavo_motor.S_TX] == lavo_motor.TX_VAL:
+            if time.time() > limite:
+                raise IOError("El PLC no termino de validar la configuracion v7 a tiempo.")
+            self._esperar(V7_POLL_S)
+            st = self._status_v7()
+        if st[lavo_motor.S_RESULT]:
+            raise IOError("El PLC no acepto el COMMIT: "
+                          + lavo_motor.ERROR_TEXTO.get(st[lavo_motor.S_RESULT], str(st[lavo_motor.S_RESULT])))
+        if st[lavo_motor.S_TX] != lavo_motor.TX_OK:
+            raise ValueError("El PLC rechazo la configuracion v7: "
+                             + lavo_motor.explicar_error(st[lavo_motor.S_ERR], st[lavo_motor.S_ERRFIELD])
+                             + ". La configuracion anterior sigue activa.")
+        if (st[lavo_motor.S_ACTIVE_ID] != cfg_id or st[lavo_motor.S_ACTIVE_CHK] != cfg[lavo_motor.H_CHK]
+                or st[lavo_motor.S_ENGINE] != 1):
+            raise IOError("El PLC dice que aplico la configuracion, pero su id/checksum activos "
+                          f"({st[lavo_motor.S_ACTIVE_ID]}/{st[lavo_motor.S_ACTIVE_CHK]}) no son los enviados "
+                          f"({cfg_id}/{cfg[lavo_motor.H_CHK]}).")
+        activa = []
+        base_act = R(lavo_motor.ACT_BASE)
+        for i in range(0, len(cfg), MODBUS_MAX_BLOQUE):
+            activa += self.read_band_block(base_act + i, min(MODBUS_MAX_BLOQUE, len(cfg) - i))
+        verificada = all((a & 0xFFFF) == b for a, b in zip(cfg, activa))
+        if not verificada:
+            raise IOError("La config activa leida del PLC (%R2000..) no coincide con la enviada.")
+        print(f"Motor LAVO v7: configuracion {cfg_id} aplicada y verificada "
+              f"({sum(1 for v in cfg if v)} campos activos)")
+        return {"id": cfg_id, "checksum": cfg[lavo_motor.H_CHK], "verificada": verificada}
+
+    def descargar_v7(self):
+        """UNLOAD: el PLC vuelve a la logica v5. Solo si tiene el ST v7."""
+        if self.version_programa() == 7:
+            self.comando_v7(lavo_motor.CMD_UNLOAD)
+            print("Motor LAVO v7 descargado (el PLC vuelve a la logica v5)")
+
+    def apagar_motores(self):
+        """Antes de cargar un programa v5: desactiva el motor que tenga el PLC
+        (v7 -> UNLOAD, v6 -> EngineMode 0). No escribe %R200 en un PLC v7."""
+        v = self.version_programa()
+        if v == 7:
+            self.comando_v7(lavo_motor.CMD_UNLOAD)
+        elif v == 6:
+            self.apagar_motor()
+
+    def reset_motor_v7(self):
+        """Reinicia timers, contadores, memorias y secuencias del motor v7 sin
+        cambiar su configuracion."""
+        self.comando_v7(lavo_motor.CMD_RESET)
+
+    def boton_app_v7(self, n, activo: bool):
+        if not 1 <= int(n) <= lavo_motor.N_APP:
+            raise ValueError(f"Boton de la app no valido: usa 1..{lavo_motor.N_APP}.")
+        self._w(R(lavo_motor.CMD_BASE + lavo_motor.C_APP + int(n) - 1), 1 if activo else 0)
+
+    def paro_software_v7(self, activo: bool):
+        self._w(R(lavo_motor.CMD_BASE + lavo_motor.C_SOFTSTOP), 1 if activo else 0)
+
+    def leer_motor_v7(self) -> dict:
+        return lavo_motor.estado_desde_status(self._status_v7())
+
     # -- §15  torreta ------------------------------------------------------
     def configurar_torreta(self, mask_run=None, mask_idle=None, mask_i1=None):
         """TorretaRun (%R40), TorretaIdle (%R41) e I1_LampMask (%R50).
@@ -1073,7 +1248,7 @@ class BandaPLC:
                         break
                 except IOError:
                     pass
-                time.sleep(CFG_DROP_POLL_S)
+                self._esperar(CFG_DROP_POLL_S)
             if not bajo:
                 print("AVISO: CfgReady (%R7) no bajo a 0: el PLC no tomo el trigger.")
                 return False
@@ -1085,7 +1260,7 @@ class BandaPLC:
                     return True
             except IOError:
                 pass
-            time.sleep(CFG_READY_POLL_S)
+            self._esperar(CFG_READY_POLL_S)
         print("AVISO: CfgReady (%R7) sigue en 0 tras esperar la secuencia init.")
         return False
 
@@ -1299,6 +1474,14 @@ def estado_desde_registros(reg: dict) -> dict:
     estado["st_version"] = es[banda_motor.S_VERSION] or 5
     estado["engine_mode"] = reg.get(banda_motor.ENGINE_BASE, 0)
     estado["motor_configurable"] = banda_motor.estado_desde_es(es) if es[0] else {}
+    # ST v7: motor LAVO general. Se pregunta primero por el v7: tras migrar,
+    # %R460 puede conservar el 6 del programa anterior.
+    st7 = [reg.get(lavo_motor.STATUS_BASE + i, 0) for i in range(lavo_motor.STATUS_LEN)]
+    estado["motor_v7"] = lavo_motor.estado_desde_status(st7)
+    if estado["motor_v7"].get("disponible"):
+        estado["st_version"] = 7
+        estado["engine_mode"] = 7 if estado["motor_v7"].get("activo") else 0
+        estado["motor_configurable"] = {}
     return estado
 
 
@@ -1625,6 +1808,8 @@ def validar_config(cfg) -> list:
     if cfg.get("sequence"):
         errores.append("El PLC de la banda no tiene secuenciador de pasos: "
                        "'sequence' no aplica a este equipo.")
+    if lavo_motor.es_motor_v7(band):
+        return errores + lavo_motor.validar_motor(band)[0]
     if banda_motor.es_motor(band):
         return errores + _validar_config_motor(band)
 
@@ -1769,6 +1954,13 @@ def avisos_config(cfg) -> list:
     condiciones que el operador tiene que conocer)."""
     avisos = []
     band = (cfg or {}).get("band") or {}
+
+    if lavo_motor.es_motor_v7(band):
+        avisos = list(lavo_motor.validar_motor(band)[1])
+        if not sin_marcha(cfg):
+            avisos.append("Tras cargar, la banda queda LISTA pero detenida: arranca con "
+                          f"{boton_start(cfg)} (o con lo que indique el programa).")
+        return avisos
 
     if banda_motor.es_motor(band):
         _, avisos = banda_motor.validar_motor(band)
@@ -1937,6 +2129,14 @@ def boton_start(cfg) -> str:
     """Boton de arranque de la configuracion (v5 solo acepta I1; en el motor
     configurable es la senal de motor.arranque)."""
     band = (cfg or {}).get("band") or {}
+    if lavo_motor.es_motor_v7(band):
+        try:
+            cfg7 = lavo_motor.compilar_motor(band)
+            if not cfg7[lavo_motor.H_MOVE]:
+                return ""
+            return lavo_motor.nombre_senal(cfg7[lavo_motor.M_RUN]) or "la secuencia"
+        except ValueError:
+            return START_BUTTONS[0]
     if banda_motor.es_motor(band):
         try:
             ec = banda_motor.compilar_motor(band)
@@ -1974,6 +2174,8 @@ def plan_config(cfg) -> list:
     band = cfg.get("band") or {}
     marcha = not sin_marcha(cfg)
 
+    if lavo_motor.es_motor_v7(band):
+        return _plan_motor_v7(band, marcha)
     if banda_motor.es_motor(band):
         return _plan_motor(band, marcha)
 
@@ -2037,9 +2239,9 @@ def plan_config(cfg) -> list:
         # 1 o 2 cuando hay movimiento, asi que sin direccion explicita va la 1.
         plan.append(("cambiar_direccion", (band.get("direction") or DIR_1,), {}))
 
-    # ST v6: un programa v5 apaga el motor configurable (EngineMode = 0). En un
-    # PLC que aun tiene el ST v5, %R200 esta libre y escribirlo no hace nada.
-    plan.append(("apagar_motor", (), {}))
+    # Un programa v5 apaga el motor que tenga el PLC: v7 -> UNLOAD, v6 ->
+    # EngineMode = 0. En un PLC v7 ya no se escribe %R200 (hueco del v6).
+    plan.append(("apagar_motores", (), {}))
 
     # 3) Reset + nueva configuracion SIEMPRE, aunque el usuario no lo pida.
     #    NewCfgFlag va el ultimo para que el PLC nunca lea la config a medias.
@@ -2094,6 +2296,38 @@ def _plan_motor(band, marcha) -> list:
     plan.append(("trigger_vfd_reset", (), {}))
     plan.append(("trigger_new_config", (), {}))
     plan.append(("esperar_config_lista", (), {"esperar_caida": marcha}))
+    return plan
+
+
+class BloqueV7(list):
+    """CFG[0..639] del motor v7; se imprime corto en el plan legible."""
+    def __repr__(self):
+        return (f"<v7 id {self[lavo_motor.H_ID]} chk {self[lavo_motor.H_CHK]}: "
+                f"{sum(1 for v in self if v)} campos activos -> %R{lavo_motor.STAGE_BASE}..>")
+
+
+def _plan_motor_v7(band, marcha) -> list:
+    """Plan de carga del motor LAVO v7.
+
+    1) verificar que el PLC tiene el ST v7 y el mismo perfil de hardware;
+    2) registros v5 en un estado neutro (sin movimiento, sin eventos, sin
+       torreta, plumas manuales en stop): v5 queda en espera y su §3 da la
+       configuracion por valida;
+    3) carga transaccional (BEGIN -> espera -> COMMIT -> confirmacion). El
+       COMMIT aplicado reinicia el VFD como un NewCfgFlag (§6/§8);
+    4) esperar CfgReady (%R7) si la banda se mueve.
+    No hay triggers R5/R6: el COMMIT los sustituye."""
+    plan = [("verificar_st_v7", (), {}),
+            ("sin_movimiento", (), {}),
+            ("configurar_paros", (), {"stop_mode": STOP_MODE_I3}),
+            ("configurar_autostop", (), {"modo": AUTO_STOP_OFF, "preset_s": 0}),
+            ("apagar_sensor", (1,), {}),
+            ("apagar_sensor", (2,), {}),
+            ("configurar_torreta", (), {"mask_run": 0, "mask_idle": 0, "mask_i1": 0}),
+            ("configurar_lampara_temporizada", (), {"mask": 0, "segundos": 0}),
+            ("parar_plumas", (), {}),
+            ("cargar_motor_v7", (BloqueV7(lavo_motor.compilar_motor(band)),), {}),
+            ("esperar_config_lista", (), {})]
     return plan
 
 

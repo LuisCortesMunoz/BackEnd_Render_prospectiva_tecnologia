@@ -332,7 +332,7 @@ check(metodos.count("apagar_sensor") == 2 and "configurar_torreta" in metodos,
       "los registros v5 se dejan en 0")
 v5 = {"device": "banda", "band": {"enable": True, "direction": "derecha", "freq_hz": 30,
                                    "s1_action": "paro_temporizado", "wait_s1_s": 5}, "outputs": []}
-check("apagar_motor" in [m for m, _, _ in pb.plan_config(v5)], "un programa v5 apaga el motor (EngineMode=0)")
+check("apagar_motores" in [m for m, _, _ in pb.plan_config(v5)], "un programa v5 apaga el motor del PLC (v6: EngineMode=0, v7: UNLOAD)")
 check(pb.boton_start(cfg) == "I1", "boton de arranque del motor")
 
 
