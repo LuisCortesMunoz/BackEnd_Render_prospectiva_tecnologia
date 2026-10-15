@@ -30,7 +30,7 @@ _TOKEN = re.compile(r"""
   | (?P<op>:=|<>|<=|>=|[-+*/=<>();:\[\],])
   | (?P<id>[A-Za-z_][A-Za-z0-9_]*)
 """, re.X)
-_KW_EXPR = {"AND": " and ", "OR": " or ", "NOT": " not ", "MOD": " % ",
+_KW_EXPR = {"AND": " and ", "OR": " or ", "NOT": " not ", "MOD": " % ", "XOR": " ^ ",
             "TRUE": "True", "FALSE": "False",
             # conversiones de tipo de Cscape (los indices de arreglo son DINT)
             "ANY_TO_DINT": "int", "ANY_TO_INT": "int"}

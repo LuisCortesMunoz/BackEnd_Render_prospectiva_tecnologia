@@ -1,0 +1,1380 @@
+(* ============================================================ *)
+(* PROGRAMA MAESTRO BANDA v7 LAVO - BLOQUE 2 de 2 (STBLOCK2)    *)
+(* Se ejecuta en cada ciclo DESPUES de STBLOCK1 (LAVO_Main_ST). *)
+(* Contiene el motor general (§L2), el estado (§L3) y §18..§20. *)
+(* Usa las mismas variables globales que el bloque 1. Se separo *)
+(* porque Cscape limita cada bloque ST a 64 KB de codigo.       *)
+(* Generado por cscape/generar_st_v7.py (no editar a mano).     *)
+(* ============================================================ *)
+
+IF LB[4] THEN
+
+
+(* ============================================================ *)
+(* §L2a - REINICIO DEL MOTOR (config nueva, RESET, R6, 1er scan)*)
+(* En el scan de reinicio ningun flanco cuenta (EngFirst).      *)
+(* ============================================================ *)
+
+LB[3] := LB[2] ;
+
+IF LB[3] THEN
+
+    FOR ek := 0 TO 15 DO
+        LI[ANY_TO_DINT(37 + ek)] := 0 ;
+        LB[ANY_TO_DINT(100 + ek)] := FALSE ;
+        LB[ANY_TO_DINT(116 + ek)] := FALSE ;
+        LI[ANY_TO_DINT(53 + ek)] := 0 ;
+        LB[ANY_TO_DINT(148 + ek)] := FALSE ;
+        LB[ANY_TO_DINT(196 + ek)] := FALSE ;
+        LB[ANY_TO_DINT(84 + ek)] := FALSE ;
+    END_FOR ;
+
+    FOR ek := 40 TO 159 DO
+        LSIG[ANY_TO_DINT(ek)] := FALSE ;
+    END_FOR ;
+
+    FOR ek := 0 TO 11 DO
+        LB[ANY_TO_DINT(212 + ek)] := FALSE ;
+        LB[ANY_TO_DINT(224 + ek)] := FALSE ;
+        LI[ANY_TO_DINT(25 + ek)] := 0 ;
+        LB[ANY_TO_DINT(72 + ek)] := LB[ANY_TO_DINT(60 + ek)] ;
+    END_FOR ;
+
+    (* Secuencias: estado en cero y que salidas/motor usa cada una. *)
+    FOR ej := 0 TO 1 DO
+        LI[104] := 354 + ej * 140 ;
+        FOR ek := 0 TO 7 DO
+            LI[ANY_TO_DINT(75 + ej * 8 + ek)] := 0 ;
+        END_FOR ;
+        FOR ek := 0 TO 9 DO
+            LB[ANY_TO_DINT(290 + ej * 10 + ek)] := FALSE ;
+        END_FOR ;
+        LB[ANY_TO_DINT(290 + ej * 10 + 7)] := (LACT[ANY_TO_DINT(LI[104] + 7)] <> 0) ;
+        LB[ANY_TO_DINT(290 + ej * 10 + 8)] := (LACT[ANY_TO_DINT(LI[104] + 8)] <> 0) ;
+        FOR em := 0 TO 11 DO
+            LB[ANY_TO_DINT(310 + ej * 12 + em)] := FALSE ;
+        END_FOR ;
+        LB[ANY_TO_DINT(358 + ej)] := FALSE ;
+        FOR ek := 1 TO LACT[ANY_TO_DINT(LI[104] + 6)] DO
+            LI[105] := LI[104] + 12 + (ek - 1) * 8 ;
+            LI[99] := LACT[ANY_TO_DINT(LI[105] + 0)] ;
+            FOR em := 0 TO 11 DO
+                IF (LI[99] MOD 2) = 1 THEN
+                    LB[ANY_TO_DINT(310 + ej * 12 + em)] := TRUE ;
+                END_IF ;
+                LI[99] := LI[99] / 2 ;
+            END_FOR ;
+            IF LACT[ANY_TO_DINT(LI[105] + 1)] <> 0 THEN
+                LB[ANY_TO_DINT(358 + ej)] := TRUE ;
+            END_IF ;
+        END_FOR ;
+    END_FOR ;
+
+    (* Motor detenido, direccion inicial, plumas quietas. *)
+    LB[5] := FALSE ;
+    LB[6] := FALSE ;
+    LI[13] := 0 ;
+    IF (LI[11] = 1) OR (LI[11] = 2) THEN
+        LI[14] := LI[11] ;
+    ELSE
+        LI[14] := 1 ;
+    END_IF ;
+    LI[15] := LI[14] ;
+    LI[16] := 32767 ;
+    FOR ek := 0 TO 1 DO
+        LI[ANY_TO_DINT(69 + ek)] := 0 ;
+        LI[ANY_TO_DINT(71 + ek)] := 0 ;
+        LI[ANY_TO_DINT(73 + ek)] := 0 ;
+        LB[ANY_TO_DINT(236 + ek)] := FALSE ;
+    END_FOR ;
+
+    (* Lamparas que quedan encendidas con el paro de emergencia. *)
+    LI[99] := LACT[10] ;
+    FOR ek := 0 TO 11 DO
+        LB[ANY_TO_DINT(264 + ek)] := (LI[99] MOD 2) = 1 ;
+        LI[99] := LI[99] / 2 ;
+    END_FOR ;
+
+END_IF ;
+
+(* ============================================================ *)
+(* §L2b - ENTRADAS FILTRADAS Y TABLA DE SENALES                 *)
+(* LSIG[codigo] = valor de la senal en este scan:               *)
+(*   0 nada | 1..12 I1..I12 | 13..24 Q1..Q12 (scan anterior)    *)
+(*   25 SIEMPRE | 26 corriendo 27 detenida 28 dir1 29 dir2      *)
+(*   30 invirtiendo 31 VFD en cero 32 CfgReady 33 primer ciclo  *)
+(*   34..37 APP1..APP4 | 38 paro software                       *)
+(*   40..55 C1..C16 | 56..71 M1..M16 | 72..87 T1..T16           *)
+(*   88..103 CT1..CT16 | 104.. SQ1 (+0 activa +1 pausada +2 fin *)
+(*   +3 ciclo +4..+19 paso 1..16) | 124.. SQ2 (igual)           *)
+(* Un codigo +1000 lee la senal negada (NOT).                   *)
+(* I3 se filtra SOLO para usarlo como condicion: el paro de     *)
+(* emergencia (§4 y GenStop7) lee la entrada directa.           *)
+(* ============================================================ *)
+
+FOR ek := 0 TO 11 DO
+
+    IF LB[ANY_TO_DINT(276 + ek)] THEN
+        LI[103] := LACT[7] ;
+    ELSE
+        LI[103] := LACT[8] ;
+    END_IF ;
+
+    IF (LI[103] <= 0) OR LB[3] THEN
+        LB[ANY_TO_DINT(72 + ek)] := LB[ANY_TO_DINT(60 + ek)] ;
+        LI[ANY_TO_DINT(25 + ek)] := 0 ;
+    ELSIF LB[ANY_TO_DINT(60 + ek)] = LB[ANY_TO_DINT(72 + ek)] THEN
+        LI[ANY_TO_DINT(25 + ek)] := 0 ;
+    ELSE
+        IF LB[0] THEN
+            LI[ANY_TO_DINT(25 + ek)] := LI[ANY_TO_DINT(25 + ek)] + 1 ;
+        END_IF ;
+        IF LI[ANY_TO_DINT(25 + ek)] >= LI[103] THEN
+            LB[ANY_TO_DINT(72 + ek)] := LB[ANY_TO_DINT(60 + ek)] ;
+            LI[ANY_TO_DINT(25 + ek)] := 0 ;
+        END_IF ;
+    END_IF ;
+
+    LSIG[ANY_TO_DINT(1 + ek)] := LB[ANY_TO_DINT(72 + ek)] ;
+    LSIG[ANY_TO_DINT(13 + ek)] := LB[ANY_TO_DINT(224 + ek)] ;
+
+END_FOR ;
+
+LI[22] := VFD_SpeedRaw ;
+IF LI[22] < 0 THEN
+    LI[22] := 0 - LI[22] ;
+END_IF ;
+
+LSIG[0]  := FALSE ;
+LSIG[25] := TRUE ;
+LSIG[26] := (LI[13] = 1) ;
+LSIG[27] := (LI[13] <> 1) ;
+LSIG[28] := (LI[14] = 1) ;
+LSIG[29] := (LI[14] = 2) ;
+LSIG[30] := (LI[13] = 2) ;
+LSIG[31] := (LI[22] < 50) ;
+LSIG[32] := CfgReady ;
+LSIG[33] := LB[56] ;
+FOR ek := 0 TO 3 DO
+    LSIG[ANY_TO_DINT(34 + ek)] := (LCMD[ANY_TO_DINT(3 + ek)] <> 0) ;
+END_FOR ;
+LSIG[38] := LB[8] ;
+LSIG[39] := FALSE ;
+
+(* ============================================================ *)
+(* §L2c - CONDICIONES C1..C16                                   *)
+(* CFG[50 + 6k]: Op (1 AND 2 OR 3 XOR 4 NAND 5 NOR),            *)
+(*   Entrada1..4 (codigo de senal), Flanco (0 nivel 1 subida    *)
+(*   2 bajada). Una condicion puede usar otra: las anteriores   *)
+(*   dan su valor de este scan, las posteriores el del anterior.*)
+(* ============================================================ *)
+
+FOR ek := 0 TO 15 DO
+
+    LI[93] := 50 + ek * 6 ;
+    LI[94] := LACT[ANY_TO_DINT(LI[93])] ;
+    LI[101] := 0 ;
+    LI[102] := 0 ;
+
+    IF LI[94] <> 0 THEN
+        FOR ej := 1 TO 4 DO
+            LI[91] := LACT[ANY_TO_DINT(LI[93] + ej)] ;
+            IF LI[91] <> 0 THEN
+                LI[102] := LI[102] + 1 ;
+                LI[91] := LI[91] ;
+                LB[18] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+                IF LB[18] THEN
+                    LI[101] := LI[101] + 1 ;
+                END_IF ;
+            END_IF ;
+        END_FOR ;
+    END_IF ;
+
+    CASE LI[94] OF
+        1: LB[20] := (LI[102] > 0) AND (LI[101] = LI[102]) ;
+        2: LB[20] := (LI[101] > 0) ;
+        3: LB[20] := ((LI[101] MOD 2) = 1) ;
+        4: LB[20] := (LI[102] > 0) AND (LI[101] < LI[102]) ;
+        5: LB[20] := (LI[102] > 0) AND (LI[101] = 0) ;
+    ELSE
+        LB[20] := FALSE ;
+    END_CASE ;
+
+    CASE LACT[ANY_TO_DINT(LI[93] + 5)] OF
+        1: LB[22] := LB[20] AND NOT LB[ANY_TO_DINT(84 + ek)] AND NOT LB[3] ;
+        2: LB[22] := (NOT LB[20]) AND LB[ANY_TO_DINT(84 + ek)] AND NOT LB[3] ;
+    ELSE
+        LB[22] := LB[20] ;
+    END_CASE ;
+
+    LB[ANY_TO_DINT(84 + ek)] := LB[20] ;
+    LSIG[ANY_TO_DINT(40 + ek)] := LB[22] ;
+
+END_FOR ;
+
+(* ============================================================ *)
+(* §L2d - MEMORIAS M1..M16 (enclavamientos set / reset)         *)
+(* CFG[146 + 3k]: Set, Reset, Prioridad (0 gana reset, 1 gana set) *)
+(* Cualquier paro general (I3 o software) las borra: un          *)
+(* enclavamiento nunca re-energiza nada al soltar el paro.      *)
+(* ============================================================ *)
+
+FOR ek := 0 TO 15 DO
+
+    LI[93] := 146 + ek * 3 ;
+
+    IF LB[9] OR ((LACT[ANY_TO_DINT(LI[93])] = 0) AND (LACT[ANY_TO_DINT(LI[93] + 1)] = 0)) THEN
+        LB[ANY_TO_DINT(196 + ek)] := FALSE ;
+    ELSE
+        LI[91] := LACT[ANY_TO_DINT(LI[93])] ;
+        LB[23] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+        LI[91] := LACT[ANY_TO_DINT(LI[93] + 1)] ;
+        LB[24] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+        IF LACT[ANY_TO_DINT(LI[93] + 2)] = 1 THEN
+            IF LB[23] THEN
+                LB[ANY_TO_DINT(196 + ek)] := TRUE ;
+            ELSIF LB[24] THEN
+                LB[ANY_TO_DINT(196 + ek)] := FALSE ;
+            END_IF ;
+        ELSE
+            IF LB[24] THEN
+                LB[ANY_TO_DINT(196 + ek)] := FALSE ;
+            ELSIF LB[23] THEN
+                LB[ANY_TO_DINT(196 + ek)] := TRUE ;
+            END_IF ;
+        END_IF ;
+    END_IF ;
+
+    LSIG[ANY_TO_DINT(56 + ek)] := LB[ANY_TO_DINT(196 + ek)] ;
+
+END_FOR ;
+
+(* ============================================================ *)
+(* §L2e - TIMERS T1..T16 (base 100 ms, presets en decimas)      *)
+(* CFG[194 + 5k]: Tipo, Entrada, Reset, Preset, Preset2         *)
+(*   1 TON     : activo si la entrada sigue activa Preset        *)
+(*   2 TOF     : activo con la entrada y Preset despues de caer  *)
+(*   3 PULSO   : flanco de la entrada -> activo durante Preset   *)
+(*   4 RETARDO : flanco -> activo al cumplir Preset y se queda   *)
+(*               hasta Reset o el siguiente flanco               *)
+(*   5 TONR    : acumula mientras la entrada esta activa (no se  *)
+(*               borra al soltar); activo al llegar a Preset     *)
+(*   6 INTERMITENTE: mientras la entrada, Preset encendido /     *)
+(*               Preset2 apagado                                 *)
+(* Reset, tipo 0 o cualquier paro general -> acumulado en 0.     *)
+(* ============================================================ *)
+
+FOR ek := 0 TO 15 DO
+
+    LI[93] := 194 + ek * 5 ;
+    LI[113] := LACT[ANY_TO_DINT(LI[93])] ;
+    LI[111] := LACT[ANY_TO_DINT(LI[93] + 3)] ;
+    LI[112] := LACT[ANY_TO_DINT(LI[93] + 4)] ;
+    LI[91] := LACT[ANY_TO_DINT(LI[93] + 1)] ;
+    LB[23] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+    LI[91] := LACT[ANY_TO_DINT(LI[93] + 2)] ;
+    LB[24] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+
+    LB[22] := LB[23] AND NOT LB[ANY_TO_DINT(132 + ek)] AND NOT LB[3] ;
+    LB[ANY_TO_DINT(132 + ek)] := LB[23] ;
+    LI[116] := LI[ANY_TO_DINT(37 + ek)] ;
+    LB[57] := LB[ANY_TO_DINT(100 + ek)] ;
+    LB[58] := LB[ANY_TO_DINT(116 + ek)] ;
+
+    IF LB[24] OR (LI[113] = 0) OR LB[9] THEN
+
+        LI[116] := 0 ;
+        LB[57] := FALSE ;
+        LB[58] := FALSE ;
+
+    ELSIF LI[113] = 1 THEN
+
+        IF LB[23] THEN
+            IF LB[0] AND (LI[116] < LI[111]) THEN
+                LI[116] := LI[116] + 1 ;
+            END_IF ;
+            LB[57] := (LI[116] >= LI[111]) ;
+        ELSE
+            LI[116] := 0 ;
+            LB[57] := FALSE ;
+        END_IF ;
+
+    ELSIF LI[113] = 2 THEN
+
+        IF LB[23] THEN
+            LI[116] := 0 ;
+            LB[57] := TRUE ;
+            LB[58] := TRUE ;
+        ELSIF LB[58] THEN
+            IF LB[0] AND (LI[116] < LI[111]) THEN
+                LI[116] := LI[116] + 1 ;
+            END_IF ;
+            IF LI[116] >= LI[111] THEN
+                LB[58] := FALSE ;
+                LB[57] := FALSE ;
+            END_IF ;
+        ELSE
+            LB[57] := FALSE ;
+        END_IF ;
+
+    ELSIF LI[113] = 3 THEN
+
+        IF LB[22] AND NOT LB[58] THEN
+            LB[58] := TRUE ;
+            LI[116] := 0 ;
+        END_IF ;
+        IF LB[58] THEN
+            IF LB[0] AND (LI[116] < LI[111]) THEN
+                LI[116] := LI[116] + 1 ;
+            END_IF ;
+            IF LI[116] >= LI[111] THEN
+                LB[58] := FALSE ;
+                LB[57] := FALSE ;
+            ELSE
+                LB[57] := TRUE ;
+            END_IF ;
+        ELSE
+            LB[57] := FALSE ;
+        END_IF ;
+
+    ELSIF LI[113] = 4 THEN
+
+        IF LB[22] THEN
+            LB[58] := TRUE ;
+            LI[116] := 0 ;
+            LB[57] := FALSE ;
+        END_IF ;
+        IF LB[58] THEN
+            IF LB[0] AND (LI[116] < LI[111]) THEN
+                LI[116] := LI[116] + 1 ;
+            END_IF ;
+            IF LI[116] >= LI[111] THEN
+                LB[58] := FALSE ;
+                LB[57] := TRUE ;
+            END_IF ;
+        END_IF ;
+
+    ELSIF LI[113] = 5 THEN
+
+        IF LB[23] AND LB[0] AND (LI[116] < LI[111]) THEN
+            LI[116] := LI[116] + 1 ;
+        END_IF ;
+        LB[57] := (LI[116] >= LI[111]) ;
+
+    ELSIF LI[113] = 6 THEN
+
+        IF LB[23] THEN
+            IF LB[22] THEN
+                LB[58] := TRUE ;
+                LI[116] := 0 ;
+            END_IF ;
+            IF LB[0] THEN
+                LI[116] := LI[116] + 1 ;
+            END_IF ;
+            IF LB[58] THEN
+                IF LI[116] >= LI[111] THEN
+                    LB[58] := FALSE ;
+                    LI[116] := 0 ;
+                END_IF ;
+            ELSIF LI[116] >= LI[112] THEN
+                LB[58] := TRUE ;
+                LI[116] := 0 ;
+            END_IF ;
+            LB[57] := LB[58] ;
+        ELSE
+            LI[116] := 0 ;
+            LB[58] := FALSE ;
+            LB[57] := FALSE ;
+        END_IF ;
+
+    END_IF ;
+
+    LI[ANY_TO_DINT(37 + ek)] := LI[116] ;
+    LB[ANY_TO_DINT(100 + ek)] := LB[57] ;
+    LB[ANY_TO_DINT(116 + ek)] := LB[58] ;
+    LSIG[ANY_TO_DINT(72 + ek)] := LB[57] ;
+
+END_FOR ;
+
+(* ============================================================ *)
+(* §L2f - CONTADORES CT1..CT16                                  *)
+(* CFG[274 + 5k]: Sube, Baja, Reset, Preset, Modo                *)
+(*   Cuenta FLANCOS de subida de cualquier senal.               *)
+(*   Modo 0 una vez : activo al llegar a Preset, hasta Reset    *)
+(*   Modo 1 ciclico : pulso de un scan cada Preset y vuelve a 0 *)
+(*   Modo 2 nivel   : activo mientras la cuenta >= Preset       *)
+(* Los paros generales NO borran la cuenta (igual que en v5).   *)
+(* ============================================================ *)
+
+FOR ek := 0 TO 15 DO
+
+    LI[93] := 274 + ek * 5 ;
+    LI[111] := LACT[ANY_TO_DINT(LI[93] + 3)] ;
+    LI[114] := LACT[ANY_TO_DINT(LI[93] + 4)] ;
+    LI[91] := LACT[ANY_TO_DINT(LI[93])] ;
+    LB[23] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+    LI[91] := LACT[ANY_TO_DINT(LI[93] + 1)] ;
+    LB[25] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+    LI[91] := LACT[ANY_TO_DINT(LI[93] + 2)] ;
+    LB[24] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+
+    LB[22] := LB[23] AND NOT LB[ANY_TO_DINT(164 + ek)] AND NOT LB[3] ;
+    LB[20] := LB[25] AND NOT LB[ANY_TO_DINT(180 + ek)] AND NOT LB[3] ;
+    LB[ANY_TO_DINT(164 + ek)] := LB[23] ;
+    LB[ANY_TO_DINT(180 + ek)] := LB[25] ;
+
+    IF LB[24] OR ((LACT[ANY_TO_DINT(LI[93])] = 0) AND (LACT[ANY_TO_DINT(LI[93] + 1)] = 0)) THEN
+
+        LI[ANY_TO_DINT(53 + ek)] := 0 ;
+        LB[ANY_TO_DINT(148 + ek)] := FALSE ;
+
+    ELSE
+
+        IF LI[114] = 1 THEN
+            LB[ANY_TO_DINT(148 + ek)] := FALSE ;
+        END_IF ;
+        IF LB[22] AND (LI[ANY_TO_DINT(53 + ek)] < 32767) THEN
+            LI[ANY_TO_DINT(53 + ek)] := LI[ANY_TO_DINT(53 + ek)] + 1 ;
+        END_IF ;
+        IF LB[20] AND (LI[ANY_TO_DINT(53 + ek)] > 0) THEN
+            LI[ANY_TO_DINT(53 + ek)] := LI[ANY_TO_DINT(53 + ek)] - 1 ;
+        END_IF ;
+
+        IF LI[114] = 0 THEN
+            IF (LI[111] > 0) AND (LI[ANY_TO_DINT(53 + ek)] >= LI[111]) THEN
+                LB[ANY_TO_DINT(148 + ek)] := TRUE ;
+            END_IF ;
+        ELSIF LI[114] = 1 THEN
+            IF (LI[111] > 0) AND (LI[ANY_TO_DINT(53 + ek)] >= LI[111]) THEN
+                LB[ANY_TO_DINT(148 + ek)] := TRUE ;
+                LI[ANY_TO_DINT(53 + ek)] := 0 ;
+            END_IF ;
+        ELSE
+            LB[ANY_TO_DINT(148 + ek)] := (LI[111] > 0) AND (LI[ANY_TO_DINT(53 + ek)] >= LI[111]) ;
+        END_IF ;
+
+    END_IF ;
+
+    LSIG[ANY_TO_DINT(88 + ek)] := LB[ANY_TO_DINT(148 + ek)] ;
+
+END_FOR ;
+
+(* ============================================================ *)
+(* §L2g - SECUENCIAS SQ1 y SQ2 (maquinas de etapas)             *)
+(* Cabecera CFG[354 + 140k]: Inicio, Paro, Reset, Pausa, Modo      *)
+(*   (0 una vez, 1 infinita, 2 repetir), Repeticiones, Pasos,   *)
+(*   Exclusiva, PausaApaga.                                     *)
+(* Paso i (CFG[cabecera + 12 + 8(i-1)]): Salidas (bits Q1..Q12),*)
+(*   Motor (b0 marcha b1 paro b2 dir1 b3 dir2 b4 invertir al    *)
+(*   entrar), Avanza (0 tiempo 1 senal 2 tiempo Y senal 3 senal *)
+(*   O tiempo 4 flanco), Senal, Tiempo, Siguiente (0 = el que   *)
+(*   sigue, 1..16, 17 = fin), SenalAlterna, IrA (rama: si la     *)
+(*   senal alterna se activa, salta a IrA antes que nada).      *)
+(* Inicio por FLANCO; Paro y Reset por nivel; un paro general   *)
+(* aborta la secuencia y no vuelve sola al soltarlo.            *)
+(* ============================================================ *)
+
+LB[31] := FALSE ;
+LB[32] := FALSE ;
+LB[33] := FALSE ;
+LB[34] := FALSE ;
+LB[35] := FALSE ;
+LB[36] := FALSE ;
+
+FOR ej := 0 TO 1 DO
+
+    LI[104] := 354 + ej * 140 ;
+    LI[106] := 75 + ej * 8 ;
+    LI[107] := 290 + ej * 10 ;
+    LI[108] := 104 + ej * 20 ;
+    LI[109] := LACT[ANY_TO_DINT(LI[104] + 6)] ;
+
+    LI[91] := LACT[ANY_TO_DINT(LI[104])] ;
+    LB[37] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+    LI[91] := LACT[ANY_TO_DINT(LI[104] + 1)] ;
+    LB[38] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+    LI[91] := LACT[ANY_TO_DINT(LI[104] + 2)] ;
+    LB[39] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+    LI[91] := LACT[ANY_TO_DINT(LI[104] + 3)] ;
+    LB[40] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+
+    LB[48] := LB[37] AND NOT LB[ANY_TO_DINT(LI[107] + 4)] AND NOT LB[3] ;
+    LB[ANY_TO_DINT(LI[107] + 4)] := LB[37] ;
+    LB[ANY_TO_DINT(LI[107] + 3)] := FALSE ;
+    LB[ANY_TO_DINT(LI[107] + 6)] := FALSE ;
+
+    IF (LI[109] = 0) OR LB[3] OR LB[9] OR LB[38] OR LB[39] THEN
+
+        LB[ANY_TO_DINT(LI[107] + 0)] := FALSE ;
+        LB[ANY_TO_DINT(LI[107] + 1)] := FALSE ;
+        LB[ANY_TO_DINT(LI[107] + 2)] := FALSE ;
+        LI[ANY_TO_DINT(LI[106] + 0)] := 0 ;
+        LI[ANY_TO_DINT(LI[106] + 1)] := 0 ;
+        IF NOT LB[38] OR LB[39] THEN
+            LI[ANY_TO_DINT(LI[106] + 2)] := 0 ;
+        END_IF ;
+
+    ELSIF NOT LB[ANY_TO_DINT(LI[107] + 0)] THEN
+
+        IF LB[48] THEN
+            LB[ANY_TO_DINT(LI[107] + 0)] := TRUE ;
+            LB[ANY_TO_DINT(LI[107] + 2)] := FALSE ;
+            LI[ANY_TO_DINT(LI[106] + 0)] := 1 ;
+            LI[ANY_TO_DINT(LI[106] + 1)] := 0 ;
+            LI[ANY_TO_DINT(LI[106] + 2)] := 0 ;
+            LB[ANY_TO_DINT(LI[107] + 6)] := TRUE ;
+        END_IF ;
+
+    ELSE
+
+        LB[ANY_TO_DINT(LI[107] + 1)] := LB[40] ;
+
+        IF NOT LB[40] THEN
+
+            IF LB[0] AND (LI[ANY_TO_DINT(LI[106] + 1)] < 32767) THEN
+                LI[ANY_TO_DINT(LI[106] + 1)] := LI[ANY_TO_DINT(LI[106] + 1)] + 1 ;
+            END_IF ;
+
+            LI[105] := LI[104] + 12 + (LI[ANY_TO_DINT(LI[106] + 0)] - 1) * 8 ;
+            LI[111] := LACT[ANY_TO_DINT(LI[105] + 4)] ;
+            LI[91] := LACT[ANY_TO_DINT(LI[105] + 3)] ;
+            LB[43] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+
+            LB[41] := FALSE ;
+            LI[110] := 0 ;
+
+            IF LACT[ANY_TO_DINT(LI[105] + 6)] <> 0 THEN
+                LI[91] := LACT[ANY_TO_DINT(LI[105] + 6)] ;
+                LB[20] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+                IF LB[20] THEN
+                    LB[41] := TRUE ;
+                    LI[110] := LACT[ANY_TO_DINT(LI[105] + 7)] ;
+                END_IF ;
+            END_IF ;
+
+            IF NOT LB[41] THEN
+                LB[42] := (LI[ANY_TO_DINT(LI[106] + 1)] >= LI[111]) ;
+                LB[22] := LB[43] AND NOT LB[ANY_TO_DINT(LI[107] + 5)] ;
+                CASE LACT[ANY_TO_DINT(LI[105] + 2)] OF
+                    0: LB[41] := LB[42] ;
+                    1: LB[41] := LB[43] ;
+                    2: LB[41] := LB[42] AND LB[43] ;
+                    3: LB[41] := LB[43] OR ((LI[111] > 0) AND LB[42]) ;
+                    4: LB[41] := LB[22] ;
+                ELSE
+                    LB[41] := FALSE ;
+                END_CASE ;
+                LI[110] := LACT[ANY_TO_DINT(LI[105] + 5)] ;
+            END_IF ;
+
+            LB[ANY_TO_DINT(LI[107] + 5)] := LB[43] ;
+
+            IF LB[41] THEN
+
+                IF LI[110] <= 0 THEN
+                    LI[110] := LI[ANY_TO_DINT(LI[106] + 0)] + 1 ;
+                END_IF ;
+
+                IF (LI[110] = 17) OR (LI[110] > LI[109]) THEN
+                    (* fin de una vuelta completa *)
+                    IF LI[ANY_TO_DINT(LI[106] + 2)] < 32767 THEN
+                        LI[ANY_TO_DINT(LI[106] + 2)] := LI[ANY_TO_DINT(LI[106] + 2)] + 1 ;
+                    END_IF ;
+                    LB[ANY_TO_DINT(LI[107] + 3)] := TRUE ;
+                    IF LI[110] = 17 THEN
+                        LI[110] := 0 ;
+                    ELSIF LACT[ANY_TO_DINT(LI[104] + 4)] = 1 THEN
+                        LI[110] := 1 ;
+                    ELSIF (LACT[ANY_TO_DINT(LI[104] + 4)] = 2) AND (LI[ANY_TO_DINT(LI[106] + 2)] < LACT[ANY_TO_DINT(LI[104] + 5)]) THEN
+                        LI[110] := 1 ;
+                    ELSE
+                        LI[110] := 0 ;
+                    END_IF ;
+                END_IF ;
+
+                IF LI[110] = 0 THEN
+                    LB[ANY_TO_DINT(LI[107] + 0)] := FALSE ;
+                    LB[ANY_TO_DINT(LI[107] + 2)] := TRUE ;
+                    LI[ANY_TO_DINT(LI[106] + 0)] := 0 ;
+                ELSE
+                    LI[ANY_TO_DINT(LI[106] + 0)] := LI[110] ;
+                    LB[ANY_TO_DINT(LI[107] + 6)] := TRUE ;
+                END_IF ;
+                LI[ANY_TO_DINT(LI[106] + 1)] := 0 ;
+
+            END_IF ;
+
+        END_IF ;
+
+    END_IF ;
+
+    (* Al entrar a un paso, una senal que YA estaba activa no      *)
+    (* cuenta como flanco: "flanco" espera un evento NUEVO.        *)
+    IF LB[ANY_TO_DINT(LI[107] + 6)] THEN
+        LI[105] := LI[104] + 12 + (LI[ANY_TO_DINT(LI[106] + 0)] - 1) * 8 ;
+        LI[91] := LACT[ANY_TO_DINT(LI[105] + 3)] ;
+        LB[43] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+        LB[ANY_TO_DINT(LI[107] + 5)] := LB[43] ;
+    END_IF ;
+
+    (* Lo que pide el paso actual (salidas y motor). *)
+    LB[49] := LB[ANY_TO_DINT(LI[107] + 0)] AND NOT (LB[ANY_TO_DINT(LI[107] + 1)] AND LB[ANY_TO_DINT(LI[107] + 8)]) ;
+    IF LB[49] THEN
+        LI[105] := LI[104] + 12 + (LI[ANY_TO_DINT(LI[106] + 0)] - 1) * 8 ;
+        LI[ANY_TO_DINT(LI[106] + 3)] := LACT[ANY_TO_DINT(LI[105] + 0)] ;
+        LI[ANY_TO_DINT(LI[106] + 4)] := LACT[ANY_TO_DINT(LI[105] + 1)] ;
+    ELSE
+        LI[ANY_TO_DINT(LI[106] + 3)] := 0 ;
+        LI[ANY_TO_DINT(LI[106] + 4)] := 0 ;
+    END_IF ;
+
+    LI[99] := LI[ANY_TO_DINT(LI[106] + 3)] ;
+    FOR em := 0 TO 11 DO
+        LB[ANY_TO_DINT(334 + ej * 12 + em)] := (LI[99] MOD 2) = 1 ;
+        LI[99] := LI[99] / 2 ;
+    END_FOR ;
+
+    LI[99] := LI[ANY_TO_DINT(LI[106] + 4)] ;
+    IF (LI[99] MOD 2) = 1 THEN LB[31] := TRUE ; END_IF ;
+    LI[99] := LI[99] / 2 ;
+    IF (LI[99] MOD 2) = 1 THEN LB[32] := TRUE ; END_IF ;
+    LI[99] := LI[99] / 2 ;
+    IF (LI[99] MOD 2) = 1 THEN LB[33] := TRUE ; END_IF ;
+    LI[99] := LI[99] / 2 ;
+    IF (LI[99] MOD 2) = 1 THEN LB[34] := TRUE ; END_IF ;
+    LI[99] := LI[99] / 2 ;
+    IF ((LI[99] MOD 2) = 1) AND LB[ANY_TO_DINT(LI[107] + 6)] THEN LB[35] := TRUE ; END_IF ;
+
+    IF LB[ANY_TO_DINT(LI[107] + 0)] AND LB[ANY_TO_DINT(LI[107] + 7)] AND LB[ANY_TO_DINT(358 + ej)] THEN
+        LB[36] := TRUE ;
+    END_IF ;
+
+    LSIG[ANY_TO_DINT(LI[108])] := LB[ANY_TO_DINT(LI[107] + 0)] ;
+    LSIG[ANY_TO_DINT(LI[108] + 1)] := LB[ANY_TO_DINT(LI[107] + 0)] AND LB[ANY_TO_DINT(LI[107] + 1)] ;
+    LSIG[ANY_TO_DINT(LI[108] + 2)] := LB[ANY_TO_DINT(LI[107] + 2)] ;
+    LSIG[ANY_TO_DINT(LI[108] + 3)] := LB[ANY_TO_DINT(LI[107] + 3)] ;
+    FOR em := 0 TO 15 DO
+        LSIG[ANY_TO_DINT(LI[108] + 4 + em)] := LB[ANY_TO_DINT(LI[107] + 0)] AND (LI[ANY_TO_DINT(LI[106] + 0)] = em + 1) ;
+    END_FOR ;
+
+END_FOR ;
+
+(* ============================================================ *)
+(* §L2h - MOTOR (VFD): UNA SOLA MAQUINA DE ESTADOS              *)
+(*  0 PARADO ---(quiere marcha)---------------> 1 MARCHA        *)
+(*  1 MARCHA ---(cambia la direccion pedida)--> 2 FRENANDO      *)
+(*  2 FRENANDO -(t >= paro_inversion Y VFD en cero)-> 1         *)
+(*  cualquier paro / config no lista ---------> 0               *)
+(* CFG[20..27]: Arranque, Paro, Modo (0 enclavado 1 mientras),*)
+(*   Pausa, Dir1, Dir2, Invertir, ParoInversion (0.1 s, >= 1 s) *)
+(* "mientras": tras un paro hay que soltar el arranque antes de *)
+(* volver a moverse (RunArmed): nunca arranca solo.             *)
+(* ============================================================ *)
+
+LI[91] := LACT[20] ;
+LB[50] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+LI[91] := LACT[21] ;
+LB[51] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+LI[91] := LACT[23] ;
+LB[52] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+LI[91] := LACT[24] ;
+LB[53] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+LI[91] := LACT[25] ;
+LB[54] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+LI[91] := LACT[26] ;
+LB[55] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+
+LB[27] := LB[50] AND NOT LB[10] AND NOT LB[3] ;
+LB[28] := LB[53] AND NOT LB[11] AND NOT LB[3] ;
+LB[29] := LB[54] AND NOT LB[12] AND NOT LB[3] ;
+LB[30] := LB[55] AND NOT LB[13] AND NOT LB[3] ;
+LB[10] := LB[50] ;
+LB[11] := LB[53] ;
+LB[12] := LB[54] ;
+LB[13] := LB[55] ;
+
+LB[15] := MotionCfgPresent AND CfgReady AND CfgValid AND
+                (InitSeqState = 0) AND NOT GenStop ;
+
+IF (NOT LB[15]) OR LB[3] THEN
+    LB[6] := FALSE ;
+ELSIF NOT LB[50] THEN
+    LB[6] := TRUE ;
+END_IF ;
+
+IF NOT LB[15] THEN
+    LB[5] := FALSE ;
+ELSIF LACT[22] = 1 THEN
+    LB[5] := LB[50] AND LB[6] AND NOT LB[51] ;
+ELSIF LB[51] THEN
+    LB[5] := FALSE ;
+ELSIF LB[27] THEN
+    LB[5] := TRUE ;
+END_IF ;
+
+IF LB[28] OR LB[33] THEN
+    LI[15] := 1 ;
+END_IF ;
+IF LB[29] OR LB[34] THEN
+    LI[15] := 2 ;
+END_IF ;
+IF LB[30] OR LB[35] THEN
+    IF LI[15] = 1 THEN LI[15] := 2 ; ELSE LI[15] := 1 ; END_IF ;
+END_IF ;
+
+IF LB[36] THEN
+    LB[16] := LB[31] AND NOT LB[32] ;
+ELSE
+    LB[16] := (LB[5] OR LB[31]) AND NOT LB[32] ;
+END_IF ;
+
+IF LB[52] OR LB[51] OR NOT LB[15] THEN
+    LB[16] := FALSE ;
+END_IF ;
+
+IF LB[7] THEN
+    LI[18] := 1 ;
+ELSIF LB[8] THEN
+    LI[18] := 2 ;
+ELSIF NOT LB[15] THEN
+    LI[18] := 5 ;
+ELSIF LB[51] THEN
+    LI[18] := 3 ;
+ELSIF LB[52] THEN
+    LI[18] := 4 ;
+ELSIF LB[32] THEN
+    LI[18] := 6 ;
+ELSE
+    LI[18] := 0 ;
+END_IF ;
+
+LI[17] := LACT[27] ;
+IF LI[17] < 10 THEN
+    LI[17] := 10 ;
+END_IF ;
+
+IF (NOT LB[15]) AND (LI[13] <> 0) THEN
+    LI[13] := 0 ;
+    LI[16] := 0 ;
+END_IF ;
+
+IF LB[0] AND (LI[13] <> 1) AND (LI[16] < 32767) THEN
+    LI[16] := LI[16] + 1 ;
+END_IF ;
+
+LB[14] := (LI[16] >= LI[17]) AND
+               ((LI[22] < 50) OR (LI[16] >= LI[17] + 50)) ;
+
+IF LI[13] = 0 THEN
+
+    IF (LI[15] <> LI[14]) AND LB[14] THEN
+        LI[14] := LI[15] ;
+    END_IF ;
+    IF LB[16] AND (LI[15] = LI[14]) THEN
+        LI[13] := 1 ;
+    END_IF ;
+
+ELSIF LI[13] = 1 THEN
+
+    IF NOT LB[16] THEN
+        LI[13] := 0 ;
+        LI[16] := 0 ;
+    ELSIF LI[15] <> LI[14] THEN
+        LI[13] := 2 ;
+        LI[16] := 0 ;
+    END_IF ;
+
+ELSIF LI[13] = 2 THEN
+
+    IF LB[14] THEN
+        LI[14] := LI[15] ;
+        IF LB[16] THEN
+            LI[13] := 1 ;
+        ELSE
+            LI[13] := 0 ;
+        END_IF ;
+    ELSIF NOT LB[16] THEN
+        LI[13] := 0 ;
+    END_IF ;
+
+ELSE
+
+    LI[13] := 0 ;
+
+END_IF ;
+
+IF LI[13] = 1 THEN
+    IF LI[14] = 2 THEN
+        VFD_Control := 34 ;
+    ELSE
+        VFD_Control := 18 ;
+    END_IF ;
+    BandRunning := TRUE ;
+ELSE
+    VFD_Control := 1 ;
+    BandRunning := FALSE ;
+END_IF ;
+
+BandEnable := LB[5] ;
+
+IF NOT GenStop THEN
+    StopReason := 0 ;
+END_IF ;
+
+(* ============================================================ *)
+(* §L2i - SALIDAS                                               *)
+(* CFG[30..41]: senal que enciende Q1..Q12.                  *)
+(* Se suman (OR) las salidas del paso activo de cada secuencia; *)
+(* una secuencia EXCLUSIVA activa manda sola sobre las salidas  *)
+(* que usa. Solo se escriben las salidas cableadas (§L0).       *)
+(* Paro de emergencia I3: solo las lamparas de luces_paro.      *)
+(* Paro por software: se apagan las salidas que no son lampara. *)
+(* Plumas: subir Y bajar a la vez -> ambas apagadas (falla).    *)
+(* ============================================================ *)
+
+FOR ek := 0 TO 11 DO
+
+    LI[91] := LACT[ANY_TO_DINT(30 + ek)] ;
+    LB[23] := LSIG[ANY_TO_DINT(LI[91] MOD 1000)] XOR (LI[91] >= 1000) ;
+    LB[45] := FALSE ;
+    LB[44] := FALSE ;
+    FOR ej := 0 TO 1 DO
+        IF LB[ANY_TO_DINT(334 + ej * 12 + ek)] THEN
+            LB[45] := TRUE ;
+        END_IF ;
+        IF LB[ANY_TO_DINT(290 + ej * 10 + 0)] AND LB[ANY_TO_DINT(290 + ej * 10 + 7)]
+           AND LB[ANY_TO_DINT(310 + ej * 12 + ek)] THEN
+            LB[44] := TRUE ;
+        END_IF ;
+    END_FOR ;
+
+    IF LB[44] THEN
+        LB[ANY_TO_DINT(212 + ek)] := LB[45] ;
+    ELSE
+        LB[ANY_TO_DINT(212 + ek)] := LB[23] OR LB[45] ;
+    END_IF ;
+    LB[ANY_TO_DINT(212 + ek)] := LB[ANY_TO_DINT(212 + ek)] AND LB[ANY_TO_DINT(240 + ek)] ;
+
+    IF LB[7] THEN
+        LB[ANY_TO_DINT(212 + ek)] := LB[ANY_TO_DINT(264 + ek)] AND LB[ANY_TO_DINT(252 + ek)] AND LB[ANY_TO_DINT(240 + ek)] ;
+    ELSIF LB[8] THEN
+        LB[ANY_TO_DINT(212 + ek)] := LB[ANY_TO_DINT(212 + ek)] AND LB[ANY_TO_DINT(252 + ek)] ;
+    END_IF ;
+
+    LB[ANY_TO_DINT(224 + ek)] := LB[ANY_TO_DINT(212 + ek)] ;
+
+END_FOR ;
+
+LI[19] := 0 ;
+
+(* ---------- PLUMA 1: Q8 sube / Q9 baja ---------- *)
+LB[46] := LB[219] ;
+LB[47] := LB[220] ;
+IF LB[46] AND LB[47] THEN
+    LI[115] := 0 ;
+    LI[19] := LI[19] + 1 ;
+ELSIF LB[46] THEN
+    LI[115] := 1 ;
+ELSIF LB[47] THEN
+    LI[115] := 2 ;
+ELSE
+    LI[115] := 0 ;
+    (* comando manual del panel (R60/R61) si la logica no pide nada *)
+    IF NOT LB[9] AND ((Pluma1Cmd = 1) OR (Pluma1Cmd = 2)) THEN
+        LI[115] := Pluma1Cmd ;
+    END_IF ;
+END_IF ;
+IF LI[115] <> LI[71] THEN
+    LI[69] := 0 ;
+    LB[236] := FALSE ;
+END_IF ;
+LI[71] := LI[115] ;
+IF LI[115] <> 0 THEN
+    IF LB[0] AND (LI[69] < 32767) THEN
+        LI[69] := LI[69] + 1 ;
+    END_IF ;
+    IF (LACT[9] > 0) AND (LI[69] >= LACT[9]) THEN
+        LB[236] := TRUE ;
+    END_IF ;
+END_IF ;
+IF LB[236] THEN
+    LI[115] := 0 ;
+    LI[19] := LI[19] + 2 ;
+END_IF ;
+LI[73] := LI[115] ;
+LB[231] := (LI[115] = 1) ;
+LB[232] := (LI[115] = 2) ;
+
+(* ---------- PLUMA 2: Q6 sube / Q7 baja ---------- *)
+LB[46] := LB[217] ;
+LB[47] := LB[218] ;
+IF LB[46] AND LB[47] THEN
+    LI[115] := 0 ;
+    LI[19] := LI[19] + 4 ;
+ELSIF LB[46] THEN
+    LI[115] := 1 ;
+ELSIF LB[47] THEN
+    LI[115] := 2 ;
+ELSE
+    LI[115] := 0 ;
+    (* comando manual del panel (R60/R61) si la logica no pide nada *)
+    IF NOT LB[9] AND ((Pluma2Cmd = 1) OR (Pluma2Cmd = 2)) THEN
+        LI[115] := Pluma2Cmd ;
+    END_IF ;
+END_IF ;
+IF LI[115] <> LI[72] THEN
+    LI[70] := 0 ;
+    LB[237] := FALSE ;
+END_IF ;
+LI[72] := LI[115] ;
+IF LI[115] <> 0 THEN
+    IF LB[0] AND (LI[70] < 32767) THEN
+        LI[70] := LI[70] + 1 ;
+    END_IF ;
+    IF (LACT[9] > 0) AND (LI[70] >= LACT[9]) THEN
+        LB[237] := TRUE ;
+    END_IF ;
+END_IF ;
+IF LB[237] THEN
+    LI[115] := 0 ;
+    LI[19] := LI[19] + 8 ;
+END_IF ;
+LI[74] := LI[115] ;
+LB[229] := (LI[115] = 1) ;
+LB[230] := (LI[115] = 2) ;
+
+(* ---------- salidas fisicas de esta banda ---------- *)
+PhQ3 := LB[226] ;
+PhQ4 := LB[227] ;
+PhQ5 := LB[228] ;
+PhQ6 := LB[229] ;
+PhQ7 := LB[230] ;
+PhQ8 := LB[231] ;
+PhQ9 := LB[232] ;
+(* Q1, Q2 y Q10..Q12 no existen en la banda: no se escriben.  *)
+
+Pluma1Status := LI[73] ;
+Pluma2Status := LI[74] ;
+
+tVerde    := PhQ3 ;
+tAmarilla := PhQ4 ;
+tRoja     := PhQ5 ;
+
+LB[56] := LB[3] ;
+LB[2] := FALSE ;
+
+END_IF ;
+
+
+(* ============================================================ *)
+(* §L3 - ESTADO DEL MOTOR v7 -> LSTA (%R1700..%R1799, solo lectura)  *)
+(* Se escribe SIEMPRE (tambien en modo v5): LSTA[0] = 7 y       *)
+(* LSTA[1] = 19521 identifican este programa ante el backend.   *)
+(* ============================================================ *)
+
+LSTA[0] := 7 ;
+LSTA[1] := 19521 ;
+LSTA[2] := LI[8] ;
+LSTA[3] := LI[10] ;
+LSTA[4] := LI[0] ;
+LSTA[5] := LI[1] ;
+LSTA[6] := LI[20] ;
+LSTA[7] := LI[2] ;
+LSTA[8] := LI[3] ;
+LSTA[9] := LI[4] ;
+LSTA[10] := LI[5] ;
+IF LB[4] THEN LSTA[11] := 1 ; ELSE LSTA[11] := 0 ; END_IF ;
+IF CfgReady THEN LSTA[12] := 1 ; ELSE LSTA[12] := 0 ; END_IF ;
+LSTA[13] := LI[13] ;
+LSTA[14] := LI[14] ;
+LSTA[15] := LI[15] ;
+IF LB[5] THEN LSTA[16] := 1 ; ELSE LSTA[16] := 0 ; END_IF ;
+LSTA[17] := LI[18] ;
+
+LI[100] := 0 ;
+LI[99] := 1 ;
+FOR ek := 0 TO 11 DO
+    IF LB[4] THEN
+        LB[23] := LB[ANY_TO_DINT(72 + ek)] ;
+    ELSE
+        LB[23] := LB[ANY_TO_DINT(60 + ek)] ;
+    END_IF ;
+    IF LB[23] THEN LI[100] := LI[100] + LI[99] ; END_IF ;
+    LI[99] := LI[99] * 2 ;
+END_FOR ;
+LSTA[18] := LI[100] ;
+
+LI[100] := 0 ;
+IF PhQ3 THEN LI[100] := LI[100] + 4 ; END_IF ;
+IF PhQ4 THEN LI[100] := LI[100] + 8 ; END_IF ;
+IF PhQ5 THEN LI[100] := LI[100] + 16 ; END_IF ;
+IF PhQ6 THEN LI[100] := LI[100] + 32 ; END_IF ;
+IF PhQ7 THEN LI[100] := LI[100] + 64 ; END_IF ;
+IF PhQ8 THEN LI[100] := LI[100] + 128 ; END_IF ;
+IF PhQ9 THEN LI[100] := LI[100] + 256 ; END_IF ;
+LSTA[19] := LI[100] ;
+
+(* C1..C16, M1..M16, T1..T16 y CT1..CT16: 8 bits por palabra. *)
+FOR ej := 0 TO 7 DO
+    LI[100] := 0 ;
+    LI[99] := 1 ;
+    FOR ek := 0 TO 7 DO
+        IF LSIG[ANY_TO_DINT(40 + ej * 8 + ek)] THEN LI[100] := LI[100] + LI[99] ; END_IF ;
+        LI[99] := LI[99] * 2 ;
+    END_FOR ;
+    LSTA[ANY_TO_DINT(20 + ej)] := LI[100] ;
+END_FOR ;
+
+FOR ej := 0 TO 1 DO
+    LI[106] := 75 + ej * 8 ;
+    LI[107] := 290 + ej * 10 ;
+    LI[93] := 28 + ej * 4 ;
+    IF LB[ANY_TO_DINT(LI[107] + 0)] AND LB[ANY_TO_DINT(LI[107] + 1)] THEN
+        LSTA[ANY_TO_DINT(LI[93])] := 2 ;
+    ELSIF LB[ANY_TO_DINT(LI[107] + 0)] THEN
+        LSTA[ANY_TO_DINT(LI[93])] := 1 ;
+    ELSIF LB[ANY_TO_DINT(LI[107] + 2)] THEN
+        LSTA[ANY_TO_DINT(LI[93])] := 3 ;
+    ELSE
+        LSTA[ANY_TO_DINT(LI[93])] := 0 ;
+    END_IF ;
+    LSTA[ANY_TO_DINT(LI[93] + 1)] := LI[ANY_TO_DINT(LI[106] + 0)] ;
+    LSTA[ANY_TO_DINT(LI[93] + 2)] := LI[ANY_TO_DINT(LI[106] + 1)] ;
+    LSTA[ANY_TO_DINT(LI[93] + 3)] := LI[ANY_TO_DINT(LI[106] + 2)] ;
+END_FOR ;
+
+FOR ek := 0 TO 15 DO
+    LSTA[ANY_TO_DINT(36 + ek)] := LI[ANY_TO_DINT(37 + ek)] ;
+    LSTA[ANY_TO_DINT(52 + ek)] := LI[ANY_TO_DINT(53 + ek)] ;
+END_FOR ;
+
+LSTA[68] := LI[19] ;
+LSTA[69] := LI[16] ;
+
+LI[100] := 0 ;
+LI[95] := 0 ;
+LI[99] := 1 ;
+FOR ek := 0 TO 11 DO
+    IF LB[ANY_TO_DINT(240 + ek)] THEN LI[100] := LI[100] + LI[99] ; END_IF ;
+    IF LB[ANY_TO_DINT(252 + ek)] THEN LI[95] := LI[95] + LI[99] ; END_IF ;
+    LI[99] := LI[99] * 2 ;
+END_FOR ;
+LSTA[70] := LI[100] ;
+LSTA[72] := LI[95] ;
+LSTA[71] := 31 ;    (* I1..I5 cableadas (ver §L0) *)
+LSTA[73] := LI[7] ;
+LSTA[74] := 640 ;
+LSTA[75] := LI[21] ;
+
+
+(* ============================================================ *)
+
+
+(* §18 - FEEDBACK AL BACKEND                                  *)
+(* ============================================================ *)
+
+IF BandEnable THEN
+
+    BandEnable_Reg := 1 ;
+
+ELSE
+
+    BandEnable_Reg := 0 ;
+
+END_IF ;
+
+
+IF BandRunning THEN
+
+    IF LI[14] = 2 THEN
+
+        BandStatus := 2 ;
+
+    ELSE
+
+        BandStatus := 1 ;
+
+    END_IF ;
+
+ELSE
+
+    BandStatus := 0 ;
+
+END_IF ;
+
+
+IF S1_EventActive THEN
+    S1_EventActive_Reg := 1 ;
+ELSE
+    S1_EventActive_Reg := 0 ;
+END_IF ;
+
+IF S2_EventActive THEN
+    S2_EventActive_Reg := 1 ;
+ELSE
+    S2_EventActive_Reg := 0 ;
+END_IF ;
+
+
+IF S1_CountDone THEN
+
+    S1_CountDone_Reg := 1 ;
+
+ELSE
+
+    S1_CountDone_Reg := 0 ;
+
+END_IF ;
+
+
+IF S2_CountDone THEN
+
+    S2_CountDone_Reg := 1 ;
+
+ELSE
+
+    S2_CountDone_Reg := 0 ;
+
+END_IF ;
+
+
+
+(* ============================================================ *)
+(* §19 - MONITOREO / DIAGNOSTICO DE ENTRADAS Y SALIDAS        *)
+(*                                                            *)
+(* Registros R100..R121 son SOLO DE MONITOREO.                *)
+(* Permiten comparar el estado fisico con la normalizacion ST. *)
+(* 1 = activo/TRUE, 0 = inactivo/FALSE.                        *)
+(* ============================================================ *)
+
+(* ---------- ENTRADAS FISICAS CRUDAS ---------- *)
+
+IF PhIn1 THEN
+    Mon_I1_Raw := 1 ;
+ELSE
+    Mon_I1_Raw := 0 ;
+END_IF ;
+
+IF PhIn2 THEN
+    Mon_I2_Raw := 1 ;
+ELSE
+    Mon_I2_Raw := 0 ;
+END_IF ;
+
+IF PhIn3 THEN
+    Mon_I3_Raw := 1 ;
+ELSE
+    Mon_I3_Raw := 0 ;
+END_IF ;
+
+IF PhIn4 THEN
+    Mon_I4_Raw := 1 ;
+ELSE
+    Mon_I4_Raw := 0 ;
+END_IF ;
+
+IF PhIn5 THEN
+    Mon_I5_Raw := 1 ;
+ELSE
+    Mon_I5_Raw := 0 ;
+END_IF ;
+
+
+(* ---------- ENTRADAS NORMALIZADAS POR EL ST ---------- *)
+
+IF BtnStart THEN
+    Mon_BtnStart := 1 ;
+ELSE
+    Mon_BtnStart := 0 ;
+END_IF ;
+
+IF BtnAux THEN
+    Mon_BtnAux := 1 ;
+ELSE
+    Mon_BtnAux := 0 ;
+END_IF ;
+
+IF BtnStop THEN
+    Mon_BtnStop := 1 ;
+ELSE
+    Mon_BtnStop := 0 ;
+END_IF ;
+
+IF S1_Det THEN
+    Mon_S1_Det := 1 ;
+ELSE
+    Mon_S1_Det := 0 ;
+END_IF ;
+
+IF S2_Det THEN
+    Mon_S2_Det := 1 ;
+ELSE
+    Mon_S2_Det := 0 ;
+END_IF ;
+
+
+(* ---------- SALIDAS FISICAS ---------- *)
+
+IF PhQ3 THEN
+    Mon_Q3 := 1 ;
+ELSE
+    Mon_Q3 := 0 ;
+END_IF ;
+
+IF PhQ4 THEN
+    Mon_Q4 := 1 ;
+ELSE
+    Mon_Q4 := 0 ;
+END_IF ;
+
+IF PhQ5 THEN
+    Mon_Q5 := 1 ;
+ELSE
+    Mon_Q5 := 0 ;
+END_IF ;
+
+IF PhQ6 THEN
+    Mon_Q6 := 1 ;
+ELSE
+    Mon_Q6 := 0 ;
+END_IF ;
+
+IF PhQ7 THEN
+    Mon_Q7 := 1 ;
+ELSE
+    Mon_Q7 := 0 ;
+END_IF ;
+
+IF PhQ8 THEN
+    Mon_Q8 := 1 ;
+ELSE
+    Mon_Q8 := 0 ;
+END_IF ;
+
+IF PhQ9 THEN
+    Mon_Q9 := 1 ;
+ELSE
+    Mon_Q9 := 0 ;
+END_IF ;
+
+
+(* ---------- ESTADOS INTERNOS IMPORTANTES ---------- *)
+
+IF GenStop THEN
+    Mon_GenStop := 1 ;
+ELSE
+    Mon_GenStop := 0 ;
+END_IF ;
+
+IF BandEnable THEN
+    Mon_BandEnable := 1 ;
+ELSE
+    Mon_BandEnable := 0 ;
+END_IF ;
+
+IF BandRunning THEN
+    Mon_BandRunning := 1 ;
+ELSE
+    Mon_BandRunning := 0 ;
+END_IF ;
+
+IF CfgValid THEN
+    Mon_CfgValid := 1 ;
+ELSE
+    Mon_CfgValid := 0 ;
+END_IF ;
+
+IF CfgReady THEN
+    Mon_CfgReady := 1 ;
+ELSE
+    Mon_CfgReady := 0 ;
+END_IF ;
+
+
+(* ============================================================ *)
+(* ---------- ESTADOS NUEVOS DE SECUENCIA ---------- *)
+
+IF HardStopActive THEN
+    Mon_HardStop := 1 ;
+ELSE
+    Mon_HardStop := 0 ;
+END_IF ;
+
+IF AuxStopActive THEN
+    Mon_AuxStop := 1 ;
+ELSE
+    Mon_AuxStop := 0 ;
+END_IF ;
+
+IF SoftStopActive THEN
+    Mon_SoftStop := 1 ;
+ELSE
+    Mon_SoftStop := 0 ;
+END_IF ;
+
+IF AutoStopDone THEN
+    Mon_AutoStopDone := 1 ;
+ELSE
+    Mon_AutoStopDone := 0 ;
+END_IF ;
+
+Mon_StopReason    := StopReason ;
+Mon_AutoStopAccum := AutoStopAccum ;
+
+
+(* §20 - GUARDAR RETAIN                                       *)
+(* ============================================================ *)
+
+R_DirCmd          := DirCmd ;
+R_FreqRequest     := FreqRequest ;
+
+R_StopMode        := StopMode ;
+R_AutoStopMode    := AutoStopMode ;
+R_AutoStopPreset  := AutoStopPreset ;
+
+R_S1_BandMode     := S1_BandMode ;
+R_S2_BandMode     := S2_BandMode ;
+
+R_S1_Enable       := S1_Enable ;
+R_S1_Action       := S1_Action ;
+R_S1_TimerPreset  := S1_TimerPreset ;
+R_S1_CountPreset  := S1_CountPreset ;
+R_S1_TorretaMask  := S1_TorretaMask ;
+R_S1_CountAccum   := S1_CountAccum ;
+R_S1_Pluma1Cmd    := S1_Pluma1Cmd ;
+R_S1_Pluma2Cmd    := S1_Pluma2Cmd ;
+
+R_S2_Enable       := S2_Enable ;
+R_S2_Action       := S2_Action ;
+R_S2_TimerPreset  := S2_TimerPreset ;
+R_S2_CountPreset  := S2_CountPreset ;
+R_S2_TorretaMask  := S2_TorretaMask ;
+R_S2_CountAccum   := S2_CountAccum ;
+R_S2_Pluma1Cmd    := S2_Pluma1Cmd ;
+R_S2_Pluma2Cmd    := S2_Pluma2Cmd ;
+
+R_S1_CountActionMask := S1_CountActionMask ;
+R_S1_CountLampMask   := S1_CountLampMask ;
+R_S1_CountDirTarget  := S1_CountDirTarget ;
+R_S1_CountPluma1Cmd  := S1_CountPluma1Cmd ;
+R_S1_CountPluma2Cmd  := S1_CountPluma2Cmd ;
+
+R_S2_CountActionMask := S2_CountActionMask ;
+R_S2_CountLampMask   := S2_CountLampMask ;
+R_S2_CountDirTarget  := S2_CountDirTarget ;
+R_S2_CountPluma1Cmd  := S2_CountPluma1Cmd ;
+R_S2_CountPluma2Cmd  := S2_CountPluma2Cmd ;
+
+R_S1_CountHoldMode   := S1_CountHoldMode ;
+R_S1_CountHoldPreset := S1_CountHoldPreset ;
+R_S2_CountHoldMode   := S2_CountHoldMode ;
+R_S2_CountHoldPreset := S2_CountHoldPreset ;
+
+R_TimedLampMask      := TimedLampMask ;
+R_TimedLampPreset    := TimedLampPreset ;
+
+R_TorretaRun      := TorretaRun ;
+R_TorretaIdle     := TorretaIdle ;
+
+R_S1_CountDone    := S1_CountDone ;
+R_S2_CountDone    := S2_CountDone ;

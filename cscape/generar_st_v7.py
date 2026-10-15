@@ -45,7 +45,7 @@ LI_RANGOS = {"DebAcc": (25, 12), "TAcc": (37, 16), "CAcc": (53, 16), "PlAcc": (6
              "PlPrev": (71, 2), "PlCmd": (73, 2), "SeqI": (75, 16)}
 for _i, _n in enumerate(("a", "val", "base", "op", "lo", "hi", "kind", "r", "msk", "cnt", "ntrue",
                          "nused", "deb", "sb", "st", "ib", "bb", "gb", "n", "tgt", "pre", "pre2",
-                         "typ", "mode", "q")):
+                         "typ", "mode", "q", "tacc")):
     LI_MAP[_n] = 91 + _i
 LI_LEN = lm.LI_LEN
 
@@ -59,7 +59,7 @@ LB_MAP = {
     "seqOwnMot": 36, "sStart": 37, "sStop": 38, "sRst": 39, "sPause": 40, "fire": 41,
     "timeOk": 42, "tsig": 43, "owned": 44, "seqv": 45, "pUp": 46, "pDn": 47, "sRise": 48,
     "contrib": 49, "sigRun": 50, "sigStop": 51, "sigPause": 52, "sigD1": 53, "sigD2": 54,
-    "sigTog": 55, "FirstCycle": 56,
+    "sigTog": 55, "FirstCycle": 56, "tdn": 57, "trun": 58,
 }
 LB_RANGOS = {"RawIn": (60, 12), "DebIn": (72, 12), "CPrev": (84, 16), "TDn": (100, 16),
              "TRun": (116, 16), "TPrevIn": (132, 16), "CtDn": (148, 16), "CtUpPrev": (164, 16),
@@ -106,14 +106,13 @@ def ind(txt, n):
 
 
 def rd(dst, code_expr, n=0):
-    """Lee la senal cuyo codigo es code_expr (0 = nada, +1000 = NOT) en dst."""
+    """Lee la senal cuyo codigo es code_expr (0 = nada, +1000 = NOT) en dst.
+    El codigo ya fue validado al aplicar la config (0..143 o 1001..1143),
+    asi que MOD 1000 siempre cae dentro de LSIG."""
     a = I("a")
     return ind(f"""
 {a} := {code_expr} ;
-{B('neg')} := FALSE ;
-IF {a} >= {lm.NOT_OFFSET} THEN {B('neg')} := TRUE ; {a} := {a} - {lm.NOT_OFFSET} ; END_IF ;
-IF ({a} >= 0) AND ({a} <= {lm.SIG_TABLE - 1}) THEN {dst} := LSIG[ANY_TO_DINT({a})] ; ELSE {dst} := FALSE ; END_IF ;
-IF {B('neg')} THEN {dst} := NOT {dst} ; END_IF ;""", n)
+{dst} := LSIG[ANY_TO_DINT({a} MOD {lm.NOT_OFFSET})] XOR ({a} >= {lm.NOT_OFFSET}) ;""", n)
 
 
 def bits(src_expr, dst_rango, dst_off_expr, nbits, var, n=0):
@@ -181,65 +180,46 @@ def seccion_L0():
 # §L1 - Transaccion
 # ---------------------------------------------------------------------------
 def clasificacion():
-    """IF que deja en kind/lo/hi el tipo de cada palabra ek (espejo de
-    lm._es_senal y lm.rango_campo)."""
+    """Deja en kind/lo/hi el tipo de la palabra ek (espejo de lm._es_senal y
+    lm.rango_campo). El PLC solo vigila lo que puede romperlo: codigos de
+    senal (indices de LSIG), indices de pasos y valores negativos. La
+    coherencia completa la revisa el backend antes de enviar."""
     k, lo, hi, r, q = I("kind"), I("lo"), I("hi"), I("r"), I("q")
-
-    def rng(h, l=0):
-        return f"{lo} := {l} ; {hi} := {h} ;"
-    sig = f"{k} := 1 ;"
     S = lm
-    cond_hi = f"{S.O_COND + S.N_COND * S.COND_W - 1}"
-    mem_hi = f"{S.O_MEM + S.N_MEM * S.MEM_W - 1}"
-    tim_hi = f"{S.O_TIMER + S.N_TIMER * S.TIMER_W - 1}"
-    cnt_hi = f"{S.O_COUNT + S.N_COUNT * S.COUNT_W - 1}"
-    seq_hi = f"{S.O_SEQ + S.N_SEQ * S.SEQ_W - 1}"
     return f"""
-{k} := 2 ; {lo} := 0 ; {hi} := 0 ;
+{k} := 2 ; {lo} := 0 ; {hi} := 32767 ;
 IF ek <= {S.H_CHK} THEN
     {k} := 0 ;
-ELSIF ek = {S.H_MOVE} THEN {rng(1)}
-ELSIF ek = {S.H_FREQ} THEN {rng(S.FREQ_MAX)}
-ELSIF ek = {S.H_DIR} THEN {rng(2)}
-ELSIF (ek = {S.H_DEB_SENS}) OR (ek = {S.H_DEB_BTN}) THEN {rng(S.DEB_MAX)}
-ELSIF ek = {S.H_PLUMA_MAX} THEN {rng(32767)}
-ELSIF ek = {S.H_ESTOP_LAMPS} THEN {rng(4095)}
-ELSIF (ek = {S.M_RUN}) OR (ek = {S.M_STOP}) OR ((ek >= {S.M_PAUSE}) AND (ek <= {S.M_TOGGLE})) THEN {sig}
-ELSIF ek = {S.M_MODE} THEN {rng(1)}
-ELSIF ek = {S.M_REVTIME} THEN {rng(32767)}
-ELSIF (ek >= {S.O_OUT}) AND (ek <= {S.O_OUT + S.N_OUT - 1}) THEN {sig}
-ELSIF (ek >= {S.O_COND}) AND (ek <= {cond_hi}) THEN
+ELSIF ek = {S.H_FREQ} THEN
+    {hi} := {S.FREQ_MAX} ;
+ELSIF ek = {S.H_DIR} THEN
+    {hi} := 2 ;
+ELSIF (ek = {S.M_RUN}) OR (ek = {S.M_STOP}) OR ((ek >= {S.M_PAUSE}) AND (ek <= {S.M_TOGGLE})) OR
+      ((ek >= {S.O_OUT}) AND (ek <= {S.O_OUT + S.N_OUT - 1})) THEN
+    {k} := 1 ;
+ELSIF (ek >= {S.O_COND}) AND (ek < {S.O_MEM}) THEN
     {r} := (ek - {S.O_COND}) MOD {S.COND_W} ;
-    IF {r} = 0 THEN {rng(5)} ELSIF {r} = 5 THEN {rng(2)} ELSE {sig} END_IF ;
-ELSIF (ek >= {S.O_MEM}) AND (ek <= {mem_hi}) THEN
-    {r} := (ek - {S.O_MEM}) MOD {S.MEM_W} ;
-    IF {r} <= 1 THEN {sig} ELSE {rng(1)} END_IF ;
-ELSIF (ek >= {S.O_TIMER}) AND (ek <= {tim_hi}) THEN
+    IF ({r} >= 1) AND ({r} <= 4) THEN {k} := 1 ; END_IF ;
+ELSIF (ek >= {S.O_MEM}) AND (ek < {S.O_TIMER}) THEN
+    IF ((ek - {S.O_MEM}) MOD {S.MEM_W}) <= 1 THEN {k} := 1 ; END_IF ;
+ELSIF (ek >= {S.O_TIMER}) AND (ek < {S.O_COUNT}) THEN
     {r} := (ek - {S.O_TIMER}) MOD {S.TIMER_W} ;
-    IF {r} = 0 THEN {rng(6)} ELSIF {r} <= 2 THEN {sig} ELSE {rng(32767)} END_IF ;
-ELSIF (ek >= {S.O_COUNT}) AND (ek <= {cnt_hi}) THEN
-    {r} := (ek - {S.O_COUNT}) MOD {S.COUNT_W} ;
-    IF {r} <= 2 THEN {sig} ELSIF {r} = 3 THEN {rng(32767)} ELSE {rng(2)} END_IF ;
-ELSIF (ek >= {S.O_SEQ}) AND (ek <= {seq_hi}) THEN
+    IF ({r} = 1) OR ({r} = 2) THEN {k} := 1 ; END_IF ;
+ELSIF (ek >= {S.O_COUNT}) AND (ek < {S.O_SEQ}) THEN
+    IF ((ek - {S.O_COUNT}) MOD {S.COUNT_W}) <= 2 THEN {k} := 1 ; END_IF ;
+ELSIF (ek >= {S.O_SEQ}) AND (ek < {S.O_SEQ + S.N_SEQ * S.SEQ_W}) THEN
     {r} := (ek - {S.O_SEQ}) MOD {S.SEQ_W} ;
-    IF {r} <= {S.SQ_PAUSE} THEN {sig}
-    ELSIF {r} = {S.SQ_MODE} THEN {rng(2)}
-    ELSIF {r} = {S.SQ_REPEAT} THEN {rng(32767)}
-    ELSIF {r} = {S.SQ_NSTEPS} THEN {rng(S.N_STEPS)}
-    ELSIF ({r} = {S.SQ_EXCL}) OR ({r} = {S.SQ_PAUSEOFF}) THEN {rng(1)}
+    IF {r} <= {S.SQ_PAUSE} THEN
+        {k} := 1 ;
+    ELSIF {r} = {S.SQ_NSTEPS} THEN
+        {hi} := {S.N_STEPS} ;
     ELSIF {r} >= {S.SEQ_HDR} THEN
         {q} := ({r} - {S.SEQ_HDR}) MOD {S.STEP_W} ;
-        CASE {q} OF
-            {S.ST_OUT}: {rng(4095)}
-            {S.ST_MOTOR}: {rng(31)}
-            {S.ST_TMODE}: {rng(4)}
-            {S.ST_TSIG}: {sig}
-            {S.ST_TIME}: {rng(32767)}
-            {S.ST_NEXT}: {rng(S.NEXT_FIN)}
-            {S.ST_ALTSIG}: {sig}
-        ELSE
-            {rng(S.NEXT_FIN)}
-        END_CASE ;
+        IF ({q} = {S.ST_TSIG}) OR ({q} = {S.ST_ALTSIG}) THEN
+            {k} := 1 ;
+        ELSIF ({q} = {S.ST_NEXT}) OR ({q} = {S.ST_ALTNEXT}) THEN
+            {hi} := {S.NEXT_FIN} ;
+        END_IF ;
     END_IF ;
 END_IF ;"""
 
@@ -257,65 +237,39 @@ def validacion_final():
     L.append(chequeo(f"{PEN(S.H_LEN)} <> {S.CFG_LEN}", S.E_LEN, S.H_LEN + 1))
     L.append(chequeo(f"{PEN(S.H_ID)} < 1", S.E_ID, S.H_ID + 1))
     L.append(chequeo(f"{PEN(S.H_ID)} <> {I('StagedId')}", S.E_IDMISMATCH, S.H_ID + 1))
-    L.append(chequeo(f"ANY_TO_DINT({PEN(S.H_CHK)}) <> LD[0]", S.E_CHK, S.H_CHK + 1))
+    L.append(chequeo(f"ANY_TO_DINT({PEN(S.H_CHK)}) <> LCK[0]", S.E_CHK, S.H_CHK + 1))
     L.append(f"IF ({E} = 0) AND ({I('RngField')} <> 0) THEN {E} := {S.E_RANGE} ; {F} := {I('RngField')} ; END_IF ;")
     L.append(f"IF {PEN(S.H_MOVE)} = 1 THEN")
     L.append("    " + chequeo(f"({PEN(S.H_FREQ)} < {S.FREQ_MIN}) OR ({PEN(S.H_FREQ)} > {S.FREQ_MAX})", S.E_SEM, S.H_FREQ + 1))
     L.append("    " + chequeo(f"({PEN(S.H_DIR)} <> 1) AND ({PEN(S.H_DIR)} <> 2)", S.E_SEM, S.H_DIR + 1))
-    L.append("    " + chequeo(f"{PEN(S.M_REVTIME)} < {S.REV_TIME_MIN}", S.E_SEM, S.M_REVTIME + 1))
-    L.append("ELSE")
-    for o in (S.H_FREQ, S.H_DIR, S.M_RUN, S.M_STOP, S.M_PAUSE, S.M_DIR1, S.M_DIR2, S.M_TOGGLE):
-        L.append("    " + chequeo(f"{PEN(o)} <> 0", S.E_SEM, o + 1))
     L.append("END_IF ;")
     L.append(chequeo(f"({PEN(S.M_RUN)} = {emerg[0]}) OR ({PEN(S.M_RUN)} = {emerg[1]})", S.E_SAFETY, S.M_RUN + 1))
-    # salidas fisicas
+    L.append(bits(PEN(S.H_ESTOP_LAMPS), "ValBits", "0", S.N_OUT, "ek"))
     L.append(f"FOR ek := 0 TO {S.N_OUT - 1} DO")
     L.append("    " + chequeo(f"({PEN(f'{S.O_OUT} + ek')} <> 0) AND NOT {Br('HwQ', 'ek')}", S.E_HW, f"{S.O_OUT + 1} + ek"))
     L.append("END_FOR ;")
-    L.append(bits(PEN(S.H_ESTOP_LAMPS), "ValBits", "0", S.N_OUT, "ek"))
     L.append(f"FOR ek := 0 TO {S.N_OUT - 1} DO")
     L.append("    " + chequeo(f"{Br('ValBits', 'ek')} AND NOT {Br('HwLamp', 'ek')}", S.E_HW, S.H_ESTOP_LAMPS + 1))
     L.append("END_FOR ;")
-    # contadores y timers
-    L.append(f"FOR ek := 0 TO {S.N_COUNT - 1} DO")
-    L.append(f"    {I('base')} := {S.O_COUNT} + ek * {S.COUNT_W} ;")
-    L.append("    " + chequeo(f"(({PEN(I('base'))} <> 0) OR ({PEN(I('base') + ' + 1')} <> 0)) AND ({PEN(I('base') + ' + 3')} < 1)",
-                               S.E_SEM, f"{I('base')} + 4"))
-    L.append("END_FOR ;")
-    L.append(f"FOR ek := 0 TO {S.N_TIMER - 1} DO")
-    L.append(f"    {I('base')} := {S.O_TIMER} + ek * {S.TIMER_W} ;")
-    L.append("    " + chequeo(f"({PEN(I('base'))} <> 0) AND ({PEN(I('base') + ' + 1')} = 0)", S.E_SEM, f"{I('base')} + 2"))
-    L.append("    " + chequeo(f"({PEN(I('base'))} = 6) AND ({PEN(I('base') + ' + 3')} < 1)", S.E_SEM, f"{I('base')} + 4"))
-    L.append("END_FOR ;")
-    # secuencias
     sb, n, st = I("sb"), I("n"), I("st")
     L.append(f"FOR ej := 0 TO {S.N_SEQ - 1} DO")
     L.append(f"    {sb} := {S.O_SEQ} + ej * {S.SEQ_W} ;")
     L.append(f"    {n} := {PEN(f'{sb} + {S.SQ_NSTEPS}')} ;")
-    L.append(f"    IF {n} = 0 THEN")
-    L.append("        " + chequeo(f"{PEN(sb)} <> 0", S.E_SEM, f"{sb} + 1"))
-    L.append("    ELSE")
-    L.append("        " + chequeo(f"{PEN(sb)} = 0", S.E_SEM, f"{sb} + 1"))
-    L.append("        " + chequeo(f"({PEN(sb)} = {emerg[0]}) OR ({PEN(sb)} = {emerg[1]})", S.E_SAFETY, f"{sb} + 1"))
-    L.append("        " + chequeo(f"({PEN(f'{sb} + {S.SQ_MODE}')} = 2) AND ({PEN(f'{sb} + {S.SQ_REPEAT}')} < 1)",
-                                   S.E_SEM, f"{sb} + {S.SQ_REPEAT + 1}"))
-    L.append(f"        FOR ek := 1 TO {n} DO")
-    L.append(f"            {st} := {sb} + {S.SEQ_HDR} + (ek - 1) * {S.STEP_W} ;")
-    L.append("            " + chequeo(f"({PEN(f'{st} + {S.ST_MOTOR}')} <> 0) AND ({PEN(S.H_MOVE)} <> 1)",
-                                       S.E_SEM, f"{st} + {S.ST_MOTOR + 1}"))
+    L.append("    " + chequeo(f"({n} > 0) AND (({PEN(sb)} = {emerg[0]}) OR ({PEN(sb)} = {emerg[1]}))", S.E_SAFETY, f"{sb} + 1"))
+    L.append(f"    FOR ek := 1 TO {n} DO")
+    L.append(f"        {st} := {sb} + {S.SEQ_HDR} + (ek - 1) * {S.STEP_W} ;")
     for dst in (S.ST_NEXT, S.ST_ALTNEXT):
-        L.append("            " + chequeo(f"({PEN(f'{st} + {dst}')} > {n}) AND ({PEN(f'{st} + {dst}')} <> {S.NEXT_FIN})",
-                                           S.E_SEM, f"{st} + {dst + 1}"))
-    L.append(ind(bits(PEN(f"{st} + {S.ST_OUT}"), "ValBits", "0", S.N_OUT, "em"), 12))
-    L.append(f"            FOR em := 0 TO {S.N_OUT - 1} DO")
-    L.append("                " + chequeo(f"{Br('ValBits', 'em')} AND NOT {Br('HwQ', 'em')}", S.E_HW, f"{st} + {S.ST_OUT + 1}"))
-    L.append("            END_FOR ;")
-    for a, c, _nom in S.HW_BANDA["pares_excluyentes"]:
-        ia, ic = int(a[1:]) - 1, int(c[1:]) - 1
-        L.append("            " + chequeo(f"{Br('ValBits', ia)} AND {Br('ValBits', ic)}", S.E_SAFETY, f"{st} + {S.ST_OUT + 1}")
-                 + f"    (* {_nom}: {a} y {c} juntas *)")
+        L.append("        " + chequeo(f"({PEN(f'{st} + {dst}')} > {n}) AND ({PEN(f'{st} + {dst}')} <> {S.NEXT_FIN})",
+                                       S.E_SEM, f"{st} + {dst + 1}"))
+    L.append(ind(bits(PEN(f"{st} + {S.ST_OUT}"), "ValBits", "0", S.N_OUT, "em"), 8))
+    L.append(f"        FOR em := 0 TO {S.N_OUT - 1} DO")
+    L.append("            " + chequeo(f"{Br('ValBits', 'em')} AND NOT {Br('HwQ', 'em')}", S.E_HW, f"{st} + {S.ST_OUT + 1}"))
     L.append("        END_FOR ;")
-    L.append("    END_IF ;")
+    for a_, c_, _nom in S.HW_BANDA["pares_excluyentes"]:
+        ia, ic = int(a_[1:]) - 1, int(c_[1:]) - 1
+        L.append("        " + chequeo(f"{Br('ValBits', ia)} AND {Br('ValBits', ic)}", S.E_SAFETY, f"{st} + {S.ST_OUT + 1}")
+                 + f"    (* {_nom}: {a_} y {c_} juntas *)")
+    L.append("    END_FOR ;")
     L.append("END_FOR ;")
     return "\n".join(L)
 
@@ -372,7 +326,7 @@ IF LCMD[{S.C_SEQ}] <> {I('CmdPrev')} THEN
                 {I('ErrCode')} := 0 ;
                 {I('ErrField')} := 0 ;
                 {I('StagedId')} := LCMD[{S.C_ARG}] ;
-                LD[0] := DINT#0 ;
+                LCK[0] := DINT#0 ;
             ELSE
                 {I('LastResult')} := {S.E_NOTX} ;
             END_IF ;
@@ -429,7 +383,7 @@ IF {T} = {S.TX_VAL} THEN
         LPEN[ANY_TO_DINT(ek)] := {I('val')} ;
 
         IF ek <> {S.H_CHK} THEN
-            LD[0] := (LD[0] * DINT#31 + ANY_TO_DINT({I('val')}) + DINT#32769) MOD DINT#32749 ;
+            LCK[0] := (LCK[0] * DINT#31 + ANY_TO_DINT({I('val')}) + DINT#32769) MOD DINT#32749 ;
         END_IF ;
 {ind(clasificacion(), 8)}
 
@@ -742,7 +696,7 @@ FOR ek := 0 TO {S.N_MEM - 1} DO
 END_FOR ;
 """
     # ---- timers
-    acc, dn, run = Ir("TAcc", "ek"), Br("TDn", "ek"), Br("TRun", "ek")
+    acc, dn, run = I("tacc"), B("tdn"), B("trun")
     pre, pre2 = I("pre"), I("pre2")
     timers = f"""
 (* ============================================================ *)
@@ -771,6 +725,9 @@ FOR ek := 0 TO {S.N_TIMER - 1} DO
 
     {B('edge')} := {B('vin')} AND NOT {Br('TPrevIn', 'ek')} AND NOT {ef} ;
     {Br('TPrevIn', 'ek')} := {B('vin')} ;
+    {acc} := {Ir('TAcc', 'ek')} ;
+    {dn} := {Br('TDn', 'ek')} ;
+    {run} := {Br('TRun', 'ek')} ;
 
     IF {B('vrst')} OR ({I('typ')} = 0) OR {B('GenStop7')} THEN
 
@@ -880,6 +837,9 @@ FOR ek := 0 TO {S.N_TIMER - 1} DO
 
     END_IF ;
 
+    {Ir('TAcc', 'ek')} := {acc} ;
+    {Br('TDn', 'ek')} := {dn} ;
+    {Br('TRun', 'ek')} := {run} ;
     LSIG[ANY_TO_DINT({S.SIG_TIMER} + ek)] := {dn} ;
 
 END_FOR ;
@@ -1429,19 +1389,19 @@ tRoja     := PhQ5 ;
 def seccion_L3():
     S = lm
 
-    def suma8(dst, src_base):
-        return f"""
-{I('cnt')} := 0 ;
-{I('msk')} := 1 ;
-FOR ek := 0 TO 7 DO
-    IF LSIG[ANY_TO_DINT({src_base} + ek)] THEN {I('cnt')} := {I('cnt')} + {I('msk')} ; END_IF ;
-    {I('msk')} := {I('msk')} * 2 ;
-END_FOR ;
-LSTA[{dst}] := {I('cnt')} ;"""
-    masks = "".join(suma8(S.S_COND + h, S.SIG_COND + 8 * h) for h in (0, 1))
-    masks += "".join(suma8(S.S_MEM + h, S.SIG_MEM + 8 * h) for h in (0, 1))
-    masks += "".join(suma8(S.S_TIMERS + h, S.SIG_TIMER + 8 * h) for h in (0, 1))
-    masks += "".join(suma8(S.S_COUNTS + h, S.SIG_COUNT + 8 * h) for h in (0, 1))
+    assert [S.S_COND, S.S_MEM, S.S_TIMERS, S.S_COUNTS] == [20, 22, 24, 26]
+    assert [S.SIG_COND, S.SIG_MEM, S.SIG_TIMER, S.SIG_COUNT] == [40, 56, 72, 88]
+    masks = f"""
+(* C1..C16, M1..M16, T1..T16 y CT1..CT16: 8 bits por palabra. *)
+FOR ej := 0 TO 7 DO
+    {I('cnt')} := 0 ;
+    {I('msk')} := 1 ;
+    FOR ek := 0 TO 7 DO
+        IF LSIG[ANY_TO_DINT({S.SIG_COND} + ej * 8 + ek)] THEN {I('cnt')} := {I('cnt')} + {I('msk')} ; END_IF ;
+        {I('msk')} := {I('msk')} * 2 ;
+    END_FOR ;
+    LSTA[ANY_TO_DINT({S.S_COND} + ej)] := {I('cnt')} ;
+END_FOR ;"""
     LIb, LBb = LI_RANGOS["SeqI"][0], LB_RANGOS["SeqB"][0]
     return f"""
 (* ============================================================ *)
@@ -1555,6 +1515,9 @@ def leyenda():
     cab = [
         "(* ============================================================ *)",
         "(* PROGRAMA MAESTRO BANDA - HORNER XL4 / CSCAPE ST - v7 LAVO  *)",
+        "(* BLOQUE 1 de 2 (STBLOCK1). El motor general esta en el       *)",
+        "(* bloque 2 (STBLOCK2 = LAVO_Motor_ST.txt), que se ejecuta     *)",
+        "(* despues de este en cada ciclo (limite de 64 KB por bloque). *)",
         "(* Generado por cscape/generar_st_v7.py (no editar a mano:    *)",
         "(* regenerar si cambia lavo_motor.py).                        *)",
         "(*                                                            *)",
@@ -1571,7 +1534,7 @@ def leyenda():
         "(* TAGS NUEVOS (ver LAVO_Variables_Cscape.txt):               *)",
         f"(*   LCMD INT[10] %R{S.CMD_BASE} · LSTG INT[640] %R{S.STAGE_BASE} · LSTA INT[100] %R{S.STATUS_BASE} *)",
         f"(*   LACT INT[640] %R{S.ACT_BASE} · LPEN INT[640] %R{S.PEN_BASE}                 *)",
-        f"(*   LI INT[{LI_LEN}] %R{S.LI_BASE} · LD DINT[4] %R{S.LD_BASE}                     *)",
+        f"(*   LI INT[{LI_LEN}] %R{S.LI_BASE} · LCK DINT[4] %R{S.LD_BASE}                     *)",
         f"(*   LSIG BOOL[160] · LB BOOL[{LB_LEN}] · em INT  (internas, sin tag)  *)",
         "(*   (se conservan Sys100ms %S4, ek, ej)                       *)",
         "(* Posiciones de LI / LB (nombre logico de cada una):          *)",
@@ -1593,6 +1556,29 @@ def cortar(txt, desde, hasta, nuevo):
     a = txt.index(desde)
     b = txt.index(hasta, a)
     return txt[:a] + nuevo + txt[b:]
+
+
+CORTE = "(* @@CORTE_STBLOCK2@@ *)\n"
+
+
+def cabecera_bloque2():
+    return """(* ============================================================ *)
+(* PROGRAMA MAESTRO BANDA v7 LAVO - BLOQUE 2 de 2 (STBLOCK2)    *)
+(* Se ejecuta en cada ciclo DESPUES de STBLOCK1 (LAVO_Main_ST). *)
+(* Contiene el motor general (§L2), el estado (§L3) y §18..§20. *)
+(* Usa las mismas variables globales que el bloque 1. Se separo *)
+(* porque Cscape limita cada bloque ST a 64 KB de codigo.       *)
+(* Generado por cscape/generar_st_v7.py (no editar a mano).     *)
+(* ============================================================ *)
+
+"""
+
+
+def partes() -> tuple:
+    """(bloque1, bloque2) para Cscape. Juntos == ST_banda_v7_lavo.txt."""
+    t = generar()
+    a = t.index(CORTE)
+    return t[:a], t[a + len(CORTE):]
 
 
 def generar() -> str:
@@ -1681,7 +1667,8 @@ def generar() -> str:
     a = t.rindex("ELSE\n", 0, a)
     b = t.index("(* v6: identificacion y validez del motor (siempre). *)")
     b_fin = t.index("ES[2] := EI[1] ;\n", b) + len("ES[2] := EI[1] ;\n")
-    t = t[:a] + "ELSE\n\n" + seccion_L2() + "\nEND_IF ;\n\n" + seccion_L3() + t[b_fin:]
+    t = (t[:a] + "END_IF ;\n\n" + CORTE + cabecera_bloque2() + f"IF {B('V7Active')} THEN\n\n"
+         + seccion_L2() + "\nEND_IF ;\n\n" + seccion_L3() + t[b_fin:])
 
     # §18: direccion real.
     t = reemplazar(t, "    IF EI[3] = 2 THEN\n\n        BandStatus := 2 ;", f"    IF {I('DirActual')} = 2 THEN\n\n        BandStatus := 2 ;")
@@ -1711,7 +1698,7 @@ def generar_variables() -> str:
          "Buffer privado de validacion (COMMIT copia LSTG aqui antes de validar)."),
         ("LI", "INT", LI_LEN, f"%R{S.LI_BASE}", "SOLO LECTURA (diagnostico)",
          "Enteros internos del motor (posiciones en la leyenda del ST)."),
-        ("LD", "DINT", 4, f"%R{S.LD_BASE}", "no se usa",
+        ("LCK", "DINT", 4, f"%R{S.LD_BASE}", "no se usa",
          f"Acumulador DINT del checksum (ocupa %R{S.LD_BASE}..%R{S.LD_BASE + 7})."),
         ("LSIG", "BOOL", S.SIG_TABLE, "(sin tag)", "no",
          "Tabla de senales del motor: LSIG[codigo] (ver mapa de senales)."),
@@ -1769,7 +1756,7 @@ def generar_variables() -> str:
     w("    LSTA  lo escribe §L3 en CADA scan (tambien en modo v5).")
     w("    LI/LB estado interno de §L0..§L3 (leyenda al inicio del ST).")
     w("    LSIG  tabla de senales: la llenan §L2b..§L2g y la leen todos los bloques.")
-    w("    LD    acumulador del checksum en §L1.  em: ciclos FOR anidados.")
+    w("    LCK   acumulador del checksum en §L1.  em: ciclos FOR anidados.")
     w("  Variables v5 que usa el motor v7 (ya existen, no se tocan):")
     w("    lee     BtnStart, BtnAux, BtnStop, S1_Det, S2_Det (§2 normaliza NA/NC),")
     w("            Pulse1s, CfgReady, CfgValid, MotionCfgPresent, InitSeqState,")
@@ -1806,7 +1793,7 @@ def generar_variables() -> str:
     w(f"  {'LSTG':<8} {f'{S.STAGE_BASE}..{S.STAGE_BASE + S.CFG_LEN - 1}':<16} {f'{R(S.STAGE_BASE)}..{R(S.STAGE_BASE + S.CFG_LEN - 1)}':<14} ESCRIBE (solo dentro de BEGIN..COMMIT)")
     w(f"  {'LSTA':<8} {f'{S.STATUS_BASE}..{S.STATUS_BASE + 99}':<16} {f'{R(S.STATUS_BASE)}..{R(S.STATUS_BASE + 99)}':<14} LEE")
     w(f"  {'LACT':<8} {f'{S.ACT_BASE}..{S.ACT_BASE + S.CFG_LEN - 1}':<16} {f'{R(S.ACT_BASE)}..{R(S.ACT_BASE + S.CFG_LEN - 1)}':<14} LEE (verificacion)")
-    w(f"  {'LPEN/LI/LD':<8} {f'{S.PEN_BASE}..{S.LD_BASE + 7}':<16} {f'{R(S.PEN_BASE)}..{R(S.LD_BASE + 7)}':<14} no se escriben nunca")
+    w(f"  {'LPEN/LI/LCK':<8} {f'{S.PEN_BASE}..{S.LD_BASE + 7}':<16} {f'{R(S.PEN_BASE)}..{R(S.LD_BASE + 7)}':<14} no se escriben nunca")
     w("  Los registros v5 (%R1..%R127) siguen igual. Con el motor v7 el backend")
     w("  los deja en estado neutro (sin movimiento, sin eventos, torreta 0).")
     w("")
@@ -1894,8 +1881,11 @@ def generar_variables() -> str:
     w("     (p. ej. ladder_maestro_banda_v7.csp). El original es tu respaldo.")
     w("  2. En Global Variables: elimina EC, ES, EI, EB (seccion 1) y pega el")
     w("     bloque de la seccion 2. Conserva Sys100ms, ek y ej.")
-    w("  3. Abre el bloque ST (STBLOCK1) y REEMPLAZA todo su texto por el")
+    w("  3. Abre el bloque ST STBLOCK1 y REEMPLAZA todo su texto por el")
     w("     contenido completo de LAVO_Main_ST.txt.")
+    w("  3b. Agrega un SEGUNDO bloque ST (STBLOCK2) DESPUES de STBLOCK1 y pega")
+    w("     LAVO_Motor_ST.txt. Cscape limita cada bloque a 64 KB; los dos se")
+    w("     ejecutan en orden en cada ciclo y comparten las variables globales.")
     w("  4. Compila (Program > Compile / Verify). Los avisos W10034 ('loop")
     w("     instructions may block the target cycle') son normales.")
     w("     Si aparece un error de tipo en una linea con DINT#, cambia esa")
@@ -1938,18 +1928,29 @@ def main():
     ap.add_argument("--destino", help="carpeta 'Archivos Cscape' donde escribir LAVO_Main_ST.txt "
                                       "y LAVO_Variables_Cscape.txt")
     args = ap.parse_args()
-    st = generar()
+    b1, b2 = partes()
+    st = b1 + b2
     with open(SALIDA, "w", encoding="utf-8", newline="\r\n") as f:
         f.write(st)
+    for nombre, txt in (("ST_banda_v7_bloque1.txt", b1), ("ST_banda_v7_bloque2.txt", b2)):
+        with open(os.path.join(AQUI, nombre), "w", encoding="utf-8", newline="\r\n") as f:
+            f.write(txt)
     print(f"{SALIDA}: {st.count(chr(10)) + 1} lineas")
-    variables = generar_variables()
+    referencia = generar_variables()
+    with open(os.path.join(AQUI, "LAVO_Referencia_v7.txt"), "w", encoding="utf-8", newline="") as f:
+        f.write(referencia)
+    # LAVO_Variables_Cscape.txt: SOLO el bloque para pegar en Global Variables.
+    a = referencia.index("      (*$desc====== MOTOR LAVO v7")
+    b = referencia.index("------------------------- copiar hasta aqui")
+    variables = referencia[a:b]
     with open(os.path.join(AQUI, "LAVO_Variables_Cscape.txt"), "w", encoding="utf-8", newline="") as f:
         f.write(variables)
     if args.destino:
-        ruta = os.path.join(args.destino, "LAVO_Main_ST.txt")
-        with open(ruta, "w", encoding="utf-8", newline="\r\n") as f:
-            f.write(st)
-        print(f"{ruta}: escrito")
+        for nombre, txt in (("LAVO_Main_ST.txt", b1), ("LAVO_Motor_ST.txt", b2)):
+            ruta = os.path.join(args.destino, nombre)
+            with open(ruta, "w", encoding="utf-8", newline="\r\n") as f:
+                f.write(txt)
+            print(f"{ruta}: escrito")
         ruta = os.path.join(args.destino, "LAVO_Variables_Cscape.txt")
         with open(ruta, "w", encoding="utf-8", newline="") as f:
             f.write(variables)

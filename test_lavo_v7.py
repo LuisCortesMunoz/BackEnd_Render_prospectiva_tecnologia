@@ -146,7 +146,8 @@ for c in casos:
                                   f"{lm.explicar_error(*obtenido)} / {lm.explicar_error(*esperado)}")
     iguales += 1
 check(iguales == len(casos), f"{iguales} bloques (validos e invalidos): el ST rechaza con el mismo codigo y campo")
-check(sum(1 for c in casos if lm.error_plc(c)[0]) >= 25, "la muestra incluye muchos bloques invalidos")
+invalidos = sum(1 for c in casos if lm.error_plc(c)[0])
+check(invalidos >= 15, f"la muestra incluye {invalidos} bloques que el PLC debe rechazar")
 cerrar()
 
 

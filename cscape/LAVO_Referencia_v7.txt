@@ -1,0 +1,236 @@
+==============================================================================
+ LAVO - PROGRAMA MAESTRO v7 (motor general) - VARIABLES PARA CSCAPE
+ Generado por cscape/generar_st_v7.py junto con LAVO_Main_ST.txt.
+ Si cambias lavo_motor.py, regenera AMBOS archivos.
+==============================================================================
+
+Donde se declaran: TODAS en el editor de variables de Cscape, seccion
+Global Variables (igual que las del v5/v6). El texto ST no trae bloques
+VAR ... END_VAR: el programa actual tampoco los usa y es el formato que
+ya se compilo en este proyecto.
+Retentivas: NINGUNA. No pongas ninguna variable v7 en Retain Variables.
+Valor inicial: 0 / FALSE en todas (no hace falta escribir valores
+iniciales). Tras energizar, el motor v7 arranca SIN configuracion activa
+(estado seguro): el backend la vuelve a cargar.
+
+------------------------------------------------------------------------------
+1. CAMBIOS EN LA TABLA DE VARIABLES
+------------------------------------------------------------------------------
+ELIMINAR (eran del motor v6, el v7 ya no las usa):
+   EC  INT[260]  %R200      ES  INT[40]  %R460
+   EI  INT[65]   (interna)  EB  BOOL[203] (interna)
+   -> Cscape marcara 'variable no usada' si las dejas; no son error,
+      pero quitarlas libera %R200..%R571 y %T71..%T273.
+CONSERVAR SIN CAMBIOS:
+   todas las variables del v5 (FST_SCN, PhIn1..5, PhQ3..9, DirCmd, ...,
+   R_*, Mon_*, VFD_*) y Sys100ms (BOOL %S4), ek (INT), ej (INT).
+AGREGAR (10):
+
+  Nombre Tipo    Dim  Tag        Modbus                     Funcion
+  LCMD   INT      10  %R1000     ESCRITURA (backend)        Comandos: [0] CmdSeq, [1] CmdCode, [2] arg, [3..6] APP1..APP4, [7] paro software
+  LSTG   INT     640  %R1010     ESCRITURA (backend)        Area de ESPERA de la configuracion (640 palabras). El motor nunca la lee directo.
+  LSTA   INT     100  %R1700     SOLO LECTURA               Estado del motor v7 (version, transaccion, errores, motor, secuencias, timers...)
+  LACT   INT     640  %R2000     SOLO LECTURA               Configuracion ACTIVA (copia validada). El backend la relee para confirmar la carga.
+  LPEN   INT     640  %R2700     SOLO LECTURA               Buffer privado de validacion (COMMIT copia LSTG aqui antes de validar).
+  LI     INT     120  %R3400     SOLO LECTURA (diagnostico) Enteros internos del motor (posiciones en la leyenda del ST).
+  LCK    DINT      4  %R3530     no se usa                  Acumulador DINT del checksum (ocupa %R3530..%R3537).
+  LSIG   BOOL    160  (sin tag)  no                         Tabla de senales del motor: LSIG[codigo] (ver mapa de senales).
+  LB     BOOL    400  (sin tag)  no                         Booleanos internos del motor (leyenda del ST).
+  em     INT       -  (sin tag)  no                         Contador del tercer ciclo FOR anidado.
+
+  'Dim' = tamano del arreglo (en Cscape: Dim / Array size). Arreglos
+  empezando en 0: ARRAY [0..Dim-1].
+  Las 7 primeras llevan direccion FIJA a proposito: si Cscape las asignara
+  solo, las pondria en %R200..%R499 (el hueco que deja el v6), que el flujo
+  v5 del backend aun escribe. LSIG, LB y em pueden quedar sin tag
+  (Cscape las asigna en %T / %R libres).
+
+  Alcance: global (todas). Retentividad: ninguna. Valor inicial: 0/FALSE.
+
+  Relacion con el Main (LAVO_Main_ST.txt):
+    LCMD  lo lee §L1 (comandos) y §L2b (APP1..APP4, paro software).
+    LSTG  lo lee §L1 solo durante un COMMIT (copia a LPEN).
+    LPEN  lo escribe y valida §L1; al aprobarse se copia a LACT.
+    LACT  lo leen §L1 (direccion/frecuencia efectivas) y todo §L2.
+    LSTA  lo escribe §L3 en CADA scan (tambien en modo v5).
+    LI/LB estado interno de §L0..§L3 (leyenda al inicio del ST).
+    LSIG  tabla de senales: la llenan §L2b..§L2g y la leen todos los bloques.
+    LCK   acumulador del checksum en §L1.  em: ciclos FOR anidados.
+  Variables v5 que usa el motor v7 (ya existen, no se tocan):
+    lee     BtnStart, BtnAux, BtnStop, S1_Det, S2_Det (§2 normaliza NA/NC),
+            Pulse1s, CfgReady, CfgValid, MotionCfgPresent, InitSeqState,
+            GenStop, VFD_SpeedRaw, DirCmd, FreqRequest, Pluma1Cmd, Pluma2Cmd
+    escribe PhQ3..PhQ9, VFD_Control, BandRunning, BandEnable, StopReason,
+            Pluma1Status, Pluma2Status, tVerde, tAmarilla, tRoja
+    §3, §8 y §9 del v5 usan ahora la direccion/frecuencia EFECTIVAS (LI[11],
+    LI[12]): sin config v7 valen DirCmd/FreqRequest, asi que v5 no cambia.
+
+  Rangos verificados LIBRES en ladder_maestro_banda.csp (14 oct 2026): el
+  %R mas alto usado era %R571 (EI). Si agregaste algo despues, revisa en
+  Cscape (Program > Register Usage / Cross Reference) que %R1000..%R3537
+  no se usen en otra parte (pantallas, Modbus maestro, etc.).
+
+------------------------------------------------------------------------------
+2. BLOQUE PARA PEGAR (antes de END_VAR de las Global Variables)
+------------------------------------------------------------------------------
+------------------------- copiar desde aqui -------------------------
+      (*$desc====== MOTOR LAVO v7 =====*)
+   LCMD : ARRAY [0..9] OF INT ;
+      (*$tag=%R1000*)
+   LSTG : ARRAY [0..639] OF INT ;
+      (*$tag=%R1010*)
+   LSTA : ARRAY [0..99] OF INT ;
+      (*$tag=%R1700*)
+   LACT : ARRAY [0..639] OF INT ;
+      (*$tag=%R2000*)
+   LPEN : ARRAY [0..639] OF INT ;
+      (*$tag=%R2700*)
+   LI : ARRAY [0..119] OF INT ;
+      (*$tag=%R3400*)
+   LCK : ARRAY [0..3] OF DINT ;
+      (*$tag=%R3530*)
+   LSIG : ARRAY [0..159] OF BOOL ;
+   LB : ARRAY [0..399] OF BOOL ;
+   em : INT ;
+------------------------- copiar hasta aqui -------------------------
+Si el editor no deja pegar texto, crea cada una a mano con la tabla de
+arriba (Nombre, Tipo, Dim, Tag).
+
+------------------------------------------------------------------------------
+3. MAPA MODBUS (holding registers; direccion Modbus = %R + 2999)
+------------------------------------------------------------------------------
+  Bloque   %R               Modbus         Acceso del backend
+  LCMD     1000..1009       3999..4008     ESCRIBE (comandos en vivo)
+  LSTG     1010..1649       4009..4648     ESCRIBE (solo dentro de BEGIN..COMMIT)
+  LSTA     1700..1799       4699..4798     LEE
+  LACT     2000..2639       4999..5638     LEE (verificacion)
+  LPEN/LI/LCK 2700..3537       5699..6536     no se escriben nunca
+  Los registros v5 (%R1..%R127) siguen igual. Con el motor v7 el backend
+  los deja en estado neutro (sin movimiento, sin eventos, torreta 0).
+
+3.1 LCMD - comandos
+  [0] CmdSeq   : cada CAMBIO de valor ejecuta el comando (1, 2, 3...).
+  [1] CmdCode  : 1 BEGIN  2 COMMIT  3 ABORT  4 UNLOAD (vuelve a v5)  5 RESET
+  [2] Arg      : en COMMIT, el id de la configuracion escrita (CFG[1]).
+  [3..6] APP1..APP4 : botones virtuales (0/1, en vivo).
+  [7] Paro software : <>0 detiene motor, secuencias y plumas.
+  El PLC confirma cada comando copiando CmdSeq en LSTA[5].
+
+3.2 Protocolo de carga (lo hace plc_banda.cargar_motor_v7)
+  1. LCMD[3..7] = 0; BEGIN; esperar LSTA[5] = seq y LSTA[4] = 1 (recibiendo).
+  2. Escribir las 640 palabras en LSTG (7 peticiones de hasta 100).
+  3. Releer LSTG y comparar (si difiere: ABORT y error).
+  4. COMMIT con Arg = CFG[1]. El PLC copia LSTG -> LPEN en trozos de
+     128 palabras por scan, calcula el checksum y valida; si todo
+     pasa, copia LPEN -> LACT en UN solo scan y reinicia el motor en
+     estado seguro (motor parado, secuencias en 0, VFD reinicializado).
+  5. Esperar LSTA[4] = 3 (aplicada) o 4 (rechazada: LSTA[7] codigo,
+     LSTA[8] campo = offset+1). Confirmar LSTA[9] = id, LSTA[10] = checksum
+     y releer LACT. Si no confirma, la carga se reporta como fallida.
+  Fallo de comunicacion: la config activa NO cambia; a los 60 s el PLC
+  cierra la transaccion (LSTA[4] = 6) y el backend puede reintentar.
+
+3.3 CFG[0..639] (LSTG / LACT) - configuracion
+  0 formato (=7)  1 id (1..32767)  2 longitud (=640)  3 checksum
+  4 banda se mueve (0/1)  5 frecuencia Hz (1..327)  6 direccion inicial (1/2)
+  7 filtro sensores (0.1 s, 0..50)  8 filtro botones  9 tiempo max pluma (0.1 s)
+  10 lamparas con paro I3 (bits Q1..Q12; solo Q3..Q5)  11..19 reservado (0)
+  20 motor.arranque  21 paro  22 modo (0 enclavado 1 mientras)  23 pausa
+  24 dir_1  25 dir_2  26 invertir  27 paro antes de invertir (0.1 s, >=10)
+  30..41 senal que enciende Q1..Q12 (solo Q3..Q9 cableadas)
+  50+6k  C(k+1): op (1 AND 2 OR 3 XOR 4 NAND 5 NOR), in1..in4, flanco (0/1/2)
+  146+3k M(k+1): set, reset, prioridad (0 reset 1 set)
+  194+5k T(k+1): tipo (1 TON 2 TOF 3 PULSO 4 RETARDO 5 TONR 6 INTERMITENTE),
+                entrada, reset, preset (0.1 s), preset2 (0.1 s, intermitente)
+  274+5k CT(k+1): sube, baja, reset, preset, modo (0 una vez 1 ciclico 2 nivel)
+  354+140k SQ(k+1): inicio, paro, reset, pausa, modo (0 una vez 1 infinita
+                2 repetir), repeticiones, pasos (0..16), exclusiva, pausa_apaga,
+                3 reservados, y 16 pasos de 8 palabras:
+                salidas (bits Q1..Q12), motor (b0 marcha b1 paro b2 dir1 b3 dir2
+                b4 invertir), avanza (0 tiempo 1 senal 2 tiempo Y senal 3 senal O
+                tiempo 4 flanco), senal, tiempo (0.1 s), siguiente (0 = el que
+                sigue, 1..16, 17 = fin), senal alterna, ir a (0..17)
+  634..639 reservado (0)
+
+3.4 Codigos de senal (cualquier campo 'senal'; +1000 = NOT)
+  0 nada | 1..12 I1..I12 (I4 = S1, I5 = S2) | 13..24 Q1..Q12 encendida
+  25 SIEMPRE | 26 banda corriendo 27 detenida 28 dir 1 29 dir 2 30 invirtiendo
+  31 VFD en cero 32 CfgReady 33 primer ciclo | 34..37 APP1..APP4 | 38 paro software
+  40..55 C1..C16 | 56..71 M1..M16 | 72..87 T1..T16 | 88..103 CT1..CT16
+  104.. SQ1: +0 activa +1 pausada +2 fin +3 ciclo +4..+19 paso 1..16 | 124.. SQ2 (igual)
+  Checksum: s = 0; para i = 0..639 (i <> 3): s = (s*31 + valor + 32769) MOD 32749
+            (valor como entero con signo de 16 bits).
+
+3.5 LSTA[0..99] - estado (solo lectura)
+  [0] version del programa (= 7)
+  [1] firma LAVO (= 19521)
+  [2] latido (+1 cada 0.1 s): si no cambia, el PLC no corre
+  [3] scans por segundo (ciclo = 1000 / valor ms)
+  [4] transaccion: 0 sin, 1 recibiendo, 2 validando, 3 aplicada, 4 rechazada, 5 abortada, 6 timeout
+  [5] ultimo CmdSeq procesado
+  [6] resultado del ultimo comando (0 ok, 9 fuera de orden, 11 desconocido)
+  [7] error de validacion (1 formato 2 longitud 3 id 4 checksum 5 rango 6 seguridad 7 hardware 8 incoherente 10 timeout 12 id distinto)
+  [8] campo con error = offset + 1
+  [9] id de la config activa (0 = ninguna)
+  [10] checksum de la config activa
+  [11] 1 = motor v7 activo
+  [12] 1 = CfgReady (VFD listo)
+  [13] motor: 0 detenido 1 marcha 2 frenando
+  [14] direccion real
+  [15] direccion pedida
+  [16] marcha enclavada
+  [17] motivo de paro (1 I3 2 software 3 senal de paro 4 pausa 5 config no lista 6 secuencia)
+  [18] entradas filtradas (bits I1..I12)
+  [19] salidas reales (bits Q1..Q12)
+  [20..21] C1..C16  [22..23] M1..M16  [24..25] T1..T16 terminados
+  [26..27] CT1..CT16 (cada par: bits 0..7 y 8..15)
+  [28..35] SQ1 y SQ2: estado (0 inactiva 1 activa 2 pausa 3 terminada), paso, tiempo del paso (0.1 s), ciclos
+  [36..51] acumulado T1..T16 (0.1 s)  [52..67] cuenta CT1..CT16
+  [68] falla de plumas  [69] tiempo de frenado  [70] salidas cableadas (= 508)
+  [71] entradas cableadas (= 31)  [72] lamparas (= 28)  [73] tiempo de transaccion  [74] longitud (= 640)  [75] id del ultimo COMMIT
+
+------------------------------------------------------------------------------
+4. INSTALACION EN CSCAPE (paso a paso)
+------------------------------------------------------------------------------
+  1. Abre ladder_maestro_banda.csp y GUARDALO COMO COPIA
+     (p. ej. ladder_maestro_banda_v7.csp). El original es tu respaldo.
+  2. En Global Variables: elimina EC, ES, EI, EB (seccion 1) y pega el
+     bloque de la seccion 2. Conserva Sys100ms, ek y ej.
+  3. Abre el bloque ST STBLOCK1 y REEMPLAZA todo su texto por el
+     contenido completo de LAVO_Main_ST.txt.
+  3b. Agrega un SEGUNDO bloque ST (STBLOCK2) DESPUES de STBLOCK1 y pega
+     LAVO_Motor_ST.txt. Cscape limita cada bloque a 64 KB; los dos se
+     ejecutan en orden en cada ciclo y comparten las variables globales.
+  4. Compila (Program > Compile / Verify). Los avisos W10034 ('loop
+     instructions may block the target cycle') son normales.
+     Si aparece un error de tipo en una linea con DINT#, cambia esa
+     constante a su forma sin prefijo (p. ej. DINT#31 -> 31) y avisame.
+  5. Revisa el uso de registros: nada mas debe ocupar %R1000..%R3537.
+  6. Descarga al PLC de la banda (con la banda detenida y el paro I3
+     a la mano). Sin configuracion v7 el PLC corre la logica v5 de siempre.
+  7. Verifica en el Data Watch de Cscape:
+       %R1700 = 7   %R1701 = 19521   %R1702 cambia solo (latido)
+       %R1770 = 508   %R1772 = 28   %R1774 = 640   %R1703 = scans/s
+  8. En Render (o en el puente local) pon BANDA_MOTOR_V7 = 1. Con 0, el
+     backend sigue generando programas v5/v6 exactamente como antes.
+  9. Primera prueba fisica sugerida (en este orden):
+       a) programa v5 conocido -> debe comportarse igual que antes;
+       b) 'verde con I1' (sin motor) -> I1 enciende Q3;
+       c) 'torreta verde, amarilla, roja 2 s cada una con I1, paro I2';
+       d) 'a 20 Hz arranca con I1 y para con I2' -> presiona I3 a mitad:
+          todo se detiene y al soltarlo NADA arranca solo.
+
+  Volver atras: abre el .csp original (v6) y descargalo. El backend
+  detecta la version del PLC (%R1700 = 7 o %R460 = 6) y no carga un
+  programa v7 en un PLC sin el v7.
+
+------------------------------------------------------------------------------
+5. LIMITES DE ESTE PROGRAMA MAESTRO
+------------------------------------------------------------------------------
+  16 condiciones (4 entradas c/u, anidables) · 16 memorias · 16 timers · 16 contadores
+  2 secuencias independientes de 16 pasos (una rama alterna por paso)
+  Resolucion de tiempo 0.1 s (T_100MS %S4); maximo 3276.7 s por timer o paso
+  Salidas cableadas: lamparas Q3 verde, Q4 amarilla, Q5 roja y plumas Q6..Q9.
+  Botones: I1, I2 e I3 (paro de emergencia). Q10..Q12 NO existen en la banda.
+  Frecuencia fija por configuracion (1..327 Hz); no hay rampas ni analogicas
+  Contadores hasta 32767; una pluma nunca sube y baja a la vez

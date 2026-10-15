@@ -1091,33 +1091,23 @@ def _es_senal(ofs) -> bool:
 
 
 def rango_campo(ofs):
-    """(min, max) de un campo que no es senal. Los reservados valen (0, 0).
-    None para la cabecera 0..3 (se revisa aparte)."""
+    """(min, max) que el PLC exige a un campo que no es senal (None para la
+    cabecera 0..3). El PLC solo vigila lo que puede romperlo: indices de
+    pasos, frecuencia/direccion y valores negativos. La coherencia completa
+    la revisa validar_motor() antes de enviar."""
     if ofs <= H_CHK:
         return None
-    tabla = {H_MOVE: (0, 1), H_FREQ: (0, FREQ_MAX), H_DIR: (0, 2), H_DEB_SENS: (0, DEB_MAX),
-             H_DEB_BTN: (0, DEB_MAX), H_PLUMA_MAX: (0, 32767), H_ESTOP_LAMPS: (0, 4095),
-             M_MODE: (0, 1), M_REVTIME: (0, 32767)}
-    if ofs in tabla:
-        return tabla[ofs]
-    if O_COND <= ofs < O_COND + N_COND * COND_W:
-        r = (ofs - O_COND) % COND_W
-        return (0, 5) if r == 0 else (0, 2)
-    if O_MEM <= ofs < O_MEM + N_MEM * MEM_W:
-        return (0, 1)
-    if O_TIMER <= ofs < O_TIMER + N_TIMER * TIMER_W:
-        return (0, 6) if (ofs - O_TIMER) % TIMER_W == 0 else (0, 32767)
-    if O_COUNT <= ofs < O_COUNT + N_COUNT * COUNT_W:
-        return (0, 32767) if (ofs - O_COUNT) % COUNT_W == 3 else (0, 2)
+    if ofs == H_FREQ:
+        return (0, FREQ_MAX)
+    if ofs == H_DIR:
+        return (0, 2)
     if O_SEQ <= ofs < O_SEQ + N_SEQ * SEQ_W:
         r = (ofs - O_SEQ) % SEQ_W
-        if r < SEQ_HDR:
-            return {SQ_MODE: (0, 2), SQ_REPEAT: (0, 32767), SQ_NSTEPS: (0, N_STEPS),
-                    SQ_EXCL: (0, 1), SQ_PAUSEOFF: (0, 1)}.get(r, (0, 0))
-        q = (r - SEQ_HDR) % STEP_W
-        return {ST_OUT: (0, 4095), ST_MOTOR: (0, 31), ST_TMODE: (0, 4), ST_TIME: (0, 32767),
-                ST_NEXT: (0, NEXT_FIN), ST_ALTNEXT: (0, NEXT_FIN)}[q]
-    return (0, 0)
+        if r == SQ_NSTEPS:
+            return (0, N_STEPS)
+        if r >= SEQ_HDR and (r - SEQ_HDR) % STEP_W in (ST_NEXT, ST_ALTNEXT):
+            return (0, NEXT_FIN)
+    return (0, 32767)
 
 
 def _bits(v, n=12):
@@ -1158,56 +1148,26 @@ def error_plc(cfg, hw=HW_BANDA, staged_id=None) -> tuple:
     lamp = _bits(hw_lamp_mask(hw))
     emerg = (SENALES[EMERGENCIA], SENALES[EMERGENCIA] + NOT_OFFSET)
     pares = [(int(a[1:]) - 1, int(b[1:]) - 1) for a, b, _ in hw.get("pares_excluyentes", [])]
-    # movimiento
     if cfg[H_MOVE] == 1:
         if not FREQ_MIN <= cfg[H_FREQ] <= FREQ_MAX:
             return E_SEM, H_FREQ + 1
         if cfg[H_DIR] not in (1, 2):
             return E_SEM, H_DIR + 1
-        if cfg[M_REVTIME] < REV_TIME_MIN:
-            return E_SEM, M_REVTIME + 1
-    else:
-        for o in (H_FREQ, H_DIR, M_RUN, M_STOP, M_PAUSE, M_DIR1, M_DIR2, M_TOGGLE):
-            if cfg[o] != 0:
-                return E_SEM, o + 1
     if cfg[M_RUN] in emerg:
         return E_SAFETY, M_RUN + 1
-    # salidas fisicas
     for j in range(N_OUT):
         if cfg[O_OUT + j] != 0 and not hwq[j]:
             return E_HW, O_OUT + j + 1
     for j, on in enumerate(_bits(cfg[H_ESTOP_LAMPS])):
         if on and not lamp[j]:
             return E_HW, H_ESTOP_LAMPS + 1
-    # contadores y timers
-    for k in range(N_COUNT):
-        b = O_COUNT + k * COUNT_W
-        if (cfg[b] != 0 or cfg[b + 1] != 0) and cfg[b + 3] < 1:
-            return E_SEM, b + 3 + 1
-    for k in range(N_TIMER):
-        b = O_TIMER + k * TIMER_W
-        if cfg[b] != 0 and cfg[b + 1] == 0:
-            return E_SEM, b + 1 + 1
-        if cfg[b] == 6 and cfg[b + 3] < 1:
-            return E_SEM, b + 3 + 1
-    # secuencias
     for k in range(N_SEQ):
         b = O_SEQ + k * SEQ_W
         n = cfg[b + SQ_NSTEPS]
-        if n == 0:
-            if cfg[b + SQ_START] != 0:
-                return E_SEM, b + SQ_START + 1
-            continue
-        if cfg[b + SQ_START] == 0:
-            return E_SEM, b + SQ_START + 1
-        if cfg[b + SQ_START] in emerg:
+        if n > 0 and cfg[b + SQ_START] in emerg:
             return E_SAFETY, b + SQ_START + 1
-        if cfg[b + SQ_MODE] == 2 and cfg[b + SQ_REPEAT] < 1:
-            return E_SEM, b + SQ_REPEAT + 1
         for i in range(n):
             st = b + SEQ_HDR + i * STEP_W
-            if cfg[st + ST_MOTOR] != 0 and cfg[H_MOVE] != 1:
-                return E_SEM, st + ST_MOTOR + 1
             for dst in (ST_NEXT, ST_ALTNEXT):
                 if cfg[st + dst] > n and cfg[st + dst] != NEXT_FIN:
                     return E_SEM, st + dst + 1

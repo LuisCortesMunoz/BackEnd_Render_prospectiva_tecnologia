@@ -116,7 +116,7 @@ motor (marcha, paro, pausa, dirección e inversión segura), la torreta y las pl
 
 ## Banda: programa maestro general (ST v7, motor LAVO)
 
-El v7 (`cscape/ST_banda_v7_lavo.txt` = `LAVO_Main_ST.txt` en *Archivos Cscape*)
+El v7 (`cscape/ST_banda_v7_lavo.txt`, que en Cscape va en dos bloques por el límite de 64 KB: `LAVO_Main_ST.txt` → STBLOCK1 y `LAVO_Motor_ST.txt` → STBLOCK2, en *Archivos Cscape*)
 conserva el v5 intacto y sustituye el motor v6 por un **motor general**: las
 entradas no tienen papel fijo (I1 puede ser arranque, paro, reset o condición),
 hay 16 condiciones AND/OR/XOR/NAND/NOR con flancos, 16 memorias, 16 timers (TON,

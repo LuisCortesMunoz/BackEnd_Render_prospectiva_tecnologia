@@ -39,7 +39,7 @@ class SimV7:
     def __init__(self, ruta=ST_V7, rampa_hz_s=20.0):
         self._scan, arreglos, _ = si._programa(ruta)
         V = si._Vars()
-        for a in set(arreglos) | {"LCMD", "LSTG", "LSTA", "LACT", "LPEN", "LSIG", "LI", "LB", "LD"}:
+        for a in set(arreglos) | {"LCMD", "LSTG", "LSTA", "LACT", "LPEN", "LSIG", "LI", "LB", "LCK"}:
             V[a] = si._Arr()
         self.V = V
         self.u = {k: False for k in _FISICA}
