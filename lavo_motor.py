@@ -542,10 +542,14 @@ def normalizar_motor(eng: dict) -> dict:
             p = dict(p)
             p["salidas"] = sorted({salida_canonica(x) for x in _lista(p.get("salidas")) if x},
                                   key=lambda q: int(q[1:]) if q[1:].isdigit() else 99)
-            p["motor"] = [a for a in ACCIONES_MOTOR
-                          if a in {ALIAS_ACCION_MOTOR.get(_norm(x), _norm(x)) for x in _lista(p.get("motor"))}]
-            extra = [x for x in _lista(p.get("motor"))
+            # Las acciones desconocidas se buscan en la lista ORIGINAL (antes de
+            # normalizarla): asi validar_motor rechaza "volar" en vez de
+            # descartarla sin decir nada. Los vacios (None, "") no son acciones.
+            originales = [x for x in _lista(p.get("motor")) if x not in (None, "")]
+            extra = [x for x in originales
                      if ALIAS_ACCION_MOTOR.get(_norm(x), _norm(x)) not in ACCIONES_MOTOR]
+            p["motor"] = [a for a in ACCIONES_MOTOR
+                          if a in {ALIAS_ACCION_MOTOR.get(_norm(x), _norm(x)) for x in originales}]
             if extra:
                 p["_motor_desconocido"] = extra
             pasos.append(p)

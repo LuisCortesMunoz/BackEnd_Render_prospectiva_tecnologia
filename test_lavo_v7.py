@@ -95,6 +95,10 @@ check(lm.error_plc(a) == (0, 0), "el bloque compilado pasa la validacion del PLC
 check(a[lm.H_CHK] == lm.checksum(a) and 1 <= a[lm.H_ID] <= 32767, "checksum e id deterministas")
 check(lm.codigo_senal("NOT S1") == 1004 and lm.codigo_senal("SQ2 paso 3") == lm.SENALES["SQ2_PASO3"],
       "codigos de senal (NOT +1000, pasos)")
+_err = lm.validar_motor(banda({"secuencias": [{"id": "SQ1", "inicio": "I1", "pasos": [
+    {"motor": ["avanzar", None, ""], "segundos": 1}, {"motor": ["volar"], "segundos": 1}]}]}, True))[0]
+check(_err == ["SQ1 paso 2: accion de motor 'volar' no existe (usa marcha, paro, dir_1, dir_2, invertir)."],
+      "una accion de motor desconocida se rechaza (alias y vacios no)")
 
 # Equivalencia: el ST (interpretado) reporta EXACTAMENTE el error de error_plc().
 random.seed(7)
