@@ -22,6 +22,7 @@ Cscape solo haya que declarar unas pocas; la leyenda va al inicio del ST.
 
 import argparse
 import os
+import re
 import sys
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
@@ -110,9 +111,9 @@ def rd(dst, code_expr, n=0):
     El codigo ya fue validado al aplicar la config (0..143 o 1001..1143),
     asi que MOD 1000 siempre cae dentro de LSIG."""
     a = I("a")
+    carga = "" if code_expr == a else f"{a} := {code_expr} ;\n"
     return ind(f"""
-{a} := {code_expr} ;
-{dst} := LSIG[ANY_TO_DINT({a} MOD {lm.NOT_OFFSET})] XOR ({a} >= {lm.NOT_OFFSET}) ;""", n)
+{carga}{dst} := LSIG[ANY_TO_DINT({a} MOD {lm.NOT_OFFSET})] XOR ({a} >= {lm.NOT_OFFSET}) ;""", n)
 
 
 def bits(src_expr, dst_rango, dst_off_expr, nbits, var, n=0):
@@ -132,17 +133,16 @@ END_FOR ;""", n)
 # ---------------------------------------------------------------------------
 def seccion_L0():
     hw = lm.HW_BANDA
+    # Las tablas fijas (HwQ, HwLamp, HwSens) se decodifican de una mascara
+    # con un ciclo: mismo resultado que 36 asignaciones, menos codigo.
     lineas = []
     for j in range(lm.N_OUT):
         q = f"Q{j + 1}"
-        d = hw["salidas"].get(q)
-        lineas.append(f"{Br('HwQ', j)} := {'TRUE' if d else 'FALSE'} ;    "
-                      f"(* {q}: {d['desc'] if d else 'no cableada en la banda'} *)")
-    for j in range(lm.N_OUT):
-        q = f"Q{j + 1}"
         d = hw["salidas"].get(q) or {}
-        lineas.append(f"{Br('HwLamp', j)} := {'TRUE' if d.get('lampara') else 'FALSE'} ;    "
-                      f"(* {q} {'es lampara: puede quedar encendida con I3' if d.get('lampara') else 'no es lampara'} *)")
+        lineas.append(f"(*   {q:<4}: {d['desc'] + (' (lampara)' if d.get('lampara') else '') if d else 'no cableada en la banda'} *)")
+    lineas.append(f"(* HwQ = salidas cableadas (mascara {lm.hw_out_mask()}), HwLamp = lamparas ({lm.hw_lamp_mask()}) *)")
+    lineas.append(bits(str(lm.hw_out_mask()), "HwQ", "0", lm.N_OUT, "ek"))
+    lineas.append(bits(str(lm.hw_lamp_mask()), "HwLamp", "0", lm.N_OUT, "ek"))
     fuentes = {"I1": "BtnStart", "I2": "BtnAux", "I3": "BtnStop", "I4": "S1_Det", "I5": "S2_Det"}
     entradas = []
     for j in range(lm.N_IN):
@@ -152,8 +152,8 @@ def seccion_L0():
             entradas.append(f"{Br('RawIn', j)} := {fuentes[i]} ;    (* {i}: {d['desc']} ({d['tipo']}) *)")
         else:
             entradas.append(f"{Br('RawIn', j)} := FALSE ;    (* {i}: no cableada *)")
-        entradas.append(f"{Br('HwSens', j)} := {'TRUE' if (d or {}).get('sensor') else 'FALSE'} ;    "
-                        f"(* {i}: {'filtro de sensores' if (d or {}).get('sensor') else 'filtro de botones'} *)")
+    entradas.append(f"(* HwSens = entradas con filtro de sensores (mascara {lm.hw_sens_mask()}) *)")
+    entradas.append(bits(str(lm.hw_sens_mask()), "HwSens", "0", lm.N_IN, "ek"))
     return f"""
 (* ============================================================ *)
 (* §L0 - RECURSOS FISICOS DE ESTA BANDA (perfil de hardware)   *)
@@ -233,12 +233,18 @@ def validacion_final():
     E, F = I("ErrCode"), I("ErrField")
     emerg = (S.SENALES[S.EMERGENCIA], S.SENALES[S.EMERGENCIA] + S.NOT_OFFSET)
     L = []
-    L.append(chequeo(f"{PEN(S.H_FORMAT)} <> {S.ENGINE_VERSION}", S.E_FORMAT, S.H_FORMAT + 1))
-    L.append(chequeo(f"{PEN(S.H_LEN)} <> {S.CFG_LEN}", S.E_LEN, S.H_LEN + 1))
-    L.append(chequeo(f"{PEN(S.H_ID)} < 1", S.E_ID, S.H_ID + 1))
-    L.append(chequeo(f"{PEN(S.H_ID)} <> {I('StagedId')}", S.E_IDMISMATCH, S.H_ID + 1))
-    L.append(chequeo(f"ANY_TO_DINT({PEN(S.H_CHK)}) <> LCK[0]", S.E_CHK, S.H_CHK + 1))
-    L.append(f"IF ({E} = 0) AND ({I('RngField')} <> 0) THEN {E} := {S.E_RANGE} ; {F} := {I('RngField')} ; END_IF ;")
+    # Primeras reglas como cadena IF/ELSIF: al empezar, ErrCode = 0 (COMMIT
+    # lo borra y la copia por trozos no lo toca), asi que la primera que
+    # falla gana, igual que con "IF ErrCode = 0 AND ..." una tras otra.
+    cadena = [(f"{PEN(S.H_FORMAT)} <> {S.ENGINE_VERSION}", S.E_FORMAT, S.H_FORMAT + 1),
+              (f"{PEN(S.H_LEN)} <> {S.CFG_LEN}", S.E_LEN, S.H_LEN + 1),
+              (f"{PEN(S.H_ID)} < 1", S.E_ID, S.H_ID + 1),
+              (f"{PEN(S.H_ID)} <> {I('StagedId')}", S.E_IDMISMATCH, S.H_ID + 1),
+              (f"ANY_TO_DINT({PEN(S.H_CHK)}) <> LCK[0]", S.E_CHK, S.H_CHK + 1),
+              (f"{I('RngField')} <> 0", S.E_RANGE, I('RngField'))]
+    for k, (cond, codigo, campo) in enumerate(cadena):
+        L.append(f"{'IF' if k == 0 else 'ELSIF'} {cond} THEN {E} := {codigo} ; {F} := {campo} ;")
+    L.append("END_IF ;")
     L.append(f"IF {PEN(S.H_MOVE)} = 1 THEN")
     L.append("    " + chequeo(f"({PEN(S.H_FREQ)} < {S.FREQ_MIN}) OR ({PEN(S.H_FREQ)} > {S.FREQ_MAX})", S.E_SEM, S.H_FREQ + 1))
     L.append("    " + chequeo(f"({PEN(S.H_DIR)} <> 1) AND ({PEN(S.H_DIR)} <> 2)", S.E_SEM, S.H_DIR + 1))
@@ -1268,54 +1274,61 @@ END_IF ;
 """
     # ---- salidas
     pares = S.HW_BANDA["pares_excluyentes"]
-    (a1, b1, _), (a2, b2, _) = pares
-    pl_lines = []
-    for k, (up, dn, nombre) in enumerate(pares):
-        iu, idn = int(up[1:]) - 1, int(dn[1:]) - 1
-        pl_lines.append((k, iu, idn, nombre, up, dn))
-    pl_code = []
-    for k, iu, idn, nombre, up, dn in pl_lines:
-        man = "Pluma1Cmd" if k == 0 else "Pluma2Cmd"
-        f_both, f_to = (1, 2) if k == 0 else (4, 8)
-        cmd, prev, accp, to = Ir("PlCmd", k), Ir("PlPrev", k), Ir("PlAcc", k), Br("PlTimeout", k)
-        pl_code.append(f"""
-(* ---------- {nombre.upper()}: {up} sube / {dn} baja ---------- *)
-{B('pUp')} := {Br('OutReq', iu)} ;
-{B('pDn')} := {Br('OutReq', idn)} ;
-IF {B('pUp')} AND {B('pDn')} THEN
-    {I('q')} := 0 ;
-    {I('PlumaFault')} := {I('PlumaFault')} + {f_both} ;
-ELSIF {B('pUp')} THEN
-    {I('q')} := 1 ;
-ELSIF {B('pDn')} THEN
-    {I('q')} := 2 ;
-ELSE
-    {I('q')} := 0 ;
-    (* comando manual del panel (R60/R61) si la logica no pide nada *)
-    IF NOT {B('GenStop7')} AND (({man} = 1) OR ({man} = 2)) THEN
-        {I('q')} := {man} ;
+    # Un solo ciclo para las dos plumas: pluma k usa Q(up) = up0 + paso*k.
+    (u0, d0, n0), (u1, d1, n1) = pares
+    iu0, id0 = int(u0[1:]) - 1, int(d0[1:]) - 1
+    paso = (int(u1[1:]) - 1) - iu0
+    assert (int(d1[1:]) - 1) - id0 == paso and id0 == iu0 + 1
+    up_k = f"{iu0} + ek * {paso}" if paso > 0 else f"{iu0} - ek * {-paso}"
+    dn_k = f"{id0} + ek * {paso}" if paso > 0 else f"{id0} - ek * {-paso}"
+    man = I("tgt")
+    pl_code = [f"""
+(* ---------- plumas: k=0 {n0.upper()} ({u0} sube / {d0} baja), *)
+(*            k=1 {n1.upper()} ({u1} sube / {d1} baja)          *)
+(* PlumaFault: +1/+4 subir y bajar a la vez, +2/+8 tiempo maximo *)
+FOR ek := 0 TO 1 DO
+    IF ek = 0 THEN
+        {man} := Pluma1Cmd ;
+    ELSE
+        {man} := Pluma2Cmd ;
     END_IF ;
-END_IF ;
-IF {I('q')} <> {prev} THEN
-    {accp} := 0 ;
-    {to} := FALSE ;
-END_IF ;
-{prev} := {I('q')} ;
-IF {I('q')} <> 0 THEN
-    IF {p100} AND ({accp} < 32767) THEN
-        {accp} := {accp} + 1 ;
+    {B('pUp')} := {Br('OutReq', up_k)} ;
+    {B('pDn')} := {Br('OutReq', dn_k)} ;
+    IF {B('pUp')} AND {B('pDn')} THEN
+        {I('q')} := 0 ;
+        {I('PlumaFault')} := {I('PlumaFault')} + 1 + ek * 3 ;
+    ELSIF {B('pUp')} THEN
+        {I('q')} := 1 ;
+    ELSIF {B('pDn')} THEN
+        {I('q')} := 2 ;
+    ELSE
+        {I('q')} := 0 ;
+        (* comando manual del panel (R60/R61) si la logica no pide nada *)
+        IF NOT {B('GenStop7')} AND (({man} = 1) OR ({man} = 2)) THEN
+            {I('q')} := {man} ;
+        END_IF ;
     END_IF ;
-    IF ({ACT(S.H_PLUMA_MAX)} > 0) AND ({accp} >= {ACT(S.H_PLUMA_MAX)}) THEN
-        {to} := TRUE ;
+    IF {I('q')} <> {Ir('PlPrev', 'ek')} THEN
+        {Ir('PlAcc', 'ek')} := 0 ;
+        {Br('PlTimeout', 'ek')} := FALSE ;
     END_IF ;
-END_IF ;
-IF {to} THEN
-    {I('q')} := 0 ;
-    {I('PlumaFault')} := {I('PlumaFault')} + {f_to} ;
-END_IF ;
-{cmd} := {I('q')} ;
-{Br('OutFinal', iu)} := ({I('q')} = 1) ;
-{Br('OutFinal', idn)} := ({I('q')} = 2) ;""")
+    {Ir('PlPrev', 'ek')} := {I('q')} ;
+    IF {I('q')} <> 0 THEN
+        IF {p100} AND ({Ir('PlAcc', 'ek')} < 32767) THEN
+            {Ir('PlAcc', 'ek')} := {Ir('PlAcc', 'ek')} + 1 ;
+        END_IF ;
+        IF ({ACT(S.H_PLUMA_MAX)} > 0) AND ({Ir('PlAcc', 'ek')} >= {ACT(S.H_PLUMA_MAX)}) THEN
+            {Br('PlTimeout', 'ek')} := TRUE ;
+        END_IF ;
+    END_IF ;
+    IF {Br('PlTimeout', 'ek')} THEN
+        {I('q')} := 0 ;
+        {I('PlumaFault')} := {I('PlumaFault')} + 2 + ek * 6 ;
+    END_IF ;
+    {Ir('PlCmd', 'ek')} := {I('q')} ;
+    {Br('OutFinal', up_k)} := ({I('q')} = 1) ;
+    {Br('OutFinal', dn_k)} := ({I('q')} = 2) ;
+END_FOR ;"""]
     salidas = f"""
 (* ============================================================ *)
 (* §L2i - SALIDAS                                               *)
@@ -1515,9 +1528,8 @@ def leyenda():
     cab = [
         "(* ============================================================ *)",
         "(* PROGRAMA MAESTRO BANDA - HORNER XL4 / CSCAPE ST - v7 LAVO  *)",
-        "(* BLOQUE 1 de 2 (STBLOCK1). El motor general esta en el       *)",
-        "(* bloque 2 (STBLOCK2 = LAVO_Motor_ST.txt), que se ejecuta     *)",
-        "(* despues de este en cada ciclo (limite de 64 KB por bloque). *)",
+        "(* UN SOLO BLOQUE (STBLOCK1): programa completo. Compactado   *)",
+        "(* para quedar debajo del limite de 64 KB por bloque.         *)",
         "(* Generado por cscape/generar_st_v7.py (no editar a mano:    *)",
         "(* regenerar si cambia lavo_motor.py).                        *)",
         "(*                                                            *)",
@@ -1535,6 +1547,8 @@ def leyenda():
         f"(*   LCMD INT[10] %R{S.CMD_BASE} · LSTG INT[640] %R{S.STAGE_BASE} · LSTA INT[100] %R{S.STATUS_BASE} *)",
         f"(*   LACT INT[640] %R{S.ACT_BASE} · LPEN INT[640] %R{S.PEN_BASE}                 *)",
         f"(*   LI INT[{LI_LEN}] %R{S.LI_BASE} · LCK DINT[4] %R{S.LD_BASE}                     *)",
+        "(*   LCK[0] = checksum; LCK[1..3] = punteros ib, bb, base      *)",
+        "(*   (DINT: se usan directo como indice de arreglo)            *)",
         f"(*   LSIG BOOL[160] · LB BOOL[{LB_LEN}] · em INT  (internas, sin tag)  *)",
         "(*   (se conservan Sys100ms %S4, ek, ej)                       *)",
         "(* Posiciones de LI / LB (nombre logico de cada una):          *)",
@@ -1558,27 +1572,17 @@ def cortar(txt, desde, hasta, nuevo):
     return txt[:a] + nuevo + txt[b:]
 
 
-CORTE = "(* @@CORTE_STBLOCK2@@ *)\n"
+def tokens_st(txt):
+    """Tokens de codigo (sin comentarios). Referencia medida en Cscape:
+    v6 14 931 tokens -> 50 616 B; v7 en un bloque 21 730 -> 77 656 B;
+    v7 compactado 17 251 -> 62 256 B (compilo, 16 oct 2026: 3.61 B/token)."""
+    return len(re.findall(r"[A-Za-z_][A-Za-z0-9_#]*|\d+|:=|<=|>=|<>|\.\.|[^\s]", sin_comentarios(txt)))
 
 
-def cabecera_bloque2():
-    return """(* ============================================================ *)
-(* PROGRAMA MAESTRO BANDA v7 LAVO - BLOQUE 2 de 2 (STBLOCK2)    *)
-(* Se ejecuta en cada ciclo DESPUES de STBLOCK1 (LAVO_Main_ST). *)
-(* Contiene el motor general (§L2), el estado (§L3) y §18..§20. *)
-(* Usa las mismas variables globales que el bloque 1. Se separo *)
-(* porque Cscape limita cada bloque ST a 64 KB de codigo.       *)
-(* Generado por cscape/generar_st_v7.py (no editar a mano).     *)
-(* ============================================================ *)
-
-"""
-
-
-def partes() -> tuple:
-    """(bloque1, bloque2) para Cscape. Juntos == ST_banda_v7_lavo.txt."""
-    t = generar()
-    a = t.index(CORTE)
-    return t[:a], t[a + len(CORTE):]
+# Limite propio: 17 500 tokens ≈ 63 175 B con la peor relacion medida
+# (3.61 B/token), por debajo de los 65 536 B de un bloque ST de Cscape.
+# El v7 actual (17 251 tokens) compilo en 62 256 B: quedan ~3 KB libres.
+MAX_TOKENS = 17500
 
 
 def generar() -> str:
@@ -1667,7 +1671,7 @@ def generar() -> str:
     a = t.rindex("ELSE\n", 0, a)
     b = t.index("(* v6: identificacion y validez del motor (siempre). *)")
     b_fin = t.index("ES[2] := EI[1] ;\n", b) + len("ES[2] := EI[1] ;\n")
-    t = (t[:a] + "END_IF ;\n\n" + CORTE + cabecera_bloque2() + f"IF {B('V7Active')} THEN\n\n"
+    t = (t[:a] + "END_IF ;\n\n" + f"IF {B('V7Active')} THEN\n\n"
          + seccion_L2() + "\nEND_IF ;\n\n" + seccion_L3() + t[b_fin:])
 
     # §18: direccion real.
@@ -1677,6 +1681,62 @@ def generar() -> str:
         if viejo in t:
             i = t.index(viejo)
             raise SystemExit(f"Quedo una referencia v6 {viejo}: ...{t[i - 80:i + 40]}...")
+
+    # Compactacion para que TODO quepa en un solo bloque ST (< 64 KB).
+    t = unir_6_7(t)
+    t = re.sub(r"ANY_TO_DINT\(([^()]*?) \+ 0\)", r"ANY_TO_DINT(\1)", t)
+    t = punteros(t)
+    return t
+
+
+def sin_comentarios(txt):
+    return re.sub(r"\(\*.*?\*\)", "", txt, flags=re.S)
+
+
+def unir_6_7(t):
+    """§6 (config nueva) y §7 (reset) ejecutaban el MISMO bloque de reinicio
+    (solo cambian comentarios): se deja uno solo con la condicion OR. El
+    bloque de §6 no toca ResetCmd, asi que evaluarlo despues de calcular
+    ResetCmdTrigger da el mismo resultado; si llegan los dos a la vez, el
+    reinicio es idempotente."""
+    fin = ("(* v7: una configuracion nueva o un reset reinician el motor general. *)\n"
+           f"IF NewCfgTrigger OR ResetCmdTrigger THEN\n    {B('EngResetReq')} := TRUE ;\nEND_IF ;\n")
+    a = t.index("\nIF NewCfgTrigger THEN\n")
+    b = t.index("\nEND_IF ;\n", a) + len("\nEND_IF ;\n")
+    c6 = t[a:b]
+    t = t[:a] + "\n(* El reinicio comun de §6 y §7 esta al final de §7. *)\n" + t[b:]
+    a = t.index("\nIF ResetCmdTrigger THEN\n")
+    b = t.index(fin, a)
+    c7 = t[a:b]
+
+    def norm(s, cond):
+        return " ".join(sin_comentarios(s).replace(cond, "COND", 1).split())
+    if norm(c6, "IF NewCfgTrigger THEN") != norm(c7, "IF ResetCmdTrigger THEN"):
+        raise SystemExit("§6 y §7 ya no tienen el mismo bloque de reinicio: revisar unir_6_7()")
+    comun = c6.strip("\n").replace("IF NewCfgTrigger THEN", "IF NewCfgTrigger OR ResetCmdTrigger THEN", 1)
+    comun = comun[:comun.rindex("END_IF ;")]
+    comun += f"    (* v7: tambien reinicia el motor general *)\n    {B('EngResetReq')} := TRUE ;\n\nEND_IF ;\n"
+    return (t[:a] + "\n(* v7: §6 y §7 hacen el mismo reinicio: un solo bloque. *)\n"
+            + comun + t[b + len(fin):])
+
+
+# Punteros base que solo se usan como indice: se guardan como DINT en
+# LCK[1..3] (libres; LCK[0] es el checksum) y se usan sin ANY_TO_DINT.
+PUNTEROS = {"ib": "LCK[1]", "bb": "LCK[2]", "base": "LCK[3]"}
+
+
+def punteros(t):
+    for nombre, lck in PUNTEROS.items():
+        li = I(nombre)
+        e = re.escape(li)
+        t = re.sub(rf"ANY_TO_DINT\({e}\)", lck, t)
+        t = re.sub(rf"ANY_TO_DINT\({e} \+ (\d+)\)", rf"{lck} + \1", t)
+        t = re.sub(rf"ANY_TO_DINT\({e} \+ ([^()]+)\)", rf"{lck} + ANY_TO_DINT(\1)", t)
+        t = re.sub(rf"^(\s*){e} := ([^;]+) ;", rf"\1{lck} := ANY_TO_DINT(\2) ;", t, flags=re.M)
+        if li in sin_comentarios(t):
+            i = sin_comentarios(t).index(li)
+            raise SystemExit(f"{li} ({nombre}) quedo en un uso que no es indice: ...{sin_comentarios(t)[i - 80:i + 40]}...")
+        t = t.replace(f"{li}={nombre}", f"{lck}={nombre}")
     return t
 
 
@@ -1882,10 +1942,8 @@ def generar_variables() -> str:
     w("  2. En Global Variables: elimina EC, ES, EI, EB (seccion 1) y pega el")
     w("     bloque de la seccion 2. Conserva Sys100ms, ek y ej.")
     w("  3. Abre el bloque ST STBLOCK1 y REEMPLAZA todo su texto por el")
-    w("     contenido completo de LAVO_Main_ST.txt.")
-    w("  3b. Agrega un SEGUNDO bloque ST (STBLOCK2) DESPUES de STBLOCK1 y pega")
-    w("     LAVO_Motor_ST.txt. Cscape limita cada bloque a 64 KB; los dos se")
-    w("     ejecutan en orden en cada ciclo y comparten las variables globales.")
+    w("     contenido completo de LAVO_Main_ST.txt (es el programa COMPLETO en")
+    w("     un solo bloque; no hace falta un STBLOCK2).")
     w("  4. Compila (Program > Compile / Verify). Los avisos W10034 ('loop")
     w("     instructions may block the target cycle') son normales.")
     w("     Si aparece un error de tipo en una linea con DINT#, cambia esa")
@@ -1928,14 +1986,14 @@ def main():
     ap.add_argument("--destino", help="carpeta 'Archivos Cscape' donde escribir LAVO_Main_ST.txt "
                                       "y LAVO_Variables_Cscape.txt")
     args = ap.parse_args()
-    b1, b2 = partes()
-    st = b1 + b2
+    st = generar()
+    n = tokens_st(st)
+    if n > MAX_TOKENS:
+        raise SystemExit(f"El ST tiene {n} tokens (> {MAX_TOKENS}): no cabria en un solo bloque de 64 KB")
     with open(SALIDA, "w", encoding="utf-8", newline="\r\n") as f:
         f.write(st)
-    for nombre, txt in (("ST_banda_v7_bloque1.txt", b1), ("ST_banda_v7_bloque2.txt", b2)):
-        with open(os.path.join(AQUI, nombre), "w", encoding="utf-8", newline="\r\n") as f:
-            f.write(txt)
-    print(f"{SALIDA}: {st.count(chr(10)) + 1} lineas")
+    print(f"{SALIDA}: {st.count(chr(10)) + 1} lineas, {n} tokens "
+          f"(~ {n * 3.61:.0f} B compilado, limite 65536)")
     referencia = generar_variables()
     with open(os.path.join(AQUI, "LAVO_Referencia_v7.txt"), "w", encoding="utf-8", newline="") as f:
         f.write(referencia)
@@ -1946,11 +2004,10 @@ def main():
     with open(os.path.join(AQUI, "LAVO_Variables_Cscape.txt"), "w", encoding="utf-8", newline="") as f:
         f.write(variables)
     if args.destino:
-        for nombre, txt in (("LAVO_Main_ST.txt", b1), ("LAVO_Motor_ST.txt", b2)):
-            ruta = os.path.join(args.destino, nombre)
-            with open(ruta, "w", encoding="utf-8", newline="\r\n") as f:
-                f.write(txt)
-            print(f"{ruta}: escrito")
+        ruta = os.path.join(args.destino, "LAVO_Main_ST.txt")
+        with open(ruta, "w", encoding="utf-8", newline="\r\n") as f:
+            f.write(st)
+        print(f"{ruta}: escrito")
         ruta = os.path.join(args.destino, "LAVO_Variables_Cscape.txt")
         with open(ruta, "w", encoding="utf-8", newline="") as f:
             f.write(variables)

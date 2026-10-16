@@ -197,10 +197,8 @@ arriba (Nombre, Tipo, Dim, Tag).
   2. En Global Variables: elimina EC, ES, EI, EB (seccion 1) y pega el
      bloque de la seccion 2. Conserva Sys100ms, ek y ej.
   3. Abre el bloque ST STBLOCK1 y REEMPLAZA todo su texto por el
-     contenido completo de LAVO_Main_ST.txt.
-  3b. Agrega un SEGUNDO bloque ST (STBLOCK2) DESPUES de STBLOCK1 y pega
-     LAVO_Motor_ST.txt. Cscape limita cada bloque a 64 KB; los dos se
-     ejecutan en orden en cada ciclo y comparten las variables globales.
+     contenido completo de LAVO_Main_ST.txt (es el programa COMPLETO en
+     un solo bloque; no hace falta un STBLOCK2).
   4. Compila (Program > Compile / Verify). Los avisos W10034 ('loop
      instructions may block the target cycle') son normales.
      Si aparece un error de tipo en una linea con DINT#, cambia esa
