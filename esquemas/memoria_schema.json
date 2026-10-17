@@ -1,0 +1,58 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "lavo/memoria_schema.json",
+  "title": "Memoria validada de LAVO (nivel 1)",
+  "description": "Una configuracion de automatizacion que el USUARIO aprobo. El elemento principal es 'json' (la logica estructurada), no el texto.",
+  "type": "object",
+  "required": ["id", "dispositivo", "instruccion", "instruccion_normalizada", "autonoma", "json", "json_modelo",
+               "huella", "version_esquema", "programa_maestro", "caracteristicas", "etiquetas", "validacion",
+               "version", "estado", "fecha_validacion"],
+  "properties": {
+    "id": {"type": "string"},
+    "dispositivo": {"type": "string", "enum": ["banda", "maletin"]},
+    "instruccion": {"type": "string"},
+    "instruccion_normalizada": {"type": "string"},
+    "autonoma": {"type": "boolean", "description": "true si la instruccion describe la logica completa (no es 'agrega/cambia' sobre un programa previo)"},
+    "json": {"type": "object", "description": "engine_config final aprobado (lo que va a /aplicar-plc)"},
+    "json_modelo": {"type": "object", "description": "el mismo programa en el esquema que produce el modelo (para usarlo como ejemplo)"},
+    "huella": {"type": "string", "description": "sha256 del contenido ejecutable canonico; detecta duplicados"},
+    "version_esquema": {"type": "string", "enum": ["banda-motor-v7", "banda-motor-v6", "banda-v5", "maletin-engine-config-1"]},
+    "programa_maestro": {"type": "string"},
+    "caracteristicas": {
+      "type": "object",
+      "required": ["funciones", "entradas", "salidas"],
+      "properties": {
+        "funciones": {"type": "array", "items": {"type": "string"}},
+        "entradas": {"type": "array", "items": {"type": "string"}},
+        "salidas": {"type": "array", "items": {"type": "string"}},
+        "temporizadores": {"type": "array"},
+        "contadores": {"type": "array"},
+        "condiciones": {"type": "array"},
+        "secuencias": {"type": "array"},
+        "memorias": {"type": "array"},
+        "motor": {"type": "object"}
+      }
+    },
+    "etiquetas": {"type": "array", "items": {"type": "string"}},
+    "validacion": {
+      "type": "object",
+      "required": ["usuario", "software", "fisica"],
+      "properties": {
+        "usuario": {"type": "object", "required": ["aprobada", "fecha"],
+                    "properties": {"aprobada": {"type": "boolean"}, "fecha": {"type": "string"}}},
+        "software": {"type": "object", "required": ["estado", "pruebas"],
+                     "properties": {"estado": {"type": "string", "enum": ["aprobada", "rechazada"]},
+                                    "pruebas": {"type": "array", "items": {"type": "string"}}}},
+        "fisica": {"type": "object", "required": ["estado"],
+                   "properties": {"estado": {"type": "string", "enum": ["no_realizada", "exitosa", "fallida"]},
+                                  "fecha": {"type": ["string", "null"]},
+                                  "nota": {"type": "string"}}}
+      }
+    },
+    "version": {"type": "integer"},
+    "reemplaza": {"type": ["string", "null"]},
+    "estado": {"type": "string", "enum": ["activa", "reemplazada"]},
+    "fecha_validacion": {"type": "string"},
+    "origen": {"type": "object"}
+  }
+}

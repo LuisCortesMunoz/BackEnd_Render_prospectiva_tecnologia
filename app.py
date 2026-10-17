@@ -112,6 +112,29 @@ AGENT_SEMANTIC_ENABLED = _AGENTS_OK and os.environ.get("AGENT_SEMANTIC_ENABLED",
 AGENT_EXPERTS_ENABLED  = _AGENTS_OK and os.environ.get("AGENT_EXPERTS_ENABLED", "1")  != "0"  # Fase 3
 AGENT_MEMORY_ENABLED   = _AGENTS_OK and os.environ.get("AGENT_MEMORY_ENABLED", "1")   != "0"  # Fase 3
 
+# ─── Memoria validada + contexto por ramificaciones (niveles 1, 2 y 3) ──
+# Nivel 1: configuraciones que el usuario aprobo ("Guardar logica validada"),
+#          en un almacen PERSISTENTE (repo de GitHub aparte; ver almacen_memoria.py).
+# Nivel 2: contexto tecnico local (codigos/, cscape/, context/).
+# Nivel 3: catalogo de procesos industriales genericos (procesos_industriales/).
+# Import defensivo: si algo faltara, la generacion sigue con el flujo de siempre.
+import metricas_lavo
+try:
+    import memoria_validada
+    import contexto_ramificado
+    import almacen_memoria
+    MEMORIA = memoria_validada.MemoriaValidada()
+    _MEMORIA_OK = True
+    log.info(f"Memoria validada en {MEMORIA.almacen.descripcion()}")
+except Exception as _e_mem:
+    MEMORIA = None
+    _MEMORIA_OK = False
+    log.warning(f"Memoria validada no disponible ({_e_mem}); se usa el flujo de siempre.")
+
+# Interruptores (sin redeploy): contexto por ramificaciones y reuso directo.
+CONTEXTO_RAMIFICADO = _MEMORIA_OK and os.environ.get("LAVO_CONTEXTO_RAMIFICADO", "1") != "0"
+REUSO_MEMORIA       = _MEMORIA_OK and os.environ.get("LAVO_REUSO_MEMORIA", "1") != "0"
+
 # ─── Rutas de archivos ────────────────────────────────────────────
 
 CONTEXTO_JSON_PATH = os.environ.get("CONTEXTO_JSON", "context_json/contexto.json")
@@ -1922,6 +1945,8 @@ def llamar_modelo_json(messages: list) -> dict:
     ti = resp.usage.prompt_tokens
     ts = resp.usage.completion_tokens
     log.info(f"Tokens — entrada: {ti}  salida: {ts}  total: {ti+ts}")
+    metricas_lavo.sumar("tokens_prompt_reales", ti or 0)
+    metricas_lavo.sumar("tokens_respuesta", ts or 0)
 
     try:
         return extraer_json_de_texto(texto_raw)
@@ -1930,6 +1955,60 @@ def llamar_modelo_json(messages: list) -> dict:
             "El modelo no devolvio un JSON valido. Vuelve a intentar. "
             f"Detalle: {e} | Inicio de la respuesta: {texto_raw[:300]}"
         )
+
+def _llamar_modelo(messages: list) -> dict:
+    """llamar_modelo_json + metricas (llamadas, tokens estimados, tiempo).
+    Busca llamar_modelo_json en tiempo de llamada: las pruebas lo simulan."""
+    metricas_lavo.sumar("llamadas_modelo", 1)
+    metricas_lavo.sumar("tokens_prompt_estimados", _estimar_tokens_prompt(messages))
+    t0 = time.perf_counter()
+    try:
+        return llamar_modelo_json(messages)
+    finally:
+        metricas_lavo.sumar("t_modelo_ms", (time.perf_counter() - t0) * 1000)
+
+
+# ─── Memoria validada: ayudas ─────────────────────────────────────
+
+def esquema_activo(dispositivo: str) -> str:
+    """Version de esquema que acepta HOY el programa maestro de cada equipo."""
+    if dispositivo == "maletin":
+        return "maletin-engine-config-1"
+    if BANDA_MOTOR_V7:
+        return "banda-motor-v7"
+    if BANDA_MOTOR_CONFIGURABLE:
+        return "banda-motor-v6"
+    return "banda-v5"
+
+
+def _buscar_memoria(dispositivo: str, texto: str) -> tuple:
+    """(registro identico o None, [(similitud, registro)] relevantes).
+
+    Identica = misma instruccion normalizada, autonoma (no "agrega/cambia") y
+    del esquema activo. Nunca mezcla dispositivos. Si el almacen falla, la
+    generacion sigue sin memoria (se registra el aviso)."""
+    if not (_MEMORIA_OK and MEMORIA is not None):
+        return None, []
+    t0 = time.perf_counter()
+    try:
+        esq = esquema_activo(dispositivo)
+        identica = None
+        if REUSO_MEMORIA and not memoria_validada.es_modificacion(texto):
+            e = MEMORIA.identica(dispositivo, texto, esq)
+            identica = MEMORIA.obtener(dispositivo, e["id"]) if e else None
+        similares = []
+        if CONTEXTO_RAMIFICADO:
+            for p, e in MEMORIA.buscar(dispositivo, texto, esq):
+                r = MEMORIA.obtener(dispositivo, e["id"])
+                if r is not None:
+                    similares.append((p, r))
+        return identica, similares
+    except Exception as e:
+        log.warning(f"Memoria validada no disponible para esta peticion (se ignora): {e}")
+        return None, []
+    finally:
+        metricas_lavo.sumar("t_memoria_ms", (time.perf_counter() - t0) * 1000)
+
 
 # ─── Estado global ────────────────────────────────────────────────
 
@@ -2365,6 +2444,15 @@ def health():
         "banda_motor_configurable": BANDA_MOTOR_CONFIGURABLE,
         # ST v7: programa maestro general (LAVO_Main_ST.txt).
         "banda_motor_v7": BANDA_MOTOR_V7,
+        # Memoria validada (nivel 1). persistente=False en Render significa que
+        # se perderia en el siguiente despliegue: falta LAVO_MEMORIA_REPO/TOKEN.
+        "memoria_validada": {
+            "disponible": _MEMORIA_OK,
+            "almacen": MEMORIA.almacen.descripcion() if _MEMORIA_OK else None,
+            "persistente": bool(_MEMORIA_OK and MEMORIA.almacen.persistente_en_render),
+            "contexto_ramificado": CONTEXTO_RAMIFICADO,
+            "reuso_directo": REUSO_MEMORIA,
+        },
     }
 
 
@@ -2479,7 +2567,7 @@ def _generar_logica_banda_motor(texto: str, req: "LogicaRequest") -> "LogicaResp
     msgs_iter = list(messages)
     for intento in range(1, intentos + 1):
         try:
-            candidato = llamar_modelo_json(msgs_iter)
+            candidato = _llamar_modelo(msgs_iter)
         except ValueError as e:
             if intento < intentos:
                 log.warning(f"Motor banda auto-revision {intento}/{intentos}: JSON ilegible — {e}")
@@ -2569,8 +2657,16 @@ def _programa_previo_v7(req) -> Optional[dict]:
 
 
 def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaResponse":
-    """MOTOR LAVO v7: texto -> LLM (bloques + analisis) -> lavo_motor
-    (validacion, compilacion determinista, compatibilidad) -> respuesta.
+    """MOTOR LAVO v7: texto -> (memoria validada) -> LLM (bloques + analisis)
+    -> lavo_motor (validacion, compilacion determinista, compatibilidad).
+
+    Orden de decision (ver contexto_ramificado.py):
+      1. memoria IDENTICA, autonoma y compatible -> se reutiliza SIN modelo
+         (si vuelve a pasar la validacion del PLC);
+      2. prompt por ramificaciones: nucleo + memorias similares, o contexto
+         tecnico local si no hay; catalogo de procesos solo si la peticion es
+         general; proceso fuera del catalogo -> se pregunta, no se inventa;
+      3. el modelo genera y se valida igual que siempre.
 
     Estados de la respuesta:
       ok                  -> programa compatible: el editor lo carga y el
@@ -2581,8 +2677,33 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
       needs_clarification -> falta un dato imprescindible.
       not_supported       -> no hay alternativa segura: se informa por que."""
     import lavo_motor
+    metricas_lavo.poner("dispositivo", "banda")
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT_BANDA_V7}]
+    identica, similares = _buscar_memoria("banda", texto)
+    if identica is not None:
+        r = _reusar_banda_v7(texto, identica)
+        if r is not None:
+            return r
+
+    if CONTEXTO_RAMIFICADO:
+        if _pide_ampliar_catalogo(texto):
+            return _respuesta_ampliar_catalogo(texto)
+        sistema, plan = contexto_ramificado.mensajes_sistema_banda_v7(SYSTEM_PROMPT_BANDA_V7, texto, similares)
+        if plan["proceso_desconocido"]:
+            log.info(f"/generar-logica banda v7: proceso fuera del catalogo ({plan['proceso_desconocido']})")
+            metricas_lavo.poner("contexto", ["catalogo_sin_proceso"])
+            return LogicaResponse(
+                logic={}, name="", outputs=0, device="banda", status="needs_clarification",
+                questions=[contexto_ramificado.pregunta_proceso_desconocido(plan["proceso_desconocido"])],
+                assumptions=[], analysis={"equipo": "banda", "motor_v7": True, "contexto": plan})
+    else:
+        sistema = [{"role": "system", "content": SYSTEM_PROMPT_BANDA_V7}]
+        plan = {"contexto": ["prompt_v7_completo"], "procesos": [], "proceso_desconocido": None}
+    metricas_lavo.poner("contexto", plan["contexto"])
+    metricas_lavo.poner("memorias_usadas", [r["id"] for _, r in similares])
+    metricas_lavo.poner("procesos_usados", plan["procesos"])
+
+    messages = list(sistema)
     previas = "\n".join(f"- {p}" for p in ((req.contexto.historial if req.contexto else None) or [])[-4:])
     prev = _programa_previo_v7(req)
     if previas or prev:
@@ -2602,7 +2723,7 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     msgs_iter = list(messages)
     for intento in range(1, intentos + 1):
         try:
-            candidato = llamar_modelo_json(msgs_iter)
+            candidato = _llamar_modelo(msgs_iter)
         except ValueError as e:
             if intento < intentos:
                 log.warning(f"Banda v7 auto-revision {intento}/{intentos}: JSON ilegible — {e}")
@@ -2620,7 +2741,7 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                 questions=[{"id": q.get("campo") or f"q{i}", "campo": q.get("campo") or "",
                             "pregunta": q.get("pregunta") or "", "opciones": q.get("opciones") or []}
                            for i, q in enumerate(preguntas)],
-                assumptions=[], analysis={"equipo": "banda", "motor_v7": True,
+                assumptions=[], analysis={"equipo": "banda", "motor_v7": True, "contexto": plan,
                                           "analisis": candidato.get("analisis") or {}})
         try:
             cand = lavo_motor.cfg_desde_respuesta(candidato)
@@ -2634,10 +2755,11 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
             return LogicaResponse(
                 logic={}, name="", outputs=0, device="banda", status="needs_clarification",
                 questions=[lavo_motor.pregunta_frecuencia()], assumptions=[],
-                analysis={"equipo": "banda", "motor_v7": True})
+                analysis={"equipo": "banda", "motor_v7": True, "contexto": plan})
         if not errores:
             cfg = cand
             break
+        metricas_lavo.sumar("errores_validacion", 1)
         log.warning(f"Banda v7 auto-revision {intento}/{intentos}: {errores}")
         if intento < intentos:
             msgs_iter = list(messages)
@@ -2657,8 +2779,37 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
             logic={}, name="", outputs=0, device="banda", status="not_supported",
             warnings=["No se encontro una configuracion segura para esta instruccion: "
                       + "; ".join(errores)],
-            analysis={"equipo": "banda", "motor_v7": True, "compatibilidad": compat})
+            analysis={"equipo": "banda", "motor_v7": True, "compatibilidad": compat, "contexto": plan})
 
+    return _respuesta_banda_v7(texto, cfg, analisis_llm, extra={
+        "fuente": "modelo", "contexto": plan,
+        "memorias_referencia": [{"id": r["id"], "similitud": p} for p, r in similares]})
+
+
+def _reusar_banda_v7(texto: str, reg: dict):
+    """Respuesta directa desde una memoria IDENTICA, o None si ya no es valida
+    (p. ej. cambio el programa maestro): entonces se genera con el modelo."""
+    cfg = json.loads(json.dumps(reg["json"]))
+    errores = validar_logica_banda(cfg)
+    if errores:
+        metricas_lavo.sumar("errores_validacion", 1)
+        log.warning(f"Memoria {reg['id']} identica pero ya no valida ({errores}); se genera con el modelo.")
+        return None
+    log.info(f"/generar-logica banda v7: reutiliza la memoria validada {reg['id']} sin llamar al modelo")
+    metricas_lavo.poner("fuente", "memoria")
+    metricas_lavo.poner("memorias_usadas", [reg["id"]])
+    metricas_lavo.poner("contexto", ["memoria_identica"])
+    previa = dict(cfg.get("compatibilidad") or {})
+    return _respuesta_banda_v7(texto, cfg, previa, extra={
+        "fuente": "memoria", "memoria_id": reg["id"], "memoria_version": reg.get("version"),
+        "prueba_fisica": reg["validacion"]["fisica"]["estado"]},
+        confirmada_antes=bool(cfg.get("confirmado")))
+
+
+def _respuesta_banda_v7(texto: str, cfg: dict, analisis_llm: dict, extra: dict = None,
+                        confirmada_antes: bool = False) -> "LogicaResponse":
+    """Compatibilidad, registros, historial y estado final (modelo o memoria)."""
+    import lavo_motor
     compat = lavo_motor.analizar_compatibilidad(texto, cfg["band"], analisis_llm)
     cfg["compatibilidad"] = compat
     bloque = lavo_motor.compilar_motor(cfg["band"])
@@ -2667,8 +2818,11 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                  "rango": f"%R{lavo_motor.STAGE_BASE}..%R{lavo_motor.STAGE_BASE + lavo_motor.CFG_LEN - 1}"}
     analysis = {"equipo": "banda", "motor_v7": True, "acciones": lavo_motor.describir_motor(cfg["band"]),
                 "compatibilidad": compat, "registros": registros,
-                "recursos": lavo_motor.recursos_usados(cfg["band"]["engine"])}
+                "recursos": lavo_motor.recursos_usados(cfg["band"]["engine"]), **(extra or {})}
     warnings = avisos_logica_banda(cfg) + [f"No soportado: {x}" for x in compat["no_soportado"]]
+    if (extra or {}).get("fuente") == "memoria":
+        warnings.insert(0, f"Reutilizada de la memoria validada ({extra['memoria_id']}); "
+                           f"prueba fisica: {extra.get('prueba_fisica')}.")
 
     if compat["compatibilidad"] == "ninguna":
         return LogicaResponse(logic={}, name="", outputs=0, device="banda", status="not_supported",
@@ -2686,7 +2840,12 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         log.warning(f"No se pudo guardar ejemplo (banda v7): {e}")
 
     status, questions = "ok", []
-    if compat["requiere_confirmacion"]:
+    if compat["requiere_confirmacion"] and confirmada_antes:
+        # El usuario ya confirmo ESTA alternativa para ESTA instruccion al guardarla.
+        cfg["requiere_confirmacion"] = cfg["band"]["engine"]["requiere_confirmacion"] = True
+        cfg["confirmado"] = cfg["band"]["engine"]["confirmado"] = True
+        warnings.append("Alternativa confirmada antes por el usuario al guardarla en la memoria validada.")
+    elif compat["requiere_confirmacion"]:
         status = "needs_confirmation"
         cfg["requiere_confirmacion"] = True
         cfg["confirmado"] = False
@@ -2702,6 +2861,34 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         assumptions=[str(x) for x in compat["modificado"] + compat["simplificado"]],
         program={"metadata": {"name": nombre_prog, "engine_config": cfg}},
         analysis=analysis)
+
+
+def _pide_ampliar_catalogo(texto: str) -> bool:
+    return bool(re.search(r"autorizar ampliar el catalogo", memoria_validada.normalizar_texto(texto)))
+
+
+def _respuesta_ampliar_catalogo(texto: str) -> "LogicaResponse":
+    """El usuario autoriza ampliar el catalogo: se registra la solicitud; la
+    investigacion se hace aparte (nunca durante una peticion)."""
+    nombre = contexto_ramificado.proceso_desconocido(texto) or "(sin nombre)"
+    try:
+        sol = MEMORIA.almacen.leer("procesos_solicitados.json") or {"solicitudes": []}
+        sol["solicitudes"].append({"proceso": nombre, "instruccion": texto,
+                                   "fecha": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")})
+        MEMORIA.almacen.escribir("procesos_solicitados.json", sol, f"LAVO: solicitud de proceso '{nombre}'")
+        registrado = True
+    except Exception as e:
+        log.warning(f"No se pudo registrar la solicitud de proceso: {e}")
+        registrado = False
+    return LogicaResponse(
+        logic={}, name="", outputs=0, device="banda", status="needs_clarification",
+        questions=[{"id": "catalogo_pendiente", "campo": "proceso",
+                    "pregunta": (f"Solicitud para agregar \"{nombre}\" al catalogo "
+                                 + ("registrada" if registrado else "NO registrada (sin almacen)")
+                                 + ". La investigacion se hace aparte, no durante esta peticion. "
+                                   "Mientras tanto, ¿describes la secuencia o usamos transporte basico?"),
+                    "opciones": ["Describir la secuencia paso a paso", "Usar transporte basico con I1 y I2"]}],
+        assumptions=[], analysis={"equipo": "banda", "motor_v7": True, "proceso_solicitado": nombre})
 
 
 def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
@@ -2786,7 +2973,7 @@ def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
     msgs_iter = list(messages)
     for intento in range(1, intentos + 1):
         try:
-            candidato = llamar_modelo_json(msgs_iter)
+            candidato = _llamar_modelo(msgs_iter)
         except ValueError as e:
             if intento < intentos:
                 log.warning(f"Banda auto-revision {intento}/{intentos}: JSON ilegible — {e}")
@@ -2887,7 +3074,23 @@ def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
 async def generar_logica(req: LogicaRequest):
     """Flujo NUEVO (ver CONTRACT del frontend): la IA interpreta la intencion
     y devuelve el JSON dual engine-config del maletin. NO genera geometria ni
-    registros: eso lo hacen el front (dibujo) y Python (XL4 -> PLC)."""
+    registros: eso lo hacen el front (dibujo) y Python (XL4 -> PLC).
+
+    Cada respuesta trae analysis.metricas (tiempos, tokens, llamadas al
+    modelo, fuente memoria/modelo y contexto usado)."""
+    metricas_lavo.iniciar(req.device or "")
+    try:
+        resp = await _generar_logica(req)
+    except HTTPException as e:
+        if e.status_code == 422:
+            metricas_lavo.sumar("errores_validacion", 1)
+        metricas_lavo.cerrar(f"error_{e.status_code}")
+        raise
+    resp.analysis = {**(resp.analysis or {}), "metricas": metricas_lavo.cerrar(resp.status)}
+    return resp
+
+
+async def _generar_logica(req: LogicaRequest):
     texto = (req.texto or "").strip()
     if not texto:
         raise HTTPException(400, "El campo 'texto' no puede estar vacio.")
@@ -2925,8 +3128,18 @@ async def generar_logica(req: LogicaRequest):
         equipo = ruta["device"] or "maletin"
 
     # MODO BANDA: PLC independiente, prompt propio y validador propio.
+    metricas_lavo.poner("dispositivo", equipo)
     if equipo == "banda":
         return _generar_logica_banda(texto, req)
+
+    # Nivel 1 (memoria validada del MALETIN): una memoria identica se reutiliza
+    # sin llamar al modelo si vuelve a pasar la validacion; las similares se le
+    # muestran al modelo mas abajo. Nunca se consultan memorias de la banda.
+    identica_m, similares_m = _buscar_memoria("maletin", texto)
+    if identica_m is not None:
+        r = _reusar_maletin(texto, identica_m, req)
+        if r is not None:
+            return r
 
     # ── MODO MALETIN: de aqui hacia abajo, el flujo historico intacto ──
     # Fase 1 (agente): deteccion de prompts ambiguos. Si la peticion es NUEVA
@@ -2955,6 +3168,25 @@ async def generar_logica(req: LogicaRequest):
     # contaminan el contrato engine-config (el modelo intenta imitarlos y rompe
     # el enclavamiento). El contexto va solo en SYSTEM_PROMPT_LOGICA.
     messages = [{"role": "system", "content": SYSTEM_PROMPT_LOGICA}]
+    contexto_usado = ["prompt_maletin"]
+    # Niveles 1 y 2 (contexto por ramificaciones): memorias validadas parecidas
+    # o, si no hay ninguna adecuada, los programas de codigos/ relacionados.
+    # Solo en peticiones nuevas (sin engine_config previo): en una modificacion
+    # manda el programa actual.
+    tiene_cfg_previo = bool(req.contexto and req.contexto.programa_anterior and
+                            (req.contexto.programa_anterior.get("metadata", {}) or {}).get("engine_config"))
+    if CONTEXTO_RAMIFICADO and not tiene_cfg_previo:
+        if similares_m:
+            messages.append({"role": "system",
+                             "content": contexto_ramificado.bloque_memorias("maletin", similares_m)})
+            contexto_usado.append(f"memorias_validadas({len(similares_m)})")
+            metricas_lavo.poner("memorias_usadas", [r["id"] for _, r in similares_m])
+        else:
+            bloque, nombres = contexto_ramificado.contexto_tecnico_maletin(texto)
+            if bloque:
+                messages.append({"role": "system", "content": bloque})
+                contexto_usado.append("contexto_tecnico_local(" + ",".join(nombres) + ")")
+    metricas_lavo.poner("contexto", contexto_usado)
     if req.contexto:
         previas = "\n".join(f"- {p}" for p in (req.contexto.historial or [])[-4:])
         # En modificaciones, el programa anterior trae su engine_config en la
@@ -3036,7 +3268,7 @@ async def generar_logica(req: LogicaRequest):
     msgs_iter = list(messages)
     for intento in range(1, intentos + 1):
         try:
-            candidato = llamar_modelo_json(msgs_iter)
+            candidato = _llamar_modelo(msgs_iter)
         except ValueError as e:
             # JSON ilegible (no parseable). Reintenta si quedan vueltas.
             if intento < intentos:
@@ -3070,6 +3302,7 @@ async def generar_logica(req: LogicaRequest):
             mejor_candidato = candidato
             mejor_avisos = list(avisos_semanticos) + ["Revisa la logica: " + e for e in errores_semanticos]
 
+        metricas_lavo.sumar("errores_validacion", 1)
         errores_feedback = errores if errores else errores_semanticos
         tipo = "sintactico" if errores else "semantico (reflexion)"
         log.warning(f"Auto-revision {intento}/{intentos}: {tipo} — {errores_feedback}")
@@ -3120,7 +3353,7 @@ async def generar_logica(req: LogicaRequest):
             ),
         })
         try:
-            cfg2 = llamar_modelo_json(retry_msgs)
+            cfg2 = _llamar_modelo(retry_msgs)
             errs2 = validar_logica_config(cfg2, perfil_validador)
             # El reintento tampoco puede colar algo que el PLC ignoraria (p. ej.
             # contador sobre base enclavada): mismo filtro semantico del bucle.
@@ -3168,7 +3401,55 @@ async def generar_logica(req: LogicaRequest):
         ejemplo_id=ejemplo_id,
         # Forma lista para el editor / POST /aplicar-plc (program.metadata.engine_config).
         program={"metadata": {"name": nombre_prog, "engine_config": cfg}},
+        analysis={"equipo": "maletin", "fuente": "modelo", "contexto": contexto_usado,
+                  "memorias_referencia": [{"id": r["id"], "similitud": p} for p, r in similares_m]},
     )
+
+
+def _reusar_maletin(texto: str, reg: dict, req: "LogicaRequest"):
+    """Respuesta directa desde una memoria IDENTICA del maletin, o None si ya
+    no pasa la validacion (entonces se genera con el modelo)."""
+    cfg = normalizar_logica_config(json.loads(json.dumps(reg["json"])))
+    perfil = None
+    if _AGENTS_OK:
+        try:
+            perfil = profile_registry.cargar_perfil(req.device_profile)
+        except Exception:
+            perfil = None
+    perfil_validador = perfil if (perfil is not None and perfil.get("id") != profile_registry.DEFAULT_PROFILE) else None
+    errores = validar_logica_config(cfg, perfil_validador)
+    if not errores and AGENT_SEMANTIC_ENABLED and perfil is not None:
+        try:
+            errores = agent_validators.validar_semantica(cfg, perfil).get("errors", []) or []
+        except Exception as e:
+            log.warning(f"Validacion semantica de la memoria fallo (se ignora): {e}")
+    if errores:
+        metricas_lavo.sumar("errores_validacion", 1)
+        log.warning(f"Memoria {reg['id']} identica pero ya no valida ({errores}); se genera con el modelo.")
+        return None
+    log.info(f"/generar-logica maletin: reutiliza la memoria validada {reg['id']} sin llamar al modelo")
+    metricas_lavo.poner("fuente", "memoria")
+    metricas_lavo.poner("memorias_usadas", [reg["id"]])
+    metricas_lavo.poner("contexto", ["memoria_identica"])
+    try:
+        guardar_historial(texto, json.dumps(cfg, ensure_ascii=False)[:1500])
+    except Exception as e:
+        log.warning(f"No se pudo guardar historial (memoria maletin): {e}")
+    ejemplo_id = ""
+    try:
+        ejemplo_id = agregar_ejemplo_logica(texto, cfg)
+    except Exception as e:
+        log.warning(f"No se pudo guardar ejemplo (memoria maletin): {e}")
+    nombre_prog = cfg.get("name", "Programa maletin")
+    estado_fisica = reg["validacion"]["fisica"]["estado"]
+    return LogicaResponse(
+        logic=cfg, name=nombre_prog, outputs=len(cfg.get("outputs", [])), device="maletin",
+        warnings=[f"Reutilizada de la memoria validada ({reg['id']}); prueba fisica: {estado_fisica}."]
+                 + list(cfg.get("system", {}).get("warnings", []) or []),
+        ejemplo_id=ejemplo_id,
+        program={"metadata": {"name": nombre_prog, "engine_config": cfg}},
+        analysis={"equipo": "maletin", "fuente": "memoria", "memoria_id": reg["id"],
+                  "memoria_version": reg.get("version"), "prueba_fisica": estado_fisica})
 
 
 # ─── Copiloto de chat (modo Aprendizaje / Practico) ──────────────
@@ -4563,6 +4844,139 @@ def borrar_ejemplo(ejemplo_id: str):
         raise HTTPException(404, f"No existe el ejemplo '{ejemplo_id}'.")
     guardar_memoria(filtrados)
     return {"status": "ok", "mensaje": f"Ejemplo {ejemplo_id} eliminado."}
+
+
+# ─── Memoria VALIDADA (nivel 1): "Guardar logica validada" ─────────
+# Distinta de la memoria de feedback de arriba (👍/👎, en disco local): esta
+# guarda el JSON aprobado en un almacen persistente y la usa la generacion.
+
+class GuardarMemoriaRequest(BaseModel):
+    dispositivo: str                 # "banda" | "maletin"
+    instruccion: str                 # instruccion original del usuario
+    logic: dict                      # engine_config final aprobado
+    ejemplo_id: Optional[str] = ""
+    # Solo el usuario puede declarar la prueba fisica: por defecto NO se hizo.
+    prueba_fisica: str = "no_realizada"
+    nota: Optional[str] = ""
+
+
+class PruebaFisicaRequest(BaseModel):
+    estado: str                      # "no_realizada" | "exitosa" | "fallida"
+    nota: Optional[str] = ""
+
+
+def _memoria_activa():
+    if not (_MEMORIA_OK and MEMORIA is not None):
+        raise HTTPException(503, "La memoria validada no esta disponible en este servidor.")
+    return MEMORIA
+
+
+def _validador_memoria(dispositivo: str):
+    """Pruebas de SOFTWARE que debe pasar una logica antes de guardarse: las
+    mismas que preceden a /aplicar-plc (y la compilacion a registros en v7)."""
+    def validar(cfg):
+        if dispositivo == "banda":
+            import lavo_motor
+            pruebas = ["validacion contra el programa maestro de la banda (plc_banda.validar_config)"]
+            errores = validar_logica_banda(cfg)
+            if not errores and lavo_motor.es_motor_v7(cfg):
+                try:
+                    codigo, campo = lavo_motor.error_plc(lavo_motor.compilar_motor(cfg["band"]))
+                except ValueError as e:
+                    return pruebas, [str(e)]
+                if codigo:
+                    errores.append(f"El bloque compilado no pasa la validacion del PLC (codigo {codigo}, campo {campo}).")
+                else:
+                    pruebas.append("compilacion a registros %R (640 palabras) + validacion del PLC v7 en Python (error_plc = 0)")
+            return pruebas, errores
+        pruebas = ["validacion del engine-config del maletin (validar_logica_config)"]
+        errores = validar_logica_config(cfg, None)
+        if not errores and AGENT_SEMANTIC_ENABLED and _AGENTS_OK:
+            try:
+                sem = agent_validators.validar_semantica(cfg, profile_registry.cargar_perfil(None))
+                errores = sem.get("errors", []) or []
+                pruebas.append("validacion semantica (agents/validators.py)")
+            except Exception as e:
+                log.warning(f"Validacion semantica al guardar fallo (se ignora): {e}")
+        return pruebas, errores
+    return validar
+
+
+@app.post("/memoria/validadas")
+def guardar_memoria_validada(req: GuardarMemoriaRequest):
+    """Guarda una logica que el usuario confirmo como correcta."""
+    mem = _memoria_activa()
+    d = (req.dispositivo or "").strip().lower()
+    cfg = req.logic
+    if d == "maletin" and isinstance(cfg, dict) and not cfg.get("band"):
+        cfg = normalizar_logica_config(json.loads(json.dumps(cfg)))
+    try:
+        r = mem.guardar(d, req.instruccion, cfg, _validador_memoria(d), esquema_activo(d)
+                        if d in memoria_validada.DISPOSITIVOS else "",
+                        prueba_fisica=req.prueba_fisica, nota=req.nota or "", ejemplo_id=req.ejemplo_id or "")
+    except memoria_validada.ErrorMemoria as e:
+        raise HTTPException(422, e.errores)
+    except almacen_memoria.ErrorAlmacen as e:
+        raise HTTPException(503, f"No se pudo escribir en el almacen de memoria: {e}")
+    log.info(f"Memoria validada: {r['resultado']} {r['memoria']['id']} ({d})")
+    return {"status": "ok", **r, "almacen": mem.almacen.descripcion(),
+            "persistente": mem.almacen.persistente_en_render}
+
+
+@app.get("/memoria/validadas")
+def listar_memoria_validada(dispositivo: str = "banda", incluir_reemplazadas: bool = False):
+    mem = _memoria_activa()
+    try:
+        memorias = mem.listar(dispositivo)
+    except memoria_validada.ErrorMemoria as e:
+        raise HTTPException(400, e.errores)
+    except almacen_memoria.ErrorAlmacen as e:
+        raise HTTPException(503, str(e))
+    if not incluir_reemplazadas:
+        memorias = [m for m in memorias if m.get("estado") == "activa"]
+    return {"dispositivo": dispositivo, "total": len(memorias), "memorias": memorias,
+            "esquema_activo": esquema_activo(dispositivo), "almacen": mem.almacen.descripcion(),
+            "persistente": mem.almacen.persistente_en_render}
+
+
+@app.get("/memoria/validadas/{dispositivo}/{memoria_id}")
+def ver_memoria_validada(dispositivo: str, memoria_id: str):
+    mem = _memoria_activa()
+    try:
+        reg = mem.obtener(dispositivo, memoria_id)
+    except memoria_validada.ErrorMemoria as e:
+        raise HTTPException(400, e.errores)
+    if reg is None:
+        raise HTTPException(404, f"No existe la memoria '{memoria_id}' de {dispositivo}.")
+    return reg
+
+
+@app.post("/memoria/validadas/{dispositivo}/{memoria_id}/prueba-fisica")
+def marcar_prueba_fisica(dispositivo: str, memoria_id: str, req: PruebaFisicaRequest):
+    """Registra el resultado de la prueba en el equipo FISICO (lo declara el usuario)."""
+    mem = _memoria_activa()
+    try:
+        return {"status": "ok", "memoria": mem.actualizar_prueba_fisica(dispositivo, memoria_id, req.estado, req.nota or "")}
+    except memoria_validada.ErrorMemoria as e:
+        raise HTTPException(422, e.errores)
+    except KeyError:
+        raise HTTPException(404, f"No existe la memoria '{memoria_id}' de {dispositivo}.")
+
+
+@app.get("/memoria/metricas")
+def metricas_generacion():
+    """Tiempos, tokens, llamadas al modelo y % de reutilizacion (en RAM)."""
+    return metricas_lavo.resumen()
+
+
+@app.get("/procesos-industriales")
+def ver_procesos_industriales():
+    """Catalogo de procesos genericos (nivel 3). No son logicas validadas."""
+    if not _MEMORIA_OK:
+        raise HTTPException(503, "Catalogo no disponible.")
+    return {"tipo_conocimiento": "proceso_industrial_generico", "ejecutables": False,
+            "procesos": [{"id": p["id"], "nombre": p["nombre"], "categoria": p["categoria"],
+                          "fuentes": p["fuentes"]} for p in contexto_ramificado.catalogo()]}
 
 
 # ─── Admin: generar contexto EN Render (usa la GROQ_API_KEY de Render) ──

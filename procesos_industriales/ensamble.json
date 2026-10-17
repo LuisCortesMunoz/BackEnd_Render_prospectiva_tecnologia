@@ -1,0 +1,143 @@
+{
+  "id": "ensamble",
+  "nombre": "Línea de ensamble indexada",
+  "categoria": "ensamble",
+  "tipo_conocimiento": "proceso_industrial_generico",
+  "ejecutable": false,
+  "descripcion": "La banda avanza la pieza una posición (index), se detiene durante el tiempo de trabajo de la estación (dwell) y vuelve a avanzar; si una estación se detiene, se detiene la línea.",
+  "sinonimos": [
+    "ensamble",
+    "ensamblaje",
+    "ensamblado",
+    "montaje",
+    "linea de ensamble",
+    "assembly",
+    "estacion de trabajo",
+    "indexado",
+    "indexada",
+    "avance por pasos"
+  ],
+  "etapas": [
+    {
+      "orden": 1,
+      "nombre": "indexado",
+      "acciones": [
+        "mover la banda una posición"
+      ],
+      "transicion": "sensor de posición detecta la pieza en la estación"
+    },
+    {
+      "orden": 2,
+      "nombre": "trabajo_en_estacion",
+      "acciones": [
+        "detener la banda",
+        "ejecutar la operación de la estación",
+        "indicar estación ocupada"
+      ],
+      "transicion": "tiempo de estación (dwell) cumplido o confirmación del operador"
+    },
+    {
+      "orden": 3,
+      "nombre": "liberacion",
+      "acciones": [
+        "liberar la pieza"
+      ],
+      "transicion": "pieza liberada; vuelve a la etapa 1"
+    }
+  ],
+  "entradas_funcionales": [
+    {
+      "nombre": "sensor_pieza_en_estacion",
+      "descripcion": "detecta la pieza en la posición de trabajo"
+    },
+    {
+      "nombre": "confirmacion_estacion",
+      "descripcion": "la estación terminó (botón del operador o señal)"
+    },
+    {
+      "nombre": "arranque",
+      "descripcion": "inicia la línea"
+    },
+    {
+      "nombre": "paro",
+      "descripcion": "detiene la línea"
+    }
+  ],
+  "salidas_funcionales": [
+    {
+      "nombre": "transportador",
+      "descripcion": "banda que avanza por pasos"
+    },
+    {
+      "nombre": "herramienta_de_estacion",
+      "descripcion": "actuador de la operación (atornillar, prensar, etc.)"
+    },
+    {
+      "nombre": "indicador_estacion_ocupada",
+      "descripcion": "luz mientras la estación trabaja"
+    },
+    {
+      "nombre": "indicador_en_marcha",
+      "descripcion": "luz mientras la banda avanza"
+    }
+  ],
+  "temporizadores": [
+    {
+      "nombre": "tiempo_de_estacion",
+      "uso": "tiempo de trabajo con la pieza detenida (dwell)",
+      "valor_tipico_s": 5
+    },
+    {
+      "nombre": "tiempo_de_indexado",
+      "uso": "tiempo máximo de avance entre estaciones",
+      "valor_tipico_s": 3
+    }
+  ],
+  "contadores": [
+    {
+      "nombre": "piezas_ensambladas",
+      "uso": "piezas terminadas",
+      "valor_tipico": null,
+      "reinicio": "manual"
+    }
+  ],
+  "repeticiones": {
+    "modo": "ciclico",
+    "descripcion": "un ciclo de index + estación por pieza, continuo"
+  },
+  "parametros_configurables": [
+    {
+      "nombre": "tiempo_de_estacion_s",
+      "descripcion": "segundos de trabajo por pieza",
+      "tipico": 5
+    },
+    {
+      "nombre": "velocidad_transporte",
+      "descripcion": "velocidad del avance",
+      "tipico": null
+    }
+  ],
+  "arranque": "orden de arranque del operador",
+  "paro": "orden de paro; una falla en una estación detiene toda la línea",
+  "resultado_esperado": "cada pieza permanece el tiempo de estación indicado y avanza una posición por ciclo",
+  "requiere_componentes_tipicos": [
+    "herramienta de estación",
+    "sensor de posición",
+    "señal de fin de estación"
+  ],
+  "fuentes": [
+    {
+      "titulo": "US6213285B1 - Method of indexing conveyor pallets at high speeds",
+      "url": "https://patents.google.com/patent/US6213285"
+    },
+    {
+      "titulo": "Increase uptime with adaptive indexing (Assembly Magazine)",
+      "url": "https://www.assemblymag.com/articles/82791-increase-uptime-with-adaptive-indexing?v=preview"
+    },
+    {
+      "titulo": "Camco Indexer Cycle Time Compensation for Manual Loading",
+      "url": "https://industrialmonitordirect.com/blogs/knowledgebase/camco-indexer-cycle-time-compensation-for-manual-loading"
+    }
+  ],
+  "nota": "Referencia genérica investigada. No es una lógica validada de LAVO ni asume que el hardware exista."
+}

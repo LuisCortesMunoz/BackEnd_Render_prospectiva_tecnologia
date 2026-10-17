@@ -1,0 +1,111 @@
+{
+  "id": "transporte",
+  "nombre": "Transporte por banda (continuo)",
+  "categoria": "transporte",
+  "tipo_conocimiento": "proceso_industrial_generico",
+  "ejecutable": false,
+  "descripcion": "La banda mueve productos de un punto a otro de forma continua con arranque, paro y señalización del estado; opcionalmente se detiene al llegar un producto al final.",
+  "sinonimos": [
+    "transporte basico",
+    "transporte continuo",
+    "transporte de productos",
+    "transportar productos",
+    "mover productos",
+    "traslado de productos",
+    "conveyor"
+  ],
+  "etapas": [
+    {
+      "orden": 1,
+      "nombre": "espera",
+      "acciones": [
+        "banda detenida",
+        "indicar listo"
+      ],
+      "transicion": "orden de arranque"
+    },
+    {
+      "orden": 2,
+      "nombre": "transporte",
+      "acciones": [
+        "mover la banda",
+        "indicar en marcha"
+      ],
+      "transicion": "orden de paro o producto al final (si se configuró)"
+    },
+    {
+      "orden": 3,
+      "nombre": "detenida",
+      "acciones": [
+        "detener la banda",
+        "indicar detenida"
+      ],
+      "transicion": "nueva orden de arranque; vuelve a la etapa 2"
+    }
+  ],
+  "entradas_funcionales": [
+    {
+      "nombre": "arranque",
+      "descripcion": "inicia el transporte"
+    },
+    {
+      "nombre": "paro",
+      "descripcion": "detiene el transporte"
+    },
+    {
+      "nombre": "sensor_fin_de_banda",
+      "descripcion": "producto al final (opcional)"
+    }
+  ],
+  "salidas_funcionales": [
+    {
+      "nombre": "transportador",
+      "descripcion": "motor de la banda"
+    },
+    {
+      "nombre": "indicador_en_marcha",
+      "descripcion": "luz con la banda en movimiento"
+    },
+    {
+      "nombre": "indicador_detenida",
+      "descripcion": "luz con la banda detenida"
+    }
+  ],
+  "temporizadores": [],
+  "contadores": [],
+  "repeticiones": {
+    "modo": "continuo",
+    "descripcion": "corre hasta la orden de paro"
+  },
+  "parametros_configurables": [
+    {
+      "nombre": "velocidad_transporte",
+      "descripcion": "velocidad de la banda",
+      "tipico": null
+    },
+    {
+      "nombre": "direccion",
+      "descripcion": "sentido de avance",
+      "tipico": "derecha"
+    }
+  ],
+  "arranque": "orden de arranque del operador",
+  "paro": "orden de paro del operador; paro de emergencia siempre prioritario",
+  "resultado_esperado": "la banda corre y se detiene a voluntad, con el estado siempre señalizado",
+  "requiere_componentes_tipicos": [
+    "motor con variador",
+    "botones de arranque y paro",
+    "señalización"
+  ],
+  "fuentes": [
+    {
+      "titulo": "Accumulation Conveyor (Bastian Solutions)",
+      "url": "https://www.bastiansolutions.com/solutions/technology/conveyor-systems/accumulation"
+    },
+    {
+      "titulo": "PLC Programming Exercise: Conveyor Belt Control System",
+      "url": "https://www.patreon.com/educationalengineering/posts/plc-programming-122470784"
+    }
+  ],
+  "nota": "Referencia genérica investigada. No es una lógica validada de LAVO ni asume que el hardware exista."
+}

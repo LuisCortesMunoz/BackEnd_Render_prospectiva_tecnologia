@@ -40,6 +40,7 @@ El backend cumple **dos roles** según dónde corra:
 | `ADMIN_TOKEN` | Protege los endpoints `/admin/*` | Recomendada |
 | `BANDA_MOTOR_CONFIGURABLE` | `1` = la banda usa el motor configurable (requiere el ST v6 en el PLC) | No (default `0`) |
 | `ALLOWED_ORIGINS` | Dominios del frontend (CORS) | No |
+| `LAVO_MEMORIA_REPO` / `LAVO_MEMORIA_TOKEN` | Repo privado de GitHub donde vive la memoria validada (ver «Memoria validada») | Sí, para que la memoria sea persistente |
 
 ## Despliegue en la nube (Render)
 
@@ -152,6 +153,48 @@ una configuración a medias.
 - Si cambias `lavo_motor.py`: `python cscape/generar_st_v7.py --destino "<Archivos Cscape>"`
   y vuelve a descargar el ST.
 - Pruebas: `python test_lavo_v7.py` (backend) y, en el frontend, `node tests/test_motor_v7.mjs`.
+
+## Memoria validada y contexto por ramificaciones
+
+El modelo ya no recibe siempre lo mismo. El conocimiento está en tres niveles separados:
+
+| Nivel | Qué es | Dónde vive | Cuándo se usa |
+|---|---|---|---|
+| 1. Memoria validada | Lógicas que el usuario aprobó con **Guardar lógica validada** (el JSON es lo principal) | Repo privado de GitHub (`LAVO_MEMORIA_REPO`); en local, `memoria_validada/` | Siempre se consulta primero; una idéntica se reutiliza **sin llamar al modelo** |
+| 2. Contexto técnico local | La fuente de verdad del hardware | Maletín: `codigos/` (vía `context_json/contexto.json`). Banda: `cscape/LAVO_Referencia_v7.txt` + guía y ejemplos del prompt v7 | Solo si no hay una memoria adecuada |
+| 3. Procesos industriales | Referencias genéricas investigadas, **no ejecutables** | `procesos_industriales/*.json` | Solo si la petición es general ("línea de empaquetado") |
+
+Flujo de `/generar-logica`: equipo → memoria idéntica (reuso) → memorias similares → contexto
+técnico si no hay memoria → catálogo si la petición es general → prompt → validación de siempre.
+Un proceso que no está en el catálogo no se inventa: se pregunta (y la solicitud se registra en
+`procesos_solicitados.json` del almacén).
+
+- Código: `memoria_validada.py` (guardar, deduplicar, versionar, buscar), `almacen_memoria.py`
+  (GitHub / local), `contexto_ramificado.py` (qué recibe el modelo), `metricas_lavo.py`,
+  `validador_esquema.py`. Esquemas en `esquemas/`.
+- Endpoints: `POST /memoria/validadas`, `GET /memoria/validadas?dispositivo=banda|maletin`,
+  `GET /memoria/validadas/{dispositivo}/{id}`, `POST /memoria/validadas/{dispositivo}/{id}/prueba-fisica`,
+  `GET /memoria/metricas`, `GET /procesos-industriales`. Cada respuesta de `/generar-logica`
+  trae `analysis.metricas` (tiempos, tokens, llamadas, fuente, contexto usado).
+- Antes de guardar, la lógica pasa la misma validación que `/aplicar-plc` (y en v7 la compilación
+  a registros). Se registran por separado: aprobación del usuario, pruebas de software y prueba
+  física (`no_realizada` salvo que el usuario la declare).
+
+Variables de entorno (Render):
+
+| Variable | Valor |
+|---|---|
+| `LAVO_MEMORIA_REPO` | `usuario/LAVO-memoria` (repo **privado**, aparte del backend) |
+| `LAVO_MEMORIA_TOKEN` | Token *fine-grained* con acceso solo a ese repo, permiso **Contents: Read and write** |
+| `LAVO_MEMORIA_RAMA` | Opcional, por defecto `main` |
+| `LAVO_CONTEXTO_RAMIFICADO` | `0` vuelve al prompt completo de siempre (sin redeploy) |
+| `LAVO_REUSO_MEMORIA` | `0` desactiva la reutilización directa sin modelo |
+
+Sin repo y token la memoria cae a una carpeta local, que en Render **se borra en cada despliegue**:
+`/health` lo muestra en `memoria_validada.persistente`.
+
+Pruebas: `python test_memoria_validada.py` (14 escenarios: guardar, reutilizar, similares, catálogo,
+separación banda/maletín, persistencia con GitHub simulado y comparación de rendimiento).
 
 ## Instalación local
 

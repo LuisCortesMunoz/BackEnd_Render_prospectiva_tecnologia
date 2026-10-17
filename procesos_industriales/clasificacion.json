@@ -1,0 +1,147 @@
+{
+  "id": "clasificacion",
+  "nombre": "Clasificación de productos",
+  "categoria": "clasificacion",
+  "tipo_conocimiento": "proceso_industrial_generico",
+  "ejecutable": false,
+  "descripcion": "Un sensor identifica cada producto y, cuando llega al punto de desvío, un desviador lo manda a otra salida; los demás siguen de frente.",
+  "sinonimos": [
+    "clasificacion",
+    "clasificar",
+    "clasificadora",
+    "separar productos",
+    "separacion",
+    "sorting",
+    "desvio",
+    "desviar",
+    "rechazo",
+    "rechazar",
+    "seleccion de productos"
+  ],
+  "etapas": [
+    {
+      "orden": 1,
+      "nombre": "transporte",
+      "acciones": [
+        "mover la banda"
+      ],
+      "transicion": "sensor de identificación detecta un producto"
+    },
+    {
+      "orden": 2,
+      "nombre": "identificacion",
+      "acciones": [
+        "leer el tipo del producto (tamaño, material, código)",
+        "registrar la decisión"
+      ],
+      "transicion": "producto identificado"
+    },
+    {
+      "orden": 3,
+      "nombre": "desvio",
+      "acciones": [
+        "accionar el desviador si el producto va a la otra salida"
+      ],
+      "transicion": "el producto llega al punto de desvío"
+    },
+    {
+      "orden": 4,
+      "nombre": "confirmacion",
+      "acciones": [
+        "esperar a que el producto libere la zona",
+        "regresar el desviador"
+      ],
+      "transicion": "sensor de salida libre o tiempo cumplido; vuelve a la etapa 1"
+    }
+  ],
+  "entradas_funcionales": [
+    {
+      "nombre": "sensor_identificacion",
+      "descripcion": "distingue el tipo de producto (tamaño, metal, código)"
+    },
+    {
+      "nombre": "sensor_punto_desvio",
+      "descripcion": "detecta el producto en el desviador"
+    },
+    {
+      "nombre": "sensor_salida_libre",
+      "descripcion": "confirma que el producto salió"
+    },
+    {
+      "nombre": "arranque",
+      "descripcion": "inicia la línea"
+    },
+    {
+      "nombre": "paro",
+      "descripcion": "detiene la línea"
+    }
+  ],
+  "salidas_funcionales": [
+    {
+      "nombre": "transportador",
+      "descripcion": "banda principal"
+    },
+    {
+      "nombre": "desviador",
+      "descripcion": "brazo, compuerta o empujador que cambia la ruta"
+    },
+    {
+      "nombre": "indicador_desvio",
+      "descripcion": "luz cuando se desvía un producto"
+    }
+  ],
+  "temporizadores": [
+    {
+      "nombre": "tiempo_desviador",
+      "uso": "tiempo que el desviador permanece accionado",
+      "valor_tipico_s": 2
+    }
+  ],
+  "contadores": [
+    {
+      "nombre": "productos_por_ruta",
+      "uso": "cuántos productos fueron a cada salida",
+      "valor_tipico": null,
+      "reinicio": "manual"
+    }
+  ],
+  "repeticiones": {
+    "modo": "ciclico",
+    "descripcion": "una decisión por producto, continuo"
+  },
+  "parametros_configurables": [
+    {
+      "nombre": "criterio_de_clasificacion",
+      "descripcion": "qué decide la ruta (tipo, conteo, alternancia)",
+      "tipico": null
+    },
+    {
+      "nombre": "tiempo_desviador_s",
+      "descripcion": "segundos con el desviador accionado",
+      "tipico": 2
+    }
+  ],
+  "arranque": "orden de arranque del operador",
+  "paro": "orden de paro; el paro de emergencia debe cortar banda y desviador",
+  "resultado_esperado": "cada producto termina en la salida que le corresponde sin atascos",
+  "requiere_componentes_tipicos": [
+    "sensor que distinga el tipo de producto (visión, inductivo, tamaño)",
+    "desviador",
+    "sensores de salida"
+  ],
+  "fuentes": [
+    {
+      "titulo": "PLC Ladder Logic for Box Sorting Conveyor System",
+      "url": "https://industrialmonitordirect.com/blogs/knowledgebase/plc-ladder-logic-for-box-sorting-conveyor-system"
+    },
+    {
+      "titulo": "MicroLogix FIFO Sortation: Dual-FIFO Divert Programming",
+      "url": "https://industrialmonitordirect.com/blogs/knowledgebase/micrologix-fifo-sortation-dual-fifo-divert-programming"
+    },
+    {
+      "titulo": "PLC Conveyor Sorting Project: Multi-Lane Engineering Guide",
+      "url": "https://industrialmonitordirect.com/blogs/knowledgebase/plc-conveyor-sorting-project-multi-lane-engineering-guide"
+    }
+  ],
+  "nota": "Referencia genérica investigada. No es una lógica validada de LAVO ni asume que el hardware exista."
+}

@@ -1,0 +1,156 @@
+{
+  "id": "linea_produccion",
+  "nombre": "Línea de producción general",
+  "categoria": "produccion",
+  "tipo_conocimiento": "proceso_industrial_generico",
+  "ejecutable": false,
+  "descripcion": "Encadenamiento típico de una línea: alimentar el producto, procesarlo en una estación, inspeccionarlo y entregarlo al final, contando la producción.",
+  "sinonimos": [
+    "linea de produccion",
+    "produccion",
+    "planta",
+    "proceso productivo",
+    "simula una linea",
+    "simular una linea",
+    "linea industrial",
+    "manufactura",
+    "fabrica"
+  ],
+  "etapas": [
+    {
+      "orden": 1,
+      "nombre": "alimentacion",
+      "acciones": [
+        "transportar el producto a la estación"
+      ],
+      "transicion": "sensor detecta el producto en la estación"
+    },
+    {
+      "orden": 2,
+      "nombre": "proceso",
+      "acciones": [
+        "detener el producto",
+        "ejecutar la operación de la estación",
+        "indicar estación trabajando"
+      ],
+      "transicion": "tiempo de proceso cumplido"
+    },
+    {
+      "orden": 3,
+      "nombre": "inspeccion",
+      "acciones": [
+        "verificar el producto",
+        "desviar o señalar los defectuosos"
+      ],
+      "transicion": "inspección terminada"
+    },
+    {
+      "orden": 4,
+      "nombre": "salida",
+      "acciones": [
+        "transportar el producto terminado",
+        "contar producción"
+      ],
+      "transicion": "producto entregado; vuelve a la etapa 1"
+    }
+  ],
+  "entradas_funcionales": [
+    {
+      "nombre": "sensor_estacion",
+      "descripcion": "producto en la estación de proceso"
+    },
+    {
+      "nombre": "sensor_salida",
+      "descripcion": "producto terminado al final"
+    },
+    {
+      "nombre": "resultado_inspeccion",
+      "descripcion": "bueno o defectuoso (requiere sensor de calidad)"
+    },
+    {
+      "nombre": "arranque",
+      "descripcion": "inicia la línea"
+    },
+    {
+      "nombre": "paro",
+      "descripcion": "detiene la línea"
+    }
+  ],
+  "salidas_funcionales": [
+    {
+      "nombre": "transportador",
+      "descripcion": "banda principal"
+    },
+    {
+      "nombre": "actuador_de_estacion",
+      "descripcion": "realiza la operación de proceso"
+    },
+    {
+      "nombre": "desviador_rechazo",
+      "descripcion": "saca los defectuosos"
+    },
+    {
+      "nombre": "indicador_estacion",
+      "descripcion": "luz de estación trabajando"
+    },
+    {
+      "nombre": "indicador_en_marcha",
+      "descripcion": "luz de línea operando"
+    }
+  ],
+  "temporizadores": [
+    {
+      "nombre": "tiempo_de_proceso",
+      "uso": "duración de la operación en la estación",
+      "valor_tipico_s": 5
+    }
+  ],
+  "contadores": [
+    {
+      "nombre": "piezas_producidas",
+      "uso": "producción del turno o del lote",
+      "valor_tipico": 10,
+      "reinicio": "manual"
+    }
+  ],
+  "repeticiones": {
+    "modo": "ciclico",
+    "descripcion": "un ciclo por pieza, continuo hasta el paro"
+  },
+  "parametros_configurables": [
+    {
+      "nombre": "tiempo_de_proceso_s",
+      "descripcion": "segundos en la estación",
+      "tipico": 5
+    },
+    {
+      "nombre": "meta_de_produccion",
+      "descripcion": "piezas antes de detenerse (opcional)",
+      "tipico": 10
+    },
+    {
+      "nombre": "velocidad_transporte",
+      "descripcion": "velocidad de la banda",
+      "tipico": null
+    }
+  ],
+  "arranque": "orden de arranque del operador",
+  "paro": "orden de paro o meta de producción alcanzada; paro de emergencia siempre prioritario",
+  "resultado_esperado": "piezas procesadas una por una, contadas y entregadas al final",
+  "requiere_componentes_tipicos": [
+    "actuador de estación",
+    "sensor de calidad para inspección",
+    "desviador de rechazo"
+  ],
+  "fuentes": [
+    {
+      "titulo": "What is a packaging line (etapas típicas de una línea)",
+      "url": "https://www.jinlupacking.com/pl/blogs/what-is-a-packaging-line/"
+    },
+    {
+      "titulo": "Increase uptime with adaptive indexing (Assembly Magazine)",
+      "url": "https://www.assemblymag.com/articles/82791-increase-uptime-with-adaptive-indexing?v=preview"
+    }
+  ],
+  "nota": "Referencia genérica investigada. No es una lógica validada de LAVO ni asume que el hardware exista."
+}

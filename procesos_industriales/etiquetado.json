@@ -1,0 +1,158 @@
+{
+  "id": "etiquetado",
+  "nombre": "Proceso de etiquetado",
+  "categoria": "etiquetado",
+  "tipo_conocimiento": "proceso_industrial_generico",
+  "ejecutable": false,
+  "descripcion": "Un sensor detecta el producto en la banda y dispara el aplicador en el momento justo; si no hay producto, el aplicador espera; los mal etiquetados se rechazan.",
+  "sinonimos": [
+    "etiquetado",
+    "etiquetar",
+    "etiquetadora",
+    "etiqueta",
+    "etiquetas",
+    "labeling",
+    "rotulado",
+    "marcado"
+  ],
+  "etapas": [
+    {
+      "orden": 1,
+      "nombre": "transporte",
+      "acciones": [
+        "mover los productos"
+      ],
+      "transicion": "sensor de producto detecta un producto"
+    },
+    {
+      "orden": 2,
+      "nombre": "retardo_de_posicion",
+      "acciones": [
+        "esperar a que el producto llegue al aplicador"
+      ],
+      "transicion": "tiempo de retardo cumplido"
+    },
+    {
+      "orden": 3,
+      "nombre": "aplicacion",
+      "acciones": [
+        "dispensar la etiqueta",
+        "presionarla sobre el producto"
+      ],
+      "transicion": "tiempo de aplicación cumplido"
+    },
+    {
+      "orden": 4,
+      "nombre": "verificacion",
+      "acciones": [
+        "comprobar la etiqueta",
+        "rechazar si falta"
+      ],
+      "transicion": "producto verificado; vuelve a la etapa 1"
+    }
+  ],
+  "entradas_funcionales": [
+    {
+      "nombre": "sensor_producto",
+      "descripcion": "detecta el producto antes del aplicador"
+    },
+    {
+      "nombre": "sensor_etiqueta",
+      "descripcion": "detecta el hueco entre etiquetas (control del rollo)"
+    },
+    {
+      "nombre": "sensor_verificacion",
+      "descripcion": "confirma que la etiqueta quedó puesta"
+    },
+    {
+      "nombre": "arranque",
+      "descripcion": "inicia la línea"
+    },
+    {
+      "nombre": "paro",
+      "descripcion": "detiene la línea"
+    }
+  ],
+  "salidas_funcionales": [
+    {
+      "nombre": "transportador",
+      "descripcion": "banda de productos"
+    },
+    {
+      "nombre": "aplicador",
+      "descripcion": "dispensa y coloca la etiqueta"
+    },
+    {
+      "nombre": "rechazo",
+      "descripcion": "saca de la línea el producto mal etiquetado"
+    },
+    {
+      "nombre": "indicador_aplicando",
+      "descripcion": "luz durante la aplicación"
+    }
+  ],
+  "temporizadores": [
+    {
+      "nombre": "retardo_aplicacion",
+      "uso": "tiempo desde la detección hasta el aplicador",
+      "valor_tipico_s": 1
+    },
+    {
+      "nombre": "tiempo_aplicacion",
+      "uso": "duración del pegado",
+      "valor_tipico_s": 1
+    }
+  ],
+  "contadores": [
+    {
+      "nombre": "productos_etiquetados",
+      "uso": "conteo de productos terminados",
+      "valor_tipico": null,
+      "reinicio": "manual"
+    }
+  ],
+  "repeticiones": {
+    "modo": "ciclico",
+    "descripcion": "una etiqueta por producto, continuo"
+  },
+  "parametros_configurables": [
+    {
+      "nombre": "retardo_aplicacion_s",
+      "descripcion": "segundos entre detección y aplicación",
+      "tipico": 1
+    },
+    {
+      "nombre": "tiempo_aplicacion_s",
+      "descripcion": "segundos de aplicación",
+      "tipico": 1
+    },
+    {
+      "nombre": "velocidad_transporte",
+      "descripcion": "velocidad de la banda",
+      "tipico": null
+    }
+  ],
+  "arranque": "orden de arranque del operador",
+  "paro": "orden de paro; el aplicador nunca actúa sin producto detectado",
+  "resultado_esperado": "cada producto recibe una etiqueta en la misma posición; si no hay producto, no se gasta etiqueta",
+  "requiere_componentes_tipicos": [
+    "aplicador de etiquetas",
+    "sensor de etiqueta",
+    "sensor de verificación"
+  ],
+  "fuentes": [
+    {
+      "titulo": "Label Applicators Information (GlobalSpec)",
+      "url": "https://www.globalspec.com/learnmore/material_handling_packaging_equipment/packaging_labeling/label_applicators"
+    },
+    {
+      "titulo": "Automating a labeling line (Labels & Labeling)",
+      "url": "https://labelsandlabeling.com/labels/europe/label-academy/article/automating-labeling-line"
+    },
+    {
+      "titulo": "US5232539A - Object labeling machine",
+      "url": "https://patents.google.com/patent/US5232539"
+    }
+  ],
+  "nota": "Referencia genérica investigada. No es una lógica validada de LAVO ni asume que el hardware exista."
+}

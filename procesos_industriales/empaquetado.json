@@ -1,0 +1,189 @@
+{
+  "id": "empaquetado",
+  "nombre": "Línea de empaquetado (encajado)",
+  "categoria": "empaquetado",
+  "tipo_conocimiento": "proceso_industrial_generico",
+  "ejecutable": false,
+  "descripcion": "Los productos llegan por una banda, se acumulan hasta completar un lote, se depositan en una caja y la caja llena sale de la estación.",
+  "sinonimos": [
+    "empaquetado",
+    "empaquetadora",
+    "empacado",
+    "empaque",
+    "encajado",
+    "encajadora",
+    "case packer",
+    "cartoning",
+    "encartonado",
+    "estacion de empaquetado",
+    "linea de empaque"
+  ],
+  "etapas": [
+    {
+      "orden": 1,
+      "nombre": "alimentacion",
+      "acciones": [
+        "transportar productos hacia la estación"
+      ],
+      "transicion": "sensor de entrada detecta un producto"
+    },
+    {
+      "orden": 2,
+      "nombre": "acumulacion",
+      "acciones": [
+        "contar productos",
+        "seguir transportando"
+      ],
+      "transicion": "el conteo llega al tamaño del lote"
+    },
+    {
+      "orden": 3,
+      "nombre": "retencion",
+      "acciones": [
+        "detener o frenar el flujo de productos",
+        "indicar lote completo"
+      ],
+      "transicion": "lote retenido"
+    },
+    {
+      "orden": 4,
+      "nombre": "deposito_en_caja",
+      "acciones": [
+        "depositar el lote en la caja (actuador de carga)"
+      ],
+      "transicion": "tiempo de carga cumplido"
+    },
+    {
+      "orden": 5,
+      "nombre": "descarga_de_caja",
+      "acciones": [
+        "sacar la caja llena",
+        "reiniciar el conteo"
+      ],
+      "transicion": "caja fuera de la estación"
+    },
+    {
+      "orden": 6,
+      "nombre": "reinicio_de_ciclo",
+      "acciones": [
+        "reanudar el transporte"
+      ],
+      "transicion": "vuelve a la etapa 1"
+    }
+  ],
+  "entradas_funcionales": [
+    {
+      "nombre": "sensor_presencia_producto",
+      "descripcion": "detecta y cuenta cada producto que llega"
+    },
+    {
+      "nombre": "sensor_caja_en_posicion",
+      "descripcion": "confirma que hay una caja vacía lista"
+    },
+    {
+      "nombre": "sensor_caja_descargada",
+      "descripcion": "confirma que la caja llena salió"
+    },
+    {
+      "nombre": "arranque",
+      "descripcion": "inicia la línea"
+    },
+    {
+      "nombre": "paro",
+      "descripcion": "detiene la línea"
+    }
+  ],
+  "salidas_funcionales": [
+    {
+      "nombre": "transportador",
+      "descripcion": "banda que mueve los productos"
+    },
+    {
+      "nombre": "freno_o_tope",
+      "descripcion": "retiene el flujo mientras se carga la caja"
+    },
+    {
+      "nombre": "actuador_de_carga",
+      "descripcion": "deposita el lote en la caja"
+    },
+    {
+      "nombre": "indicador_lote_completo",
+      "descripcion": "señal luminosa de lote listo"
+    },
+    {
+      "nombre": "indicador_en_marcha",
+      "descripcion": "señal luminosa de línea operando"
+    }
+  ],
+  "temporizadores": [
+    {
+      "nombre": "tiempo_de_carga",
+      "uso": "duración del depósito del lote en la caja",
+      "valor_tipico_s": 3
+    },
+    {
+      "nombre": "tiempo_de_descarga",
+      "uso": "tiempo para retirar la caja llena",
+      "valor_tipico_s": 2
+    }
+  ],
+  "contadores": [
+    {
+      "nombre": "productos_por_lote",
+      "uso": "productos que forman una caja",
+      "valor_tipico": 6,
+      "reinicio": "al descargar la caja"
+    },
+    {
+      "nombre": "cajas_completadas",
+      "uso": "total de cajas del turno",
+      "valor_tipico": null,
+      "reinicio": "manual"
+    }
+  ],
+  "repeticiones": {
+    "modo": "ciclico",
+    "descripcion": "un ciclo por caja, indefinidamente hasta el paro"
+  },
+  "parametros_configurables": [
+    {
+      "nombre": "productos_por_lote",
+      "descripcion": "cuántos productos por caja",
+      "tipico": 6
+    },
+    {
+      "nombre": "tiempo_de_carga_s",
+      "descripcion": "segundos de retención para cargar",
+      "tipico": 3
+    },
+    {
+      "nombre": "velocidad_transporte",
+      "descripcion": "velocidad de la banda",
+      "tipico": null
+    }
+  ],
+  "arranque": "orden de arranque del operador con la estación vacía",
+  "paro": "orden de paro del operador; paro de emergencia detiene todo de inmediato",
+  "resultado_esperado": "cajas con el mismo número de productos, una tras otra, sin mezclar lotes",
+  "requiere_componentes_tipicos": [
+    "sensor de presencia",
+    "actuador de carga (robot, empujador o compuerta)",
+    "sensor de caja",
+    "freno o tope"
+  ],
+  "fuentes": [
+    {
+      "titulo": "Case Packer PLC Logic: Step-Based Sequencer Design",
+      "url": "https://industrialmonitordirect.com/blogs/knowledgebase/case-packer-plc-logic-step-based-sequencer-design"
+    },
+    {
+      "titulo": "What is a packaging line",
+      "url": "https://www.jinlupacking.com/pl/blogs/what-is-a-packaging-line/"
+    },
+    {
+      "titulo": "PLC Based Automatic Packaging System",
+      "url": "https://iugrc6.conferences.ekb.eg/paper?manu=6034"
+    }
+  ],
+  "nota": "Referencia genérica investigada. No es una lógica validada de LAVO ni asume que el hardware exista."
+}

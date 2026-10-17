@@ -1,0 +1,181 @@
+{
+  "version": 1,
+  "descripcion": "Catalogo de procesos industriales GENERICOS (nivel 3). Referencias investigadas, NO logicas validadas ni ejecutables. Solo se consultan ante instrucciones generales o ambiguas.",
+  "procesos": [
+    {
+      "id": "alimentacion_distribucion",
+      "nombre": "Alimentación y distribución de materiales (acumulación)",
+      "categoria": "alimentacion",
+      "archivo": "alimentacion_distribucion.json",
+      "sinonimos": [
+        "alimentacion",
+        "alimentar",
+        "alimentador",
+        "distribucion",
+        "distribuir",
+        "acumulacion",
+        "acumular",
+        "buffer",
+        "pulmon",
+        "abastecer",
+        "suministro de material",
+        "feeding"
+      ]
+    },
+    {
+      "id": "clasificacion",
+      "nombre": "Clasificación de productos",
+      "categoria": "clasificacion",
+      "archivo": "clasificacion.json",
+      "sinonimos": [
+        "clasificacion",
+        "clasificar",
+        "clasificadora",
+        "separar productos",
+        "separacion",
+        "sorting",
+        "desvio",
+        "desviar",
+        "rechazo",
+        "rechazar",
+        "seleccion de productos"
+      ]
+    },
+    {
+      "id": "conteo_agrupacion",
+      "nombre": "Conteo y agrupación de productos (lotes)",
+      "categoria": "conteo",
+      "archivo": "conteo_agrupacion.json",
+      "sinonimos": [
+        "conteo",
+        "contar productos",
+        "agrupacion",
+        "agrupar",
+        "lotes",
+        "lote",
+        "batching",
+        "loteado",
+        "dosificar por cantidad",
+        "agrupacion de productos"
+      ]
+    },
+    {
+      "id": "embotellado",
+      "nombre": "Línea de embotellado",
+      "categoria": "embotellado",
+      "archivo": "embotellado.json",
+      "sinonimos": [
+        "embotellado",
+        "embotelladora",
+        "botellas",
+        "botella",
+        "bottling",
+        "linea de bebidas",
+        "envasado de bebidas",
+        "refresco",
+        "refrescos"
+      ]
+    },
+    {
+      "id": "empaquetado",
+      "nombre": "Línea de empaquetado (encajado)",
+      "categoria": "empaquetado",
+      "archivo": "empaquetado.json",
+      "sinonimos": [
+        "empaquetado",
+        "empaquetadora",
+        "empacado",
+        "empaque",
+        "encajado",
+        "encajadora",
+        "case packer",
+        "cartoning",
+        "encartonado",
+        "estacion de empaquetado",
+        "linea de empaque"
+      ]
+    },
+    {
+      "id": "ensamble",
+      "nombre": "Línea de ensamble indexada",
+      "categoria": "ensamble",
+      "archivo": "ensamble.json",
+      "sinonimos": [
+        "ensamble",
+        "ensamblaje",
+        "ensamblado",
+        "montaje",
+        "linea de ensamble",
+        "assembly",
+        "estacion de trabajo",
+        "indexado",
+        "indexada",
+        "avance por pasos"
+      ]
+    },
+    {
+      "id": "etiquetado",
+      "nombre": "Proceso de etiquetado",
+      "categoria": "etiquetado",
+      "archivo": "etiquetado.json",
+      "sinonimos": [
+        "etiquetado",
+        "etiquetar",
+        "etiquetadora",
+        "etiqueta",
+        "etiquetas",
+        "labeling",
+        "rotulado",
+        "marcado"
+      ]
+    },
+    {
+      "id": "linea_produccion",
+      "nombre": "Línea de producción general",
+      "categoria": "produccion",
+      "archivo": "linea_produccion.json",
+      "sinonimos": [
+        "linea de produccion",
+        "produccion",
+        "planta",
+        "proceso productivo",
+        "simula una linea",
+        "simular una linea",
+        "linea industrial",
+        "manufactura",
+        "fabrica"
+      ]
+    },
+    {
+      "id": "llenado",
+      "nombre": "Estación de llenado y transporte",
+      "categoria": "llenado",
+      "archivo": "llenado.json",
+      "sinonimos": [
+        "llenado",
+        "llenadora",
+        "llenar",
+        "dosificado",
+        "dosificacion",
+        "filling",
+        "envasado",
+        "proceso de llenado"
+      ]
+    },
+    {
+      "id": "transporte",
+      "nombre": "Transporte por banda (continuo)",
+      "categoria": "transporte",
+      "archivo": "transporte.json",
+      "sinonimos": [
+        "transporte basico",
+        "transporte continuo",
+        "transporte de productos",
+        "transportar productos",
+        "mover productos",
+        "traslado de productos",
+        "conveyor"
+      ]
+    }
+  ]
+}

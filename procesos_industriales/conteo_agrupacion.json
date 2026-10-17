@@ -1,0 +1,140 @@
+{
+  "id": "conteo_agrupacion",
+  "nombre": "Conteo y agrupación de productos (lotes)",
+  "categoria": "conteo",
+  "tipo_conocimiento": "proceso_industrial_generico",
+  "ejecutable": false,
+  "descripcion": "Un sensor cuenta los productos; al llegar al tamaño del lote se ejecuta una acción (detener la banda, accionar una compuerta o señalizar) y el conteo se reinicia para el siguiente lote.",
+  "sinonimos": [
+    "conteo",
+    "contar productos",
+    "agrupacion",
+    "agrupar",
+    "lotes",
+    "lote",
+    "batching",
+    "loteado",
+    "dosificar por cantidad",
+    "agrupacion de productos"
+  ],
+  "etapas": [
+    {
+      "orden": 1,
+      "nombre": "transporte_y_conteo",
+      "acciones": [
+        "mover la banda",
+        "contar cada producto detectado"
+      ],
+      "transicion": "el conteo llega al tamaño del lote"
+    },
+    {
+      "orden": 2,
+      "nombre": "accion_de_lote",
+      "acciones": [
+        "detener la banda o accionar la compuerta",
+        "indicar lote completo"
+      ],
+      "transicion": "tiempo de la acción cumplido o confirmación del operador"
+    },
+    {
+      "orden": 3,
+      "nombre": "reinicio",
+      "acciones": [
+        "reiniciar el conteo",
+        "reanudar el transporte"
+      ],
+      "transicion": "vuelve a la etapa 1"
+    }
+  ],
+  "entradas_funcionales": [
+    {
+      "nombre": "sensor_conteo",
+      "descripcion": "detecta y cuenta cada producto"
+    },
+    {
+      "nombre": "reinicio_conteo",
+      "descripcion": "regresa el conteo a cero"
+    },
+    {
+      "nombre": "arranque",
+      "descripcion": "inicia la línea"
+    },
+    {
+      "nombre": "paro",
+      "descripcion": "detiene la línea"
+    }
+  ],
+  "salidas_funcionales": [
+    {
+      "nombre": "transportador",
+      "descripcion": "banda de productos"
+    },
+    {
+      "nombre": "compuerta_o_desviador",
+      "descripcion": "separa el lote (opcional)"
+    },
+    {
+      "nombre": "indicador_lote_completo",
+      "descripcion": "luz de lote listo"
+    }
+  ],
+  "temporizadores": [
+    {
+      "nombre": "tiempo_accion_lote",
+      "uso": "duración de la pausa o del accionamiento al completar el lote",
+      "valor_tipico_s": 3
+    }
+  ],
+  "contadores": [
+    {
+      "nombre": "productos_por_lote",
+      "uso": "tamaño del lote",
+      "valor_tipico": 10,
+      "reinicio": "automático al terminar la acción o con la entrada de reinicio"
+    },
+    {
+      "nombre": "lotes_completados",
+      "uso": "total de lotes",
+      "valor_tipico": null,
+      "reinicio": "manual"
+    }
+  ],
+  "repeticiones": {
+    "modo": "ciclico",
+    "descripcion": "un ciclo por lote, continuo"
+  },
+  "parametros_configurables": [
+    {
+      "nombre": "productos_por_lote",
+      "descripcion": "tamaño del lote",
+      "tipico": 10
+    },
+    {
+      "nombre": "tiempo_accion_lote_s",
+      "descripcion": "segundos de pausa o compuerta",
+      "tipico": 3
+    }
+  ],
+  "arranque": "orden de arranque del operador",
+  "paro": "orden de paro; el conteo se conserva hasta el reinicio",
+  "resultado_esperado": "lotes con el número exacto de productos, separados por la acción configurada",
+  "requiere_componentes_tipicos": [
+    "sensor de conteo",
+    "compuerta o desviador (opcional)"
+  ],
+  "fuentes": [
+    {
+      "titulo": "PLC Count-Up instruction (Virtual Labs NITK)",
+      "url": "https://ied-nitk.vlabs.ac.in/exp/exp-plc-count-up-nitk/theory.html"
+    },
+    {
+      "titulo": "A Simple Counter Application in PLC",
+      "url": "https://learn.automationcommunity.com/a-simple-counter-application-in-plc/"
+    },
+    {
+      "titulo": "Autonics CT series counters (batch function)",
+      "url": "https://cdn.automationdirect.com/static/specs/autonicsctspecs.pdf"
+    }
+  ],
+  "nota": "Referencia genérica investigada. No es una lógica validada de LAVO ni asume que el hardware exista."
+}

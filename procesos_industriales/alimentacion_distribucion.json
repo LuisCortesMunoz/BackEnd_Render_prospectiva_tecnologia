@@ -1,0 +1,139 @@
+{
+  "id": "alimentacion_distribucion",
+  "nombre": "Alimentación y distribución de materiales (acumulación)",
+  "categoria": "alimentacion",
+  "tipo_conocimiento": "proceso_industrial_generico",
+  "ejecutable": false,
+  "descripcion": "La banda alimenta material a la siguiente máquina sin que los productos choquen: si la zona de salida está ocupada, el transporte se detiene y se reanuda cuando se libera.",
+  "sinonimos": [
+    "alimentacion",
+    "alimentar",
+    "alimentador",
+    "distribucion",
+    "distribuir",
+    "acumulacion",
+    "acumular",
+    "buffer",
+    "pulmon",
+    "abastecer",
+    "suministro de material",
+    "feeding"
+  ],
+  "etapas": [
+    {
+      "orden": 1,
+      "nombre": "transporte",
+      "acciones": [
+        "mover la banda hacia la salida"
+      ],
+      "transicion": "sensor de salida detecta producto"
+    },
+    {
+      "orden": 2,
+      "nombre": "espera_por_zona_ocupada",
+      "acciones": [
+        "detener el transporte",
+        "indicar zona ocupada"
+      ],
+      "transicion": "la máquina siguiente toma el producto (zona libre)"
+    },
+    {
+      "orden": 3,
+      "nombre": "liberacion",
+      "acciones": [
+        "reanudar el transporte"
+      ],
+      "transicion": "vuelve a la etapa 1"
+    }
+  ],
+  "entradas_funcionales": [
+    {
+      "nombre": "sensor_zona_salida",
+      "descripcion": "detecta producto esperando al final"
+    },
+    {
+      "nombre": "sensor_entrada",
+      "descripcion": "detecta producto que entra a la banda (opcional)"
+    },
+    {
+      "nombre": "liberacion_externa",
+      "descripcion": "señal de la máquina siguiente para soltar el producto"
+    },
+    {
+      "nombre": "arranque",
+      "descripcion": "inicia la alimentación"
+    },
+    {
+      "nombre": "paro",
+      "descripcion": "detiene la alimentación"
+    }
+  ],
+  "salidas_funcionales": [
+    {
+      "nombre": "transportador",
+      "descripcion": "banda de alimentación"
+    },
+    {
+      "nombre": "tope_de_salida",
+      "descripcion": "retiene el producto al final (opcional)"
+    },
+    {
+      "nombre": "indicador_zona_ocupada",
+      "descripcion": "luz de espera"
+    }
+  ],
+  "temporizadores": [
+    {
+      "nombre": "retardo_reanudacion",
+      "uso": "tiempo tras liberar la zona antes de reanudar",
+      "valor_tipico_s": 1
+    }
+  ],
+  "contadores": [
+    {
+      "nombre": "productos_entregados",
+      "uso": "conteo de productos alimentados",
+      "valor_tipico": null,
+      "reinicio": "manual"
+    }
+  ],
+  "repeticiones": {
+    "modo": "continuo",
+    "descripcion": "funciona mientras haya material y no se ordene paro"
+  },
+  "parametros_configurables": [
+    {
+      "nombre": "retardo_reanudacion_s",
+      "descripcion": "segundos antes de reanudar",
+      "tipico": 1
+    },
+    {
+      "nombre": "velocidad_transporte",
+      "descripcion": "velocidad de alimentación",
+      "tipico": null
+    }
+  ],
+  "arranque": "orden de arranque del operador",
+  "paro": "orden de paro; la banda no empuja productos contra una zona ocupada",
+  "resultado_esperado": "la máquina siguiente recibe producto de uno en uno, sin choques ni acumulación con presión",
+  "requiere_componentes_tipicos": [
+    "sensores por zona",
+    "tope de salida",
+    "señal de la máquina siguiente"
+  ],
+  "fuentes": [
+    {
+      "titulo": "Accumulation Conveyor (Bastian Solutions)",
+      "url": "https://www.bastiansolutions.com/solutions/technology/conveyor-systems/accumulation"
+    },
+    {
+      "titulo": "Photo Eye Controlled Accumulating Conveyor (ACSI)",
+      "url": "https://www.automatedconveyors.com/catalog/products/model-190lse.html"
+    },
+    {
+      "titulo": "Methods and apparatus for controlling conveyor zones (USPTO 6827202)",
+      "url": "https://image-ppubs.uspto.gov/dirsearch-public/print/downloadPdf/6827202"
+    }
+  ],
+  "nota": "Referencia genérica investigada. No es una lógica validada de LAVO ni asume que el hardware exista."
+}

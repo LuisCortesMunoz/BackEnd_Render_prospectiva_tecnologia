@@ -1,0 +1,148 @@
+{
+  "id": "llenado",
+  "nombre": "Estación de llenado y transporte",
+  "categoria": "llenado",
+  "tipo_conocimiento": "proceso_industrial_generico",
+  "ejecutable": false,
+  "descripcion": "La banda lleva un recipiente vacío hasta la estación de llenado, se detiene, se llena durante un tiempo (o hasta un nivel) y el recipiente lleno continúa.",
+  "sinonimos": [
+    "llenado",
+    "llenadora",
+    "llenar",
+    "dosificado",
+    "dosificacion",
+    "filling",
+    "envasado",
+    "proceso de llenado"
+  ],
+  "etapas": [
+    {
+      "orden": 1,
+      "nombre": "transporte_a_estacion",
+      "acciones": [
+        "mover la banda"
+      ],
+      "transicion": "sensor detecta recipiente en la estación"
+    },
+    {
+      "orden": 2,
+      "nombre": "posicionamiento",
+      "acciones": [
+        "detener la banda"
+      ],
+      "transicion": "recipiente detenido"
+    },
+    {
+      "orden": 3,
+      "nombre": "llenado",
+      "acciones": [
+        "abrir la válvula de llenado",
+        "indicar llenado en curso"
+      ],
+      "transicion": "tiempo de llenado cumplido o nivel alcanzado"
+    },
+    {
+      "orden": 4,
+      "nombre": "fin_de_llenado",
+      "acciones": [
+        "cerrar la válvula"
+      ],
+      "transicion": "válvula cerrada"
+    },
+    {
+      "orden": 5,
+      "nombre": "salida",
+      "acciones": [
+        "reanudar la banda",
+        "contar recipiente lleno"
+      ],
+      "transicion": "el recipiente sale de la estación; vuelve a la etapa 1"
+    }
+  ],
+  "entradas_funcionales": [
+    {
+      "nombre": "sensor_recipiente_en_estacion",
+      "descripcion": "detecta el recipiente bajo la boquilla"
+    },
+    {
+      "nombre": "sensor_nivel",
+      "descripcion": "nivel alcanzado (opcional; si no hay, se usa tiempo)"
+    },
+    {
+      "nombre": "arranque",
+      "descripcion": "inicia el proceso"
+    },
+    {
+      "nombre": "paro",
+      "descripcion": "detiene el proceso"
+    }
+  ],
+  "salidas_funcionales": [
+    {
+      "nombre": "transportador",
+      "descripcion": "banda de recipientes"
+    },
+    {
+      "nombre": "valvula_de_llenado",
+      "descripcion": "deja pasar el producto"
+    },
+    {
+      "nombre": "indicador_llenando",
+      "descripcion": "luz durante el llenado"
+    },
+    {
+      "nombre": "indicador_en_marcha",
+      "descripcion": "luz con la banda en movimiento"
+    }
+  ],
+  "temporizadores": [
+    {
+      "nombre": "tiempo_llenado",
+      "uso": "duración del llenado",
+      "valor_tipico_s": 5
+    }
+  ],
+  "contadores": [
+    {
+      "nombre": "recipientes_llenos",
+      "uso": "conteo de recipientes terminados",
+      "valor_tipico": null,
+      "reinicio": "manual"
+    }
+  ],
+  "repeticiones": {
+    "modo": "ciclico",
+    "descripcion": "un llenado por recipiente hasta el paro"
+  },
+  "parametros_configurables": [
+    {
+      "nombre": "tiempo_llenado_s",
+      "descripcion": "segundos que dura el llenado",
+      "tipico": 5
+    },
+    {
+      "nombre": "velocidad_transporte",
+      "descripcion": "velocidad de la banda",
+      "tipico": null
+    }
+  ],
+  "arranque": "orden de arranque del operador",
+  "paro": "orden de paro; nunca llenar si la banda está en movimiento",
+  "resultado_esperado": "cada recipiente se detiene, se llena el tiempo indicado y continúa; la válvula nunca abre sin recipiente",
+  "requiere_componentes_tipicos": [
+    "válvula de llenado",
+    "sensor de recipiente",
+    "sensor de nivel (opcional)"
+  ],
+  "fuentes": [
+    {
+      "titulo": "PLC Bottle Filling Machine Ladder Logic Design Tips",
+      "url": "https://industrialmonitordirect.com/blogs/knowledgebase/plc-bottle-filling-machine-ladder-logic-design-tips"
+    },
+    {
+      "titulo": "Off-Delay Timer vs On-Delay Timer Ladder Logic for Bottle Filling",
+      "url": "https://industrialmonitordirect.com/blogs/knowledgebase/off-delay-timer-vs-on-delay-timer-ladder-logic-for-bottle-filling"
+    }
+  ],
+  "nota": "Referencia genérica investigada. No es una lógica validada de LAVO ni asume que el hardware exista."
+}

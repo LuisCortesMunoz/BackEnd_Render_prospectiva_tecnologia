@@ -1,0 +1,195 @@
+{
+  "id": "embotellado",
+  "nombre": "Línea de embotellado",
+  "categoria": "embotellado",
+  "tipo_conocimiento": "proceso_industrial_generico",
+  "ejecutable": false,
+  "descripcion": "Las botellas avanzan por una banda a través de estaciones encadenadas: enjuague, llenado, taponado y etiquetado; al final se agrupan para empaque.",
+  "sinonimos": [
+    "embotellado",
+    "embotelladora",
+    "botellas",
+    "botella",
+    "bottling",
+    "linea de bebidas",
+    "envasado de bebidas",
+    "refresco",
+    "refrescos"
+  ],
+  "etapas": [
+    {
+      "orden": 1,
+      "nombre": "alimentacion",
+      "acciones": [
+        "transportar botellas vacías"
+      ],
+      "transicion": "sensor detecta botella en la entrada"
+    },
+    {
+      "orden": 2,
+      "nombre": "enjuague",
+      "acciones": [
+        "detener la botella en la estación",
+        "enjuagar o soplar aire"
+      ],
+      "transicion": "tiempo de enjuague cumplido"
+    },
+    {
+      "orden": 3,
+      "nombre": "llenado",
+      "acciones": [
+        "posicionar la botella bajo la boquilla",
+        "abrir la válvula de llenado"
+      ],
+      "transicion": "tiempo o nivel de llenado alcanzado"
+    },
+    {
+      "orden": 4,
+      "nombre": "taponado",
+      "acciones": [
+        "colocar y apretar la tapa"
+      ],
+      "transicion": "tiempo de taponado cumplido"
+    },
+    {
+      "orden": 5,
+      "nombre": "etiquetado",
+      "acciones": [
+        "aplicar la etiqueta al paso de la botella"
+      ],
+      "transicion": "sensor confirma que la botella pasó"
+    },
+    {
+      "orden": 6,
+      "nombre": "salida",
+      "acciones": [
+        "transportar la botella terminada",
+        "contar botellas"
+      ],
+      "transicion": "vuelve a la etapa 1 con la siguiente botella"
+    }
+  ],
+  "entradas_funcionales": [
+    {
+      "nombre": "sensor_botella_entrada",
+      "descripcion": "detecta la botella al llegar"
+    },
+    {
+      "nombre": "sensor_botella_en_estacion",
+      "descripcion": "confirma la botella bajo la boquilla"
+    },
+    {
+      "nombre": "sensor_nivel",
+      "descripcion": "nivel de líquido alcanzado (opcional)"
+    },
+    {
+      "nombre": "sensor_salida",
+      "descripcion": "confirma la botella terminada"
+    },
+    {
+      "nombre": "arranque",
+      "descripcion": "inicia la línea"
+    },
+    {
+      "nombre": "paro",
+      "descripcion": "detiene la línea"
+    }
+  ],
+  "salidas_funcionales": [
+    {
+      "nombre": "transportador",
+      "descripcion": "banda de botellas"
+    },
+    {
+      "nombre": "tope_de_estacion",
+      "descripcion": "retiene la botella en cada estación"
+    },
+    {
+      "nombre": "valvula_de_llenado",
+      "descripcion": "deja pasar el líquido"
+    },
+    {
+      "nombre": "taponadora",
+      "descripcion": "coloca la tapa"
+    },
+    {
+      "nombre": "etiquetadora",
+      "descripcion": "aplica la etiqueta"
+    },
+    {
+      "nombre": "indicador_llenando",
+      "descripcion": "señal luminosa durante el llenado"
+    }
+  ],
+  "temporizadores": [
+    {
+      "nombre": "tiempo_enjuague",
+      "uso": "duración del enjuague",
+      "valor_tipico_s": 2
+    },
+    {
+      "nombre": "tiempo_llenado",
+      "uso": "duración del llenado si no hay sensor de nivel",
+      "valor_tipico_s": 5
+    },
+    {
+      "nombre": "tiempo_taponado",
+      "uso": "duración del taponado",
+      "valor_tipico_s": 2
+    }
+  ],
+  "contadores": [
+    {
+      "nombre": "botellas_producidas",
+      "uso": "conteo de botellas terminadas o por paquete",
+      "valor_tipico": 6,
+      "reinicio": "al completar el paquete"
+    }
+  ],
+  "repeticiones": {
+    "modo": "ciclico",
+    "descripcion": "un ciclo por botella, continuo hasta el paro"
+  },
+  "parametros_configurables": [
+    {
+      "nombre": "tiempo_llenado_s",
+      "descripcion": "segundos de llenado",
+      "tipico": 5
+    },
+    {
+      "nombre": "botellas_por_paquete",
+      "descripcion": "botellas que se agrupan al final",
+      "tipico": 6
+    },
+    {
+      "nombre": "velocidad_transporte",
+      "descripcion": "velocidad de la banda",
+      "tipico": null
+    }
+  ],
+  "arranque": "orden de arranque del operador",
+  "paro": "orden de paro del operador; paro de emergencia detiene banda y estaciones",
+  "resultado_esperado": "botellas llenas, tapadas y etiquetadas, una por ciclo, sin derrames ni estaciones activas sin botella",
+  "requiere_componentes_tipicos": [
+    "válvula de llenado",
+    "taponadora",
+    "etiquetadora",
+    "sensor de nivel",
+    "topes por estación"
+  ],
+  "fuentes": [
+    {
+      "titulo": "Bottling (Difford's Guide)",
+      "url": "https://www.diffordsguide.com/encyclopedia/120/bws/bottling"
+    },
+    {
+      "titulo": "Bottle packaging line guide",
+      "url": "https://www.jinlupacking.com/it/blogs/bottle-packaging-line-guide/"
+    },
+    {
+      "titulo": "PLC Bottle Filling Machine Ladder Logic Design Tips",
+      "url": "https://industrialmonitordirect.com/blogs/knowledgebase/plc-bottle-filling-machine-ladder-logic-design-tips"
+    }
+  ],
+  "nota": "Referencia genérica investigada. No es una lógica validada de LAVO ni asume que el hardware exista."
+}
