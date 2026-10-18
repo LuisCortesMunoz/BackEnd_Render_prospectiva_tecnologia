@@ -677,6 +677,25 @@ check("presiona el botón verde (I1) o espera a que el sensor S2 (I5) detecte" i
 arr = lm.describir_arranque(banda({"secuencias": [{"id": "SQ1", "inicio": "I1", "modo": "una_vez", "pasos": [
     {"motor": ["marcha"], "avanza": "tiempo", "segundos": 5}]}]}, True))
 check(arr["boton"] == "I1", f"marcha en la secuencia: se pulsa su inicio I1 ({arr})")
+sal_plumas = {"Q9": "T1", "Q7": "T1", "Q8": "T2", "Q6": "T2"}
+for resets, debe in [(({"reset": "S2"}, {"reset": "S1"}), True), (({}, {}), False),
+                     (({"reset": "T2"}, {"reset": "T1"}), False)]:
+    prog = banda({"motor": {"arranque": "I1"}, "salidas": sal_plumas, "timers": [
+        {"id": "T1", "tipo": "RETARDO", "entrada": "S1", "segundos": 5, **resets[0]},
+        {"id": "T2", "tipo": "RETARDO", "entrada": "S2", "segundos": 3, **resets[1]}]}, True)
+    errs, _ = lm.validar_motor(prog)
+    ok_reset = not any("reset cruzado" in e for e in errs)
+    check(ok_reset == debe, f"plumas con dos RETARDO, resets {resets}: {'valido' if debe else 'rechazado'} ({errs})")
+    if debe:
+        sim = cargar(prog)
+        sim.pulsar("I1")
+        for _ in range(2):
+            sim.pulsar("S1", 0.3)
+            sim.correr(5.5)
+            check(sim.q("Q9") and sim.q("Q7"), "S1 + 5 s: bajan las dos plumas")
+            sim.pulsar("S2", 0.3)
+            sim.correr(3.5)
+            check(sim.q("Q8") and sim.q("Q6"), "S2 + 3 s: suben las dos plumas (cada ciclo)")
 check(pb.texto_arranque({"band": banda({"motor": {"arranque": "S1"}}, True)})
       == "La banda arranca cuando el sensor S1 (I4) detecte.", "aviso de la web con un sensor de arranque")
 sim = cargar(banda({"timers": [{"id": "T1", "tipo": "INTERMITENTE", "entrada": "S2", "segundos": 0.5,
@@ -736,6 +755,50 @@ respuestas[:] = [{"name": "x", "banda": {"mover": False}, "salidas": {"Q4": "S2"
 r3 = generar("y la verde con I1", contexto=app.ContextoLadder(programa_anterior=prog_v6, historial=[]))
 mensajes = " ".join(m["content"] for m in capturado["msgs"])
 check(r3.status == "ok" and '"Q4": "S2"' in mensajes, "un programa v6 abierto se convierte a v7 como contexto")
+cerrar()
+
+escenario("20. Eventos: plumas por sensor armadas por el sistema (reset cruzado)")
+texto_ev = ("Quiero que la banda avance a 30 Hz y cuando el sensor uno detecte se espere 5 segundos y baje las dos "
+            "plumas y cuando el sensor dos detecte se espere 3 segundos y suba las dos plumas")
+respuestas[:] = [{"name": "S1 baja, S2 sube", "banda": {"mover": True, "direccion": "derecha", "frecuencia_hz": 30},
+                  "motor": {"arranque": "I1"},
+                  "eventos": [{"cuando": "S1", "espera_s": 5, "acciones": {"pluma1": "bajar", "pluma2": "bajar"}},
+                              {"cuando": "S2", "espera_s": 3, "acciones": {"pluma1": "subir", "pluma2": "subir"}}]}]
+r_ev = generar(texto_ev)
+check(r_ev.status == "ok", f"eventos -> programa cargable ({r_ev.status} {r_ev.warnings})")
+eng_ev = r_ev.logic["band"]["engine"]
+check([(t["tipo"], t["entrada"], t["reset"]) for t in eng_ev["timers"]]
+      == [("RETARDO", "S1", "S2"), ("RETARDO", "S2", "S1")], "dos RETARDO con reset cruzado por ENTRADA")
+check("eventos" in r_ev.logic["respuesta_llm"], "la respuesta del modelo conserva 'eventos' (memoria y ediciones)")
+sim = cargar(r_ev.logic["band"])
+sim.pulsar("I1")
+for ciclo in (1, 2):
+    sim.pulsar("S1", 0.3)
+    sim.correr(5.5)
+    check(sim.q("Q9") and sim.q("Q7") and not sim.q("Q8"), f"ciclo {ciclo}: S1 + 5 s bajan las dos plumas")
+    sim.pulsar("S2", 0.3)
+    sim.correr(3.5)
+    check(sim.q("Q8") and sim.q("Q6") and not sim.q("Q9"), f"ciclo {ciclo}: S2 + 3 s suben las dos plumas")
+check(sim.motor() == "dir1", "la banda sigue avanzando")
+cfg_luz = lm.cfg_desde_respuesta({"banda": {"mover": False}, "eventos": [
+    {"cuando": "S1", "acciones": {"verde": "encender"}}, {"cuando": "S2", "acciones": {"verde": "apagar"}}]})
+check(cfg_luz["band"]["engine"]["memorias"] == [{"id": "M1", "set": "S1", "reset": "S2", "prioridad": "reset"}]
+      and cfg_luz["band"]["engine"]["salidas"] == {"Q3": "M1"}, "sin espera: memoria set S1 / reset S2")
+for evs, error in (([{"cuando": "S1", "acciones": {"pluma3": "bajar"}}], "no existe"),
+                   ([{"acciones": {"roja": "encender"}}], "falta 'cuando'"),
+                   ([{"cuando": "S1", "acciones": {"pluma1": "bajar"}}, {"cuando": "s1", "acciones": {"pluma1": "subir"}}],
+                    "a la vez")):
+    try:
+        lm.cfg_desde_respuesta({"banda": {"mover": False}, "eventos": evs})
+        msg = ""
+    except ValueError as e:
+        msg = str(e)
+    check(error in msg, f"evento invalido -> error claro ({msg})")
+respuestas[:] = [{"name": "x", "banda": {"mover": False}, "eventos": [{"cuando": "S1", "acciones": {"pluma9": "bajar"}}]},
+                 {"name": "x", "banda": {"mover": False}, "eventos": [{"cuando": "S1", "acciones": {"pluma1": "bajar"}}]}]
+r_ev = generar("cuando S1 detecte baja la pluma 1")
+check(r_ev.status == "ok" and r_ev.logic["band"]["engine"]["salidas"] == {"Q9": "M1"},
+      "un evento invalido se corrige en la auto-revision")
 cerrar()
 
 app.BANDA_MOTOR_V7 = False

@@ -650,6 +650,19 @@ def recursos_usados(eng) -> dict:
     return {"entradas": sorted(ent), "salidas": sorted(sal)}
 
 
+def _senal_reset(timer) -> str:
+    """Senal canonica del reset de un timer ("" si no tiene, "?" si no existe)."""
+    try:
+        return nombre_senal(codigo_senal(timer.get("reset")))
+    except ValueError:
+        return "?"
+
+
+def texto_reset(timer) -> str:
+    """'S2' -> '"S2"': la entrada del timer, para sugerirla como reset del otro."""
+    return f'"{timer.get("entrada")}"' if timer.get("entrada") not in (None, "") else "su entrada"
+
+
 def validar_motor(band, hw=HW_BANDA) -> tuple:
     """Valida band.engine v7. Devuelve (errores, avisos).
 
@@ -942,6 +955,30 @@ def validar_motor(band, hw=HW_BANDA) -> tuple:
         if base in ciclicos or base.endswith("_CICLO"):
             avisos.append(f"salidas.{q} usa {base}, un pulso de un scan: la salida no se veria. "
                           f"Usa un timer PULSO disparado por {base}.")
+
+    # --- pluma movida por dos RETARDO (sube / baja): un RETARDO queda activo hasta
+    # su reset; sin reset (o con reset = el otro timer) los dos quedan activos a
+    # la vez y el ST apaga la pluma, que nunca sube y baja junta.
+    timers = {t.get("id"): t for t in _lista(eng.get("timers")) if isinstance(t, dict)}
+    revisados = set()
+    for sube, baja, pluma in hw["pares_excluyentes"]:
+        ids = []
+        for q in (sube, baja):
+            try:
+                ids.append(nombre_senal(codigo_senal((eng.get("salidas") or {}).get(q))))
+            except ValueError:
+                ids.append("")
+        ta, tb = (timers.get(i) for i in ids)
+        if not ta or not tb or ids[0] == ids[1] or tuple(ids) in revisados:
+            continue
+        if TIMER_TIPOS.get(_norm(ta.get("tipo"))) != 4 or TIMER_TIPOS.get(_norm(tb.get("tipo"))) != 4:
+            continue
+        revisados.add(tuple(ids))
+        if any(_senal_reset(t) in ("", otro) for t, otro in ((ta, ids[1]), (tb, ids[0]))):
+            errores.append(f"{pluma}: {ids[0]} (sube) y {ids[1]} (baja) son RETARDO; sin reset cruzado quedan "
+                           f"activos a la vez y la pluma se detiene. Pon {ids[0]}.reset = "
+                           f"{texto_reset(tb)} y {ids[1]}.reset = {texto_reset(ta)} "
+                           f"(la ENTRADA del otro timer, nunca el otro timer).")
 
     if marcha and not usa_motor and not any("marcha" in _lista((p or {}).get("motor"))
                                             for s in seqs for p in _lista((s or {}).get("pasos"))):
@@ -1558,6 +1595,134 @@ CLAVES_MOTOR = ("motor", "condiciones", "memorias", "timers", "contadores", "sal
                 "secuencias", "opciones")
 
 
+# ---------------------------------------------------------------------------
+# EVENTOS  (bloque de alto nivel del LLM -> timers / memorias / condiciones)
+# ---------------------------------------------------------------------------
+# "cuando S1 detecte espera 5 s y baja las plumas" es un patron comun que el
+# modelo armaba mal a mano (RETARDO sin reset cruzado: las plumas se detienen).
+# El LLM solo describe el evento; aqui se arma SIEMPRE igual, con bloques
+# generales, asi que el ST, Unity y el validador no cambian.
+RECURSOS_EVENTO = {
+    "pluma1": {"subir": "Q8", "bajar": "Q9"},
+    "pluma2": {"subir": "Q6", "bajar": "Q7"},
+    "verde": {"encender": "Q3", "apagar": None},
+    "amarilla": {"encender": "Q4", "apagar": None},
+    "roja": {"encender": "Q5", "apagar": None},
+}
+ALIAS_RECURSO = {"pluma_1": "pluma1", "pluma 1": "pluma1", "p1": "pluma1",
+                 "pluma_2": "pluma2", "pluma 2": "pluma2", "p2": "pluma2",
+                 "q3": "verde", "luz_verde": "verde", "q4": "amarilla", "luz_amarilla": "amarilla",
+                 "q5": "roja", "luz_roja": "roja"}
+ALIAS_ESTADO = {"sube": "subir", "arriba": "subir", "baja": "bajar", "abajo": "bajar",
+                "enciende": "encender", "prender": "encender", "prende": "encender", "on": "encender",
+                "apaga": "apagar", "off": "apagar"}
+
+
+def _siguiente_id(eng, clave, pref, maximo):
+    usados = {_id_num(b.get("id"), pref, 99) for b in _lista(eng.get(clave)) if isinstance(b, dict)}
+    for n in range(1, maximo + 1):
+        if n not in usados:
+            eng.setdefault(clave, []).append({"id": f"{pref}{n}"})
+            return eng[clave][-1]
+    raise ValueError(f"eventos: no quedan {clave} libres ({pref}1..{pref}{maximo}).")
+
+
+def _o_logico(eng, senales):
+    """Una senal que esta activa si cualquiera de 'senales' lo esta."""
+    senales = list(dict.fromkeys(senales))
+    if len(senales) == 1:
+        return senales[0]
+    if len(senales) > 4:
+        raise ValueError("eventos: mas de 4 senales sobre el mismo recurso; divide la instruccion.")
+    c = _siguiente_id(eng, "condiciones", "C", N_COND)
+    c.update(op="OR", entradas=senales, flanco="nivel")
+    return c["id"]
+
+
+def expandir_eventos(eventos, eng) -> dict:
+    """eventos del LLM -> timers / memorias / condiciones / salidas en 'eng'.
+
+    Cada evento: {"cuando": senal, "espera_s": N|0, "duracion_s": N|null,
+                  "acciones": {"pluma1": "bajar", "roja": "encender", ...}}
+    - el estado se mantiene hasta que OTRO evento pide un estado distinto del
+      mismo recurso: su 'cuando' es el reset (reset cruzado, nunca el timer);
+    - espera_s > 0 -> RETARDO; 0 -> memoria (set = cuando);
+    - duracion_s -> la salida dura N s (PULSO; tras un RETARDO si hay espera)."""
+    eng = copy.deepcopy(eng)
+    evs = []
+    for i, ev in enumerate(_lista(eventos), 1):
+        tag = f"eventos[{i}]"
+        if not isinstance(ev, dict):
+            raise ValueError(f"{tag}: debe ser un objeto.")
+        if _vacio(ev.get("cuando")):
+            raise ValueError(f"{tag}: falta 'cuando' (la senal que dispara el evento, p. ej. \"S1\").")
+        acciones = {}
+        for r, est in (ev.get("acciones") or {}).items():
+            r = ALIAS_RECURSO.get(_norm(r), _norm(r))
+            est = ALIAS_ESTADO.get(_norm(est), _norm(est))
+            if r not in RECURSOS_EVENTO:
+                raise ValueError(f"{tag}: recurso '{r}' no existe (usa {', '.join(RECURSOS_EVENTO)}).")
+            if est not in RECURSOS_EVENTO[r]:
+                raise ValueError(f"{tag}: {r} no puede '{est}' (usa {' / '.join(RECURSOS_EVENTO[r])}).")
+            acciones[r] = est
+        if not acciones:
+            raise ValueError(f"{tag}: 'acciones' esta vacio.")
+        try:
+            espera = float(ev.get("espera_s") or 0)
+            dur = None if _vacio(ev.get("duracion_s")) else float(ev["duracion_s"])
+        except (TypeError, ValueError):
+            raise ValueError(f"{tag}: espera_s y duracion_s deben ser segundos.")
+        if espera < 0 or (dur is not None and dur <= 0):
+            raise ValueError(f"{tag}: espera_s debe ser >= 0 y duracion_s > 0.")
+        evs.append({"cuando": ev["cuando"], "espera": espera, "dur": dur, "acciones": acciones})
+
+    salidas_ev = {}                                  # Q -> [senales que la encienden]
+    for i, ev in enumerate(evs):
+        grupos = {}                                  # resets -> [Q...]
+        for r, est in ev["acciones"].items():
+            otros = []
+            for j, ot in enumerate(evs):
+                if j != i and r in ot["acciones"] and ot["acciones"][r] != est:
+                    if nombre_canonico(str(ot["cuando"])) == nombre_canonico(str(ev["cuando"])):
+                        raise ValueError(f"eventos: {ev['cuando']} pide {r} '{est}' y '{ot['acciones'][r]}' a la vez.")
+                    otros.append(ot["cuando"])
+            q = RECURSOS_EVENTO[r][est]
+            grupo = grupos.setdefault(tuple(dict.fromkeys(otros)), [])
+            if q:
+                grupo.append(q)
+        for resets, qs in grupos.items():
+            if not qs:
+                continue                             # 'apagar' solo sirve de reset de otros
+            reset = _o_logico(eng, list(resets)) if resets else None
+            if ev["espera"] > 0:
+                t = _siguiente_id(eng, "timers", "T", N_TIMER)
+                t.update(tipo="RETARDO", entrada=ev["cuando"], reset=reset, segundos=ev["espera"])
+                senal = t["id"]
+                if ev["dur"]:
+                    p = _siguiente_id(eng, "timers", "T", N_TIMER)
+                    p.update(tipo="PULSO", entrada=senal, reset=reset, segundos=ev["dur"])
+                    senal = p["id"]
+            elif ev["dur"]:
+                p = _siguiente_id(eng, "timers", "T", N_TIMER)
+                p.update(tipo="PULSO", entrada=ev["cuando"], reset=reset, segundos=ev["dur"])
+                senal = p["id"]
+            else:
+                m = _siguiente_id(eng, "memorias", "M", N_MEM)
+                m.update(set=ev["cuando"], reset=reset, prioridad="reset")
+                senal = m["id"]
+            for q in qs:
+                salidas_ev.setdefault(q, []).append(senal)
+
+    sal = dict(eng.get("salidas") or {})
+    for q, senales in salidas_ev.items():
+        if q in {salida_canonica(k) for k in sal}:
+            raise ValueError(f"eventos: {q} tambien esta en 'salidas'; controlala solo con eventos.")
+        sal[q] = _o_logico(eng, senales)
+    if sal:
+        eng["salidas"] = sal
+    return eng
+
+
 def cfg_desde_respuesta(resp) -> dict:
     """JSON del LLM (SYSTEM_PROMPT_BANDA_V7) -> engine_config de la banda."""
     if not isinstance(resp, dict):
@@ -1581,6 +1746,8 @@ def cfg_desde_respuesta(resp) -> dict:
             v = {s: x for s, x in v.items() if x not in (None, "")}
         if v not in (None, [], {}):
             eng[k] = v
+    if resp.get("eventos") not in (None, [], {}):
+        eng = expandir_eventos(resp["eventos"], eng)
     band["engine"] = normalizar_motor(eng)
     return {"name": str(resp.get("name") or "Programa banda")[:80], "device": "banda",
             "band": band, "outputs": [],

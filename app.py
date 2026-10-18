@@ -752,6 +752,10 @@ BLOQUES (cada uno produce la senal de su id; define todo lo que uses)
   enclavado = flanco de arranque y sigue hasta paro · mientras = solo mientras la senal. pausa detiene y reanuda.
   Antes de invertir SIEMPRE frena paro_inversion_s (minimo 1 s) y espera velocidad cero.
 - salidas: {"Q3":senal,...} = salida encendida mientras su senal este activa.
+- eventos: [{"cuando":senal,"espera_s":N|0,"duracion_s":N|null,"acciones":{RECURSO:ESTADO,...}}] = "cuando <senal>
+  (espera N s) haz algo con plumas o luces". RECURSO: pluma1 | pluma2 (subir | bajar) · verde | amarilla | roja
+  (encender | apagar). El estado dura hasta que OTRO evento pide lo contrario del mismo recurso; con duracion_s
+  dura N s. El sistema arma timers, resets y condiciones: no los armes a mano ni repitas esas salidas en "salidas".
 - secuencias (hasta 2, SQ1 y SQ2, independientes; 16 pasos c/u):
   {"id":"SQ1","inicio":senal,"paro":senal|null,"reset":senal|null,"pausa":senal|null,
    "modo":"una_vez"|"infinita"|"repetir","repeticiones":N|null,"exclusiva":true,"pausa_apaga":true,
@@ -771,10 +775,11 @@ distintos -> SQ1 y SQ2. Reglas sueltas (Q4 con I1 Y S2) -> condiciones + salidas
 Si la banda se mueve y no dicen los Hz, frecuencia_hz = null (se preguntara). Si se mueve y la instruccion no
 dice como arranca, motor.arranque = "I1" SIEMPRE (no uses SIEMPRE, PRIMER_CICLO, CFG_LISTA ni botones que no
 existen). Si piden Q10/Q11/Q12 (no existen aqui) usa Q3/Q4/Q5 en el mismo orden y reportalo.
+Plumas o luces que cambian cuando una senal ocurre (con o sin espera) -> eventos, nunca timers a mano.
 
 ESQUEMA
 {"name":"corto","banda":{"mover":false,"direccion":"derecha","frecuencia_hz":null},
- "motor":{},"condiciones":[],"memorias":[],"timers":[],"contadores":[],"salidas":{},"secuencias":[],"opciones":{},
+ "motor":{},"condiciones":[],"memorias":[],"timers":[],"contadores":[],"salidas":{},"eventos":[],"secuencias":[],"opciones":{},
  "analisis":{"intencion":"una frase","compatibilidad":"total"|"parcial"|"ninguna","conservado":[],"modificado":[],
              "simplificado":[],"no_soportado":[],"requiere_confirmacion":false},
  "preguntas":[]}
@@ -803,6 +808,14 @@ EJEMPLOS
  "motor":{"arranque":"I1","paro":"CT1"},
  "contadores":[{"id":"CT1","entrada":"S1","reset":"I2","preset":3,"modo":"una_vez"}],"salidas":{"Q5":"CT1"},
  "analisis":{"intencion":"contar 3 cajas y detener","compatibilidad":"total","conservado":["conteo 3","paro y roja","reset I2"],
+             "modificado":[],"simplificado":[],"no_soportado":[],"requiere_confirmacion":false},"preguntas":[]}
+
+"A 30 Hz: cuando S1 detecte espera 5 s y baja las dos plumas; cuando S2 detecte espera 3 s y subelas."
+{"name":"S1 baja plumas, S2 las sube","banda":{"mover":true,"direccion":"derecha","frecuencia_hz":30},
+ "motor":{"arranque":"I1"},
+ "eventos":[{"cuando":"S1","espera_s":5,"acciones":{"pluma1":"bajar","pluma2":"bajar"}},
+            {"cuando":"S2","espera_s":3,"acciones":{"pluma1":"subir","pluma2":"subir"}}],
+ "analisis":{"intencion":"plumas por sensor con retardo","compatibilidad":"total","conservado":["S1 + 5 s bajan","S2 + 3 s suben"],
              "modificado":[],"simplificado":[],"no_soportado":[],"requiere_confirmacion":false},"preguntas":[]}
 
 "Enciende Q10 3 s, apagala y enciende Q12 5 s."
