@@ -1777,45 +1777,6 @@ def expandir_eventos(eventos, eng) -> dict:
     return eng
 
 
-REARMES = {"inicio": "inicio", "cada_inicio": "inicio", "siempre": "inicio",
-           "paro": "paro", "tras_paro": "paro", "final": "paro", "una_sola_vez": "paro"}
-
-
-def reglas_secuencias(eng) -> dict:
-    """Politicas generales de las secuencias, armadas con bloques del motor:
-    - el paro del motor manda: una secuencia que mueve la banda lo hereda como
-      su 'paro' (si no, sus pasos de marcha volverian a arrancarla);
-    - rearme "paro": al terminar, la secuencia NO se repite con un nuevo
-      inicio; el ultimo estado queda como estado final hasta el paro o el
-      reset (que borran SQn_FIN). El inicio pasa a ser un flanco NUEVO de la
-      senal Y NOT SQn_FIN, asi una senal sostenida tampoco la rearma.
-      rearme "inicio" (por defecto): cada inicio nuevo la corre otra vez.
-    Una secuencia en marcha nunca se reinicia por su inicio (lo hace el ST)."""
-    eng = copy.deepcopy(eng)
-    paro_motor = (eng.get("motor") or {}).get("paro")
-    seqs = [s for s in _lista(eng.get("secuencias")) if isinstance(s, dict)]
-    for i, s in enumerate(seqs):
-        s["id"] = f"SQ{_id_num(s.get('id'), 'SQ', 9) or i + 1}"
-        mueve = any(ALIAS_ACCION_MOTOR.get(_norm(a), _norm(a)) in ("marcha", "dir_1", "dir_2", "invertir")
-                    for p in _lista(s.get("pasos")) if isinstance(p, dict) for a in _lista(p.get("motor")))
-        if mueve and paro_motor not in (None, ""):
-            if s.get("paro") in (None, ""):
-                s["paro"] = paro_motor
-            elif nombre_canonico(s["paro"]) != nombre_canonico(paro_motor):
-                s["paro"] = _o_logico(eng, [s["paro"], paro_motor])
-        rearme = s.pop("rearme", None)
-        clave = REARMES.get(_norm(rearme or "inicio"))
-        if clave is None:
-            raise ValueError(f"{s['id']}.rearme '{rearme}' debe ser 'inicio' o 'paro'.")
-        if clave == "paro" and s.get("inicio") not in (None, ""):
-            flanco = _siguiente_id(eng, "condiciones", "C", N_COND)
-            flanco.update(op="AND", entradas=[s["inicio"]], flanco="subida")
-            c = _siguiente_id(eng, "condiciones", "C", N_COND)
-            c.update(op="AND", entradas=[flanco["id"], f"NOT {s['id']}_FIN"], flanco="nivel")
-            s["inicio"] = c["id"]
-    return eng
-
-
 def cfg_desde_respuesta(resp) -> dict:
     """JSON del LLM (SYSTEM_PROMPT_BANDA_V7) -> engine_config de la banda."""
     if not isinstance(resp, dict):
@@ -1845,8 +1806,6 @@ def cfg_desde_respuesta(resp) -> dict:
         eng, proceso = plantillas_proceso.expandir_proceso(resp["proceso"], eng, mover)
     if resp.get("eventos") not in (None, [], {}):
         eng = expandir_eventos(resp["eventos"], eng)
-    if eng.get("secuencias"):
-        eng = reglas_secuencias(eng)
     band["engine"] = normalizar_motor(eng)
     cfg = {"name": str(resp.get("name") or "Programa banda")[:80], "device": "banda",
            "band": band, "outputs": [],
