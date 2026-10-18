@@ -1327,6 +1327,105 @@ def describir_motor(band) -> list:
 
 
 # ---------------------------------------------------------------------------
+# ARRANQUE EN PALABRAS  (aviso "para iniciar el proceso..." de la web y Unity)
+# ---------------------------------------------------------------------------
+NOMBRE_FISICO = {"I1": "el botón verde (I1)", "I2": "el botón rojo (I2)",
+                 "I4": "el sensor S1 (I4)", "I5": "el sensor S2 (I5)"}
+ETIQUETA_FISICA = {"I1": "I1", "I2": "I2", "I4": "S1", "I5": "S2"}
+SENALES_AUTO = ("SIEMPRE", "PRIMER_CICLO", "CFG_LISTA")
+
+
+def _bloque(eng, clave, ident):
+    for b in _lista(eng.get(clave)):
+        if isinstance(b, dict) and str(b.get("id")) == ident:
+            return b
+    return {}
+
+
+def _fuentes_arranque(nombre, eng, vistos) -> tuple:
+    """(op, entradas, auto): entradas fisicas (I1, I2, S1, S2) que activan la
+    senal, siguiendo condiciones, memorias, timers, contadores y secuencias.
+    op = "o" si basta una (OR/XOR), "y" si hacen falta todas. Las negadas no
+    cuentan: no son algo que el operador active."""
+    try:
+        n = nombre_senal(codigo_senal(nombre))
+    except ValueError:
+        return "y", [], False
+    if not n or n.startswith("NOT ") or n in vistos:
+        return "y", [], False
+    vistos.add(n)
+    if n in NOMBRE_FISICO:
+        return "y", [n], False
+    if n in SENALES_AUTO:
+        return "y", [], True
+    hijos, op = [], "y"
+    if re.match(r"^C\d+$", n):
+        c = _bloque(eng, "condiciones", n)
+        hijos = _lista(c.get("entradas"))
+        op = "o" if _norm(c.get("op")) in ("or", "o", "xor") else "y"
+    elif re.match(r"^M\d+$", n):
+        hijos = [_bloque(eng, "memorias", n).get("set")]
+    elif re.match(r"^(T|CT)\d+$", n):
+        hijos = [_bloque(eng, "timers" if n[0] == "T" else "contadores", n).get("entrada")]
+    elif n.startswith("SQ"):
+        hijos = [_bloque(eng, "secuencias", n.split("_")[0]).get("inicio")]
+    entradas, auto = [], False
+    for h in hijos:
+        _, e, a = _fuentes_arranque(h, eng, vistos)
+        entradas += [x for x in e if x not in entradas]
+        auto = auto or a
+    return op, entradas, auto
+
+
+def _unir(nombres, op) -> str:
+    if len(nombres) == 1:
+        return nombres[0]
+    return ", ".join(nombres[:-1]) + (" o " if op == "o" else " y ") + nombres[-1]
+
+
+def describir_arranque(band) -> dict:
+    """Que hace el operador para que la banda arranque: sigue motor.arranque
+    (o el inicio de la secuencia que pone 'marcha') hasta las entradas
+    fisicas. {"boton": etiqueta corta, "texto": frase}; boton "" si el
+    programa no mueve la banda. Espejo: CargadorV7.DescribirArranque (Unity)."""
+    try:
+        cfg = compilar_motor(band)
+    except ValueError:
+        return {"boton": "I1", "texto": "Para iniciar el proceso, presiona el botón verde (I1)."}
+    if not cfg[H_MOVE]:
+        return {"boton": "", "texto": ""}
+    eng = normalizar_motor((band or {}).get("engine") or {})
+    senal = nombre_senal(cfg[M_RUN])
+    origen = senal
+    if not senal:
+        seq = next((s for s in _lista(eng.get("secuencias")) if isinstance(s, dict)
+                    and any("marcha" in (p.get("motor") or []) for p in _lista(s.get("pasos"))
+                            if isinstance(p, dict))), {})
+        origen = seq.get("inicio")
+    op, entradas, auto = _fuentes_arranque(origen, eng, set())
+    botones = [NOMBRE_FISICO[x] for x in entradas if x in ("I1", "I2")]
+    sensores = [NOMBRE_FISICO[x] for x in entradas if x in ("I4", "I5")]
+    if botones and sensores:
+        texto = ("Para iniciar el proceso, presiona " + _unir(botones, op)
+                 + (" o espera a que " + _unir(sensores, "o") + " detecte." if op == "o"
+                    else " con " + _unir(sensores, "y") + " detectando."))
+    elif botones:
+        texto = "Para iniciar el proceso, presiona " + _unir(botones, op) + "."
+    elif sensores:
+        texto = ("La banda arranca cuando " + _unir(sensores, op)
+                 + (" detecten." if op == "y" and len(sensores) > 1 else " detecte."))
+    elif auto:
+        texto = "La banda arranca sola: el programa la pone en marcha al cargarse."
+    elif not senal:
+        texto = "La banda arranca con la secuencia del programa."
+    else:
+        texto = f"La banda arranca con {senal} (lo decide el programa)."
+    boton = (ETIQUETA_FISICA[entradas[0]] if entradas else "AUTO" if auto
+             else senal.replace("NOT ", "") if senal else "SEQ")
+    return {"boton": boton, "texto": texto}
+
+
+# ---------------------------------------------------------------------------
 # ESTADO LEIDO DEL PLC  (LSTA -> dict para el panel)
 # ---------------------------------------------------------------------------
 def estado_desde_status(st: list) -> dict:

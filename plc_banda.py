@@ -1958,8 +1958,7 @@ def avisos_config(cfg) -> list:
     if lavo_motor.es_motor_v7(band):
         avisos = list(lavo_motor.validar_motor(band)[1])
         if not sin_marcha(cfg):
-            avisos.append("Tras cargar, la banda queda LISTA pero detenida: arranca con "
-                          f"{boton_start(cfg)} (o con lo que indique el programa).")
+            avisos.append("Tras cargar, la banda queda LISTA pero detenida. " + texto_arranque(cfg))
         return avisos
 
     if banda_motor.es_motor(band):
@@ -2130,13 +2129,7 @@ def boton_start(cfg) -> str:
     configurable es la senal de motor.arranque)."""
     band = (cfg or {}).get("band") or {}
     if lavo_motor.es_motor_v7(band):
-        try:
-            cfg7 = lavo_motor.compilar_motor(band)
-            if not cfg7[lavo_motor.H_MOVE]:
-                return ""
-            return lavo_motor.nombre_senal(cfg7[lavo_motor.M_RUN]) or "la secuencia"
-        except ValueError:
-            return START_BUTTONS[0]
+        return lavo_motor.describir_arranque(band)["boton"]
     if banda_motor.es_motor(band):
         try:
             ec = banda_motor.compilar_motor(band)
@@ -2145,6 +2138,21 @@ def boton_start(cfg) -> str:
             return START_BUTTONS[0]
     boton = str(band.get("start_button") or "").strip().upper()
     return boton if boton in START_BUTTONS else START_BUTTONS[0]
+
+
+def texto_arranque(cfg) -> str:
+    """Frase para el aviso de arranque ("Para iniciar el proceso, presiona
+    el botón verde (I1)."); en v7 sigue el arranque hasta las entradas
+    fisicas (lavo_motor.describir_arranque). "" si no mueve la banda."""
+    if not requiere_start(cfg):
+        return ""
+    band = (cfg or {}).get("band") or {}
+    if lavo_motor.es_motor_v7(band):
+        return lavo_motor.describir_arranque(band)["texto"]
+    boton = boton_start(cfg)
+    nombre = lavo_motor.NOMBRE_FISICO.get(lavo_motor.ALIAS_SENAL.get(boton, boton))
+    return (f"Para iniciar el proceso, presiona {nombre}." if nombre
+            else f"La banda arranca con {boton}.")
 
 
 

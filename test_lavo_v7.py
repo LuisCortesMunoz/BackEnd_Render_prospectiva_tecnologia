@@ -667,6 +667,18 @@ t = tiempo_hasta(sim, lambda s: s.motor() == "dir2", 12)
 check(t is not None, "frena a cero y arranca hacia la direccion 2")
 errs_app, _ = lm.validar_motor(banda({"motor": {"arranque": "APP1"}}, True))
 check(any("APP1 no existe" in e for e in errs_app), f"APP1..APP4 retirados: no se aceptan ({errs_app})")
+arr = lm.describir_arranque(banda({"motor": {"arranque": "C2"},
+                                   "condiciones": [{"id": "C2", "op": "AND", "entradas": ["I1", "NOT S1"]}]}, True))
+check(arr["boton"] == "I1" and "botón verde (I1)" in arr["texto"], f"arranque C2 = I1 Y NOT S1 -> I1 ({arr})")
+arr = lm.describir_arranque(banda({"motor": {"arranque": "C1"},
+                                   "condiciones": [{"id": "C1", "op": "OR", "entradas": ["I1", "S2"]}]}, True))
+check("presiona el botón verde (I1) o espera a que el sensor S2 (I5) detecte" in arr["texto"],
+      f"arranque C1 = I1 O S2 ({arr})")
+arr = lm.describir_arranque(banda({"secuencias": [{"id": "SQ1", "inicio": "I1", "modo": "una_vez", "pasos": [
+    {"motor": ["marcha"], "avanza": "tiempo", "segundos": 5}]}]}, True))
+check(arr["boton"] == "I1", f"marcha en la secuencia: se pulsa su inicio I1 ({arr})")
+check(pb.texto_arranque({"band": banda({"motor": {"arranque": "S1"}}, True)})
+      == "La banda arranca cuando el sensor S1 (I4) detecte.", "aviso de la web con un sensor de arranque")
 sim = cargar(banda({"timers": [{"id": "T1", "tipo": "INTERMITENTE", "entrada": "S2", "segundos": 0.5,
                                 "segundos_off": 0.3},
                                {"id": "T2", "tipo": "TONR", "entrada": "I1", "reset": "I2", "segundos": 2}],

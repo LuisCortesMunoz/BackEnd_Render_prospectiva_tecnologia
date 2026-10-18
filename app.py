@@ -4156,7 +4156,8 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
         return {"status": "dry-run", "enviado": False, "device": "banda",
                 "salidas": 0, "plan": plan_legible, "avisos": avisos,
                 "requiere_start": plc_banda.requiere_start(cfg),
-                "boton_start": plc_banda.boton_start(cfg)}
+                "boton_start": plc_banda.boton_start(cfg),
+                "arranque_texto": plc_banda.texto_arranque(cfg)}
 
     _guardia_confirmacion(cfg)
 
@@ -4211,7 +4212,8 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
             "salidas": 0, "plan": plan_legible, "avisos": avisos, "notas": notas,
             "cfg_ready": cfg_ready, "sin_marcha": plc_banda.sin_marcha(cfg),
             "requiere_start": plc_banda.requiere_start(cfg),
-            "boton_start": plc_banda.boton_start(cfg)}
+            "boton_start": plc_banda.boton_start(cfg),
+            "arranque_texto": plc_banda.texto_arranque(cfg)}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -4384,7 +4386,8 @@ def banda_config(req: BandaConfigRequest):
         return {"status": "dry-run", "enviado": False, "device": "banda",
                 "plan": plan_legible, "avisos": avisos,
                 "requiere_start": plc_banda.requiere_start(cfg),
-                "boton_start": plc_banda.boton_start(cfg)}
+                "boton_start": plc_banda.boton_start(cfg),
+                "arranque_texto": plc_banda.texto_arranque(cfg)}
 
     plc, ip, port, notas = _banda_plc(req)
     try:
@@ -4414,7 +4417,8 @@ def banda_config(req: BandaConfigRequest):
             "plan": plan_legible, "avisos": avisos, "notas": notas, "estado": estado,
             "cfg_ready": bool(estado.get("cfg_ready")),
             "requiere_start": plc_banda.requiere_start(cfg),
-            "boton_start": plc_banda.boton_start(cfg)}
+            "boton_start": plc_banda.boton_start(cfg),
+            "arranque_texto": plc_banda.texto_arranque(cfg)}
 
 
 @app.post("/banda/frecuencia")
