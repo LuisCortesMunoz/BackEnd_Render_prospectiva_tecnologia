@@ -763,12 +763,16 @@ BLOQUES (cada uno produce la senal de su id; define todo lo que uses)
 - secuencias (hasta 2, SQ1 y SQ2, independientes; 16 pasos c/u):
   {"id":"SQ1","inicio":senal,"paro":senal|null,"reset":senal|null,"pausa":senal|null,
    "modo":"una_vez"|"infinita"|"repetir","repeticiones":N|null,"exclusiva":true,"pausa_apaga":true,
+   "rearme":"inicio"|"paro",
    "pasos":[{"salidas":["Q3"],"motor":["marcha"],"avanza":"tiempo"|"flanco"|"senal"|"tiempo_y_senal"|"senal_o_tiempo",
              "senal":senal|null,"segundos":N|null,"siguiente":null|N|"fin","alternativa":{"senal":S,"ir_a":N|"fin"}|null}]}
   Cada paso enciende SOLO sus salidas mientras esta activo (las del paso anterior se apagan). Varias salidas
   juntas = varias en el mismo paso. motor del paso: marcha, paro, dir_1, dir_2, invertir (al entrar).
   inicio por flanco; paro detiene; reset la reinicia; pausa congela el paso. exclusiva = manda sola sobre las
   salidas/motor que usa. "alternativa" = rama: si esa senal se activa, salta a ir_a.
+  Mientras corre, un nuevo inicio NO la reinicia. Al terminar (una_vez): rearme "inicio" = el siguiente
+  inicio la corre otra vez · rearme "paro" = el ultimo paso queda como estado final hasta el paro/reset.
+  El paro del motor siempre detiene tambien la secuencia (lo arma el sistema).
 
 GUIA RAPIDA
 "durante N s" -> PULSO o un paso de N s · "despues de N s" -> RETARDO o TON · "parpadea" -> INTERMITENTE ·
@@ -783,6 +787,11 @@ Plumas, luces o la banda que cambian cuando una senal ocurre (con o sin espera) 
 "se detiene N s y vuelve a avanzar / continua" -> banda pausar con duracion_s N · "detén la banda" (sin reanudar)
 -> banda detener · "cuando S1 detecte se mueve (a la derecha)" -> banda avanzar (derecha) · "espera N s y cambia el sentido" -> banda
 invertir con espera_s N. Todo se repite en CADA deteccion: los bloques se rearman solos.
+eventos = reacciones INDEPENDIENTES a una senal. Si la instruccion es una CADENA de etapas en orden ("luego",
+"despues", "cuando hayan pasado N s mas", y otro sensor que se atiende DESPUES), usa UNA secuencia: un paso
+por etapa (motor paro/marcha con segundos; esperar un sensor = avanza "flanco" con esa senal), inicio = la
+primera senal. Un sensor que llega antes de su etapa se ignora (dilo en "analisis"). Si al final "continua
+indefinidamente / hasta el paro" -> rearme "paro"; si dice "cada vez que" -> rearme "inicio".
 
 ESQUEMA
 {"name":"corto","banda":{"mover":false,"direccion":"derecha","frecuencia_hz":null},
@@ -830,6 +839,17 @@ EJEMPLOS
  "motor":{"arranque":"I1"},
  "eventos":[{"cuando":"S1","duracion_s":3,"acciones":{"banda":"pausar","roja":"encender"}}],
  "analisis":{"intencion":"pausa de 3 s en cada deteccion","compatibilidad":"total","conservado":["3 s","roja en la pausa"],
+             "modificado":[],"simplificado":[],"no_soportado":[],"requiere_confirmacion":false},"preguntas":[]}
+
+"A 20 Hz: cuando S1 detecte para 2 s y avanza; tras 4 s de marcha para 6 s; cuando S2 detecte para 1 s y sigue sin parar hasta I2."
+{"name":"Etapas S1 -> S2","banda":{"mover":true,"direccion":"derecha","frecuencia_hz":20},
+ "motor":{"arranque":"I1","paro":"I2"},
+ "secuencias":[{"id":"SQ1","inicio":"S1","modo":"una_vez","rearme":"paro","exclusiva":true,"pasos":[
+  {"motor":["paro"],"avanza":"tiempo","segundos":2},{"motor":["marcha"],"avanza":"tiempo","segundos":4},
+  {"motor":["paro"],"avanza":"tiempo","segundos":6},{"motor":["marcha"],"avanza":"flanco","senal":"S2"},
+  {"motor":["paro"],"avanza":"tiempo","segundos":1},{"motor":["marcha"],"avanza":"tiempo","segundos":0.1}]}],
+ "analisis":{"intencion":"etapas en orden con dos sensores y marcha final continua","compatibilidad":"total",
+             "conservado":["2 s, 4 s, 6 s, 1 s en orden","S2 solo en su etapa","marcha final hasta I2"],
              "modificado":[],"simplificado":[],"no_soportado":[],"requiere_confirmacion":false},"preguntas":[]}
 
 "Enciende Q10 3 s, apagala y enciende Q12 5 s."
