@@ -16,7 +16,9 @@ Ramificacion de la BANDA (motor v7):
   siempre       nucleo: hardware, seguridad, senales, bloques y esquema JSON
   hay memoria   + memorias validadas relevantes (sin guia ni ejemplos)
   no hay        + guia rapida + ejemplos + limites del programa maestro
-  general/vaga  + proceso del catalogo y reglas para adaptarlo al hardware real
+  general/vaga  + PLANTILLAS de proceso (plantillas_proceso.py: el modelo elige
+                  una y sus parametros; el sistema la expande con operacion
+                  robusta) + la referencia del catalogo del proceso detectado
                   (solo si la instruccion NO describe ya la secuencia)
 Ramificacion del MALETIN: su prompt de siempre + memorias relevantes y, si no
 hay memoria adecuada, los programas de codigos/ relacionados con la peticion.
@@ -29,6 +31,7 @@ import os
 import re
 
 import memoria_validada as mv
+import plantillas_proceso as pp
 import validador_esquema
 
 log = logging.getLogger(__name__)
@@ -38,7 +41,7 @@ CARPETA_PROCESOS = os.path.join(AQUI, "procesos_industriales")
 REFERENCIA_V7 = os.path.join(AQUI, "cscape", "LAVO_Referencia_v7.txt")
 CONTEXTO_MALETIN = os.path.join(AQUI, "context_json", "contexto.json")
 MAX_JSON_MEMORIA = 1500
-MAX_PROCESOS = 2
+MAX_PROCESOS = 1
 
 
 # ---------------------------------------------------------------------------
@@ -70,19 +73,11 @@ def catalogo() -> list:
 
 
 def procesos_mencionados(texto: str) -> list:
-    """Procesos del catalogo cuyo nombre o sinonimo aparece en el texto."""
-    t = mv.normalizar_texto(texto)
-    hallados = []
-    for p in catalogo():
-        mejor = 0
-        for s in p.get("sinonimos", []) + [p["id"].replace("_", " ")]:
-            sn = mv.normalizar_texto(s)
-            if sn and re.search(rf"\b{re.escape(sn)}", t):
-                mejor = max(mejor, len(sn))
-        if mejor:
-            hallados.append((mejor, p))
-    hallados.sort(key=lambda x: -x[0])
-    return [p for _, p in hallados[:MAX_PROCESOS]]
+    """Procesos del catalogo de referencia de las plantillas detectadas
+    (por raices: "clasifique" = "clasificar"), el mas especifico primero."""
+    por_id = {p["id"]: p for p in catalogo()}
+    ids = [pp.PLANTILLAS[i]["catalogo"] for i in pp.plantillas_mencionadas(texto)]
+    return [por_id[i] for i in ids if i in por_id][:MAX_PROCESOS]
 
 
 _GENERICAS = {"produccion", "trabajo", "proceso", "control", "la", "una", "un", "mi", "tu", "banda",
@@ -95,7 +90,7 @@ def proceso_desconocido(texto: str):
     m = re.search(r"\b(?:linea|proceso|estacion|planta|sistema|maquina) de ([a-z]+)", t)
     if not m or m.group(1) in _GENERICAS:
         return None
-    if procesos_mencionados(texto):
+    if pp.plantillas_mencionadas(texto):
         return None
     return m.group(1)
 
@@ -125,29 +120,35 @@ def _proceso_compacto(p: dict) -> dict:
     }
 
 
-REGLAS_ADAPTACION_BANDA = """PROCESO INDUSTRIAL DE REFERENCIA (nivel 3: catalogo GENERICO investigado).
-NO es una logica validada ni describe este hardware: es solo la secuencia tipica del proceso.
-La instruccion del usuario es general; construye una propuesta adaptando esa secuencia a los
-recursos REALES de esta banda:
-- sensores de presencia o conteo -> S1 (I4) y S2 (I5); solo existen esos dos.
-- desviador, compuerta, tope, empujador o actuador de carga -> pluma 1 (Q8 sube / Q9 baja)
-  o pluma 2 (Q6 sube / Q7 baja).
-- operacion de una estacion (llenar, etiquetar, taponar, ensamblar, sellar) -> pausa
-  temporizada de la banda + una luz de la torreta mientras dura (es una SIMULACION).
-- indicadores -> torreta Q3 verde, Q4 amarilla, Q5 roja.
-- valvulas, robots, camaras, etiquetadoras, sensores de nivel, peso, tamano o tipo de producto
-  NO EXISTEN: nunca asumas que existen; reportalos en analisis.simplificado (si se simulo) o en
-  analisis.no_soportado (si no hay forma).
-- arranque I1, paro I2 salvo que el usuario diga otra cosa; I3 siempre es el paro de emergencia.
-- valores que el usuario no dio: usa los tipicos del proceso y reportalos en analisis.modificado;
-  si la banda se mueve y no dio los Hz, frecuencia_hz = null.
-- analisis.requiere_confirmacion = true: es una propuesta adaptada, no lo que el usuario dicto."""
+REGLAS_ADAPTACION_BANDA = """PROCESO GENERAL: la instruccion nombra un proceso o es vaga y NO dicta la secuencia.
+NO armes timers, contadores ni secuencias a mano: elige UNA plantilla y devuelve
+  "proceso": {"id": ID, "parametros": {...solo los que cambian...}}
+El sistema la expande y le agrega la OPERACION ROBUSTA: I1 arranca e I2 detiene (con prioridad sobre
+toda etapa), supervision de atasco (S1 o S2 ocupado atasco_s con la banda en marcha -> paro y roja; I1
+reconoce la falla y otro I1 arranca), torreta estandar (verde en marcha, amarilla detenida o estacion
+trabajando, roja falla y paro de emergencia). No repitas esos bloques ni esas luces.
+- banda.mover = true; si no dieron los Hz, frecuencia_hz = null (se preguntara).
+- Datos que el usuario SI dio (piezas, segundos, sensor, pluma) -> en "parametros". Lo demas usa el
+  valor tipico de la plantilla: reportalo en analisis.modificado.
+- Comun a todas: atasco_s=10 (0 = sin supervision).
+- Si el usuario pide ademas algo concreto que la plantilla no cubre, agregalo con los bloques normales
+  (eventos, salidas...) sin usar Q3/Q4/Q5 ni las plumas de la plantilla.
+- Solo existen S1, S2, pluma1, pluma2 y la torreta: valvulas, robots, camaras o sensores de tipo,
+  peso o nivel se SIMULAN con estas plantillas; dilo en analisis.simplificado.
+- Si ninguna plantilla se parece a lo pedido, usa "preguntas" con 2-3 plantillas como opciones.
+- analisis.requiere_confirmacion = true: es una propuesta adaptada, no lo que el usuario dicto.
+PLANTILLAS (id: que hace · parametros y su valor tipico):"""
 
 
-def bloque_procesos_banda(procesos: list) -> str:
-    cuerpo = [REGLAS_ADAPTACION_BANDA]
+def bloque_procesos_banda(procesos: list, plantillas: list = ()) -> str:
+    """Reglas + menu de plantillas (+ las detectadas) + la referencia del
+    catalogo del proceso detectado."""
+    cuerpo = [REGLAS_ADAPTACION_BANDA, pp.menu_plantillas()]
+    if plantillas:
+        cuerpo.append("La instruccion parece: " + ", ".join(plantillas) + ".")
     for p in procesos:
-        cuerpo.append("PROCESO: " + json.dumps(_proceso_compacto(p), ensure_ascii=False, separators=(",", ":")))
+        cuerpo.append("REFERENCIA DEL CATALOGO (proceso real investigado; NO es una logica validada, solo explica las etapas): "
+                      + json.dumps(_proceso_compacto(p), ensure_ascii=False, separators=(",", ":")))
     return "\n".join(cuerpo)
 
 
@@ -301,13 +302,13 @@ def mensajes_sistema_banda_v7(prompt_v7: str, texto: str, memorias: list) -> tup
             plan["contexto"].append("contexto_tecnico_local(guia+ejemplos+limites)")
 
     if es_peticion_general(texto):
-        procesos = procesos_mencionados(texto)
-        if procesos:
-            msgs.append({"role": "system", "content": bloque_procesos_banda(procesos)})
-            plan["procesos"] = [p["id"] for p in procesos]
-            plan["contexto"].append("catalogo_procesos(" + ",".join(plan["procesos"]) + ")")
-        else:
-            plan["proceso_desconocido"] = proceso_desconocido(texto)
+        plan["proceso_desconocido"] = proceso_desconocido(texto)
+        if not plan["proceso_desconocido"]:
+            plantillas = pp.plantillas_mencionadas(texto)
+            procesos = procesos_mencionados(texto)
+            msgs.append({"role": "system", "content": bloque_procesos_banda(procesos, plantillas)})
+            plan["procesos"] = plantillas
+            plan["contexto"].append("plantillas_proceso(" + (",".join(plantillas) or "sin_detectar") + ")")
     return msgs, plan
 
 

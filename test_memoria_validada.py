@@ -239,7 +239,7 @@ escenario("6. Secuencia especifica: NO consulta procesos industriales")
 # ---------------------------------------------------------------------------
 respuestas[:] = [ciclo(5, 3, nombre="5/3")]
 r = generar("Enciende la banda cinco segundos, detenla tres segundos y repite el ciclo a 30 Hz con I1")
-check("PROCESO INDUSTRIAL DE REFERENCIA" not in sistema(0), "no recibe el catalogo")
+check("REFERENCIA DEL CATALOGO" not in sistema(0) and "PROCESO GENERAL" not in sistema(0), "no recibe el catalogo")
 check(not any("catalogo" in x for x in r.analysis["contexto"]["contexto"]), "el plan de contexto no lo incluye")
 cerrar()
 
@@ -260,8 +260,8 @@ resp_emp = {"name": "Empaquetado (propuesta)", "banda": {"mover": True, "direcci
 respuestas[:] = [copy.deepcopy(resp_emp)]
 r = generar("Quiero que mi banda funcione como una linea de empaquetado")
 s = sistema(0)
-check("PROCESO INDUSTRIAL DE REFERENCIA" in s and "encajado" in s.lower(), "recibe el proceso de empaquetado")
-check("embotellado" not in s.lower(), "no recibe procesos que no se pidieron")
+check("REFERENCIA DEL CATALOGO" in s and "encajado" in s.lower(), "recibe el proceso de empaquetado")
+check("Línea de embotellado" not in s, "no recibe la referencia de procesos que no se pidieron")
 check(r.analysis["contexto"]["procesos"] == ["empaquetado"], "el plan registra el proceso usado")
 check(r.status == "needs_confirmation", "una propuesta adaptada requiere confirmacion")
 cerrar()
@@ -283,7 +283,7 @@ cerrar()
 escenario("9. Adaptar un proceso generico a los recursos reales de la banda")
 # ---------------------------------------------------------------------------
 s = sistema(0)
-check("S1 (I4) y S2 (I5)" in s and "pluma 1 (Q8" in s and "SIMULACION" in s,
+check("S1, S2, pluma1, pluma2" in s and "SIMULAN" in s and "estacion_trabajo" in s,
       "las reglas de adaptacion mapean a sensores, plumas y pausas reales")
 inventado = copy.deepcopy(resp_emp)
 inventado["salidas"] = {"Q10": "T1"}          # salida que no existe en la banda
@@ -304,13 +304,13 @@ check(any("actuador de carga" in x for x in r.analysis["compatibilidad"]["no_sop
       "los componentes faltantes quedan en no_soportado")
 check(any(w.startswith("No soportado:") for w in r.warnings), "y se avisan al usuario")
 respuestas[:] = []
-r = generar("Quiero que la banda sea una linea de pintura")
+r = generar("Quiero que la banda sea una linea de mineria")
 check(len(llamadas) == 0 and r.status == "needs_clarification", "proceso fuera del catalogo: no se inventa")
-check(r.questions[0]["id"] == "proceso_no_catalogado" and "pintura" in r.questions[0]["pregunta"],
+check(r.questions[0]["id"] == "proceso_no_catalogado" and "mineria" in r.questions[0]["pregunta"],
       "explica la limitacion y ofrece opciones")
-r = generar("Quiero que la banda sea una linea de pintura Autorizar ampliar el catalogo con ese proceso")
-check(r.status == "needs_clarification" and r.analysis["proceso_solicitado"] == "pintura", "registra la solicitud")
-check(app.MEMORIA.almacen.leer("procesos_solicitados.json")["solicitudes"][-1]["proceso"] == "pintura",
+r = generar("Quiero que la banda sea una linea de mineria Autorizar ampliar el catalogo con ese proceso")
+check(r.status == "needs_clarification" and r.analysis["proceso_solicitado"] == "mineria", "registra la solicitud")
+check(app.MEMORIA.almacen.leer("procesos_solicitados.json")["solicitudes"][-1]["proceso"] == "mineria",
       "la solicitud queda guardada para ampliar el catalogo despues")
 cerrar()
 

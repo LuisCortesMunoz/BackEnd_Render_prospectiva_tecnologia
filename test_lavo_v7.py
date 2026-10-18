@@ -1146,6 +1146,131 @@ sim.correr(15)
 check(sim.motor() == "paro", "despues del paro ninguna etapa vuelve a arrancar la banda")
 cerrar()
 
+escenario("24. Instrucciones generales: plantillas de proceso con operacion robusta")
+import plantillas_proceso as pp
+import contexto_ramificado as cr
+
+# deteccion por raices (antes: "clasifique", "empaca" o "control de calidad" no se reconocian)
+for texto, esperado in [("Haz que la banda clasifique productos", "clasificacion"), ("Empaca de 6 en 6", "empaquetado"),
+                        ("Simula un control de calidad", "inspeccion"), ("Arma una estación de sellado", "estacion_trabajo"),
+                        ("Haz un proceso de pintura", "estacion_trabajo"), ("Simula paletizado de cajas", "paletizado"),
+                        ("Simula una línea de empaquetado", "empaquetado"), ("Etiquete las botellas", "etiquetado"),
+                        ("Simula un almacén que recibe paquetes", "alimentacion_distribucion")]:
+    hall = pp.plantillas_mencionadas(texto)
+    check(hall[:1] == [esperado], f"'{texto}' -> {esperado} ({hall})")
+check(pp.plantillas_mencionadas("Simula una línea de empaquetado") == ["empaquetado"],
+      "la linea de produccion generica no se suma a un proceso especifico")
+check(cr.proceso_desconocido("Arma una estación de sellado") is None, "sellado ya no se pregunta: es una estacion")
+check(cr.proceso_desconocido("Haz un proceso de minería") == "mineria", "un proceso sin plantilla se sigue preguntando")
+
+# el bloque de plantillas solo va en instrucciones generales
+_, plan = cr.mensajes_sistema_banda_v7(app.SYSTEM_PROMPT_BANDA_V7, "Simula una línea de empaquetado", [])
+check(plan["procesos"] == ["empaquetado"] and any(c.startswith("plantillas_proceso") for c in plan["contexto"]),
+      "instruccion general -> plantillas")
+_, plan = cr.mensajes_sistema_banda_v7(app.SYSTEM_PROMPT_BANDA_V7,
+                                      "Con I1 avanza a 30 Hz y cuando S1 detecte prende la roja 3 s", [])
+check(not plan["procesos"] and not any(c.startswith("plantillas") for c in plan["contexto"]),
+      "instruccion especifica -> sin plantillas")
+
+# todas las plantillas se expanden a un programa valido para el PLC
+for pid in pp.PLANTILLAS:
+    c = lm.cfg_desde_respuesta({"name": pid, "banda": M30, "proceso": {"id": pid}})
+    check(not lm.validar_motor(c["band"])[0], f"plantilla {pid} valida")
+for spec, error in [({"id": "volar"}, "no existe"), ({"id": "llenado", "parametros": {"color": 3}}, "desconocidos"),
+                    ({"id": "llenado", "parametros": {"sensor": "S3"}}, "S1 o S2"),
+                    ({"id": "empaquetado", "parametros": {"piezas": 0}}, "entero")]:
+    try:
+        lm.cfg_desde_respuesta({"name": "x", "banda": M30, "proceso": spec})
+        check(False, f"{spec} deberia fallar")
+    except ValueError as e:
+        check(error in str(e), f"{spec['id']}: {e}")
+
+
+def caso_general(texto, proceso):
+    respuestas[:] = [{"name": proceso["id"], "banda": M30, "proceso": proceso,
+                      "analisis": {"intencion": texto, "compatibilidad": "parcial", "conservado": [],
+                                   "modificado": ["valores tipicos"], "simplificado": [], "no_soportado": [],
+                                   "requiere_confirmacion": True}}]
+    r = generar(texto)
+    check(r.status == "needs_confirmation" and r.analysis["proceso"]["id"] == proceso["id"],
+          f"'{texto}' -> plantilla {proceso['id']} con confirmacion")
+    band = r.logic["band"]
+    band["engine"]["confirmado"] = True
+    return r, cargar(band)
+
+
+# empaquetado de 4: lote, pluma, torreta, atasco y paro
+r, sim = caso_general("Simula una línea de empaquetado de 4 piezas", {"id": "empaquetado", "parametros": {"piezas": 4}})
+check("pausa_s = 3" in r.analysis["proceso"]["supuestos"] and any("supuestos" in w for w in r.warnings),
+      "reporta los valores supuestos")
+sim.correr(0.5)
+check(sim.motor() == "paro" and sim.salidas() == {"Q4"}, "lista: detenida con amarilla")
+sim.pulsar("I1")
+sim.correr(0.5)
+check(sim.motor() == "dir1" and sim.salidas() == {"Q3"}, "I1: en marcha con verde")
+for _ in range(3):
+    sim.pulsar("S1")
+    sim.correr(0.5)
+check(sim.motor() == "dir1", "3 piezas: sigue")
+sim.pulsar("S1")
+sim.correr(0.5)
+check(sim.motor() == "paro" and sim.q("Q9") and sim.q("Q4"), "4a pieza: para, la pluma deposita, amarilla")
+check(hasta(sim, lambda s: s.motor() == "dir1", 10), "termina el lote y continua sola")
+for _ in range(3):
+    sim.pulsar("S1")
+    sim.correr(0.5)
+check(sim.motor() == "dir1", "el conteo empezo de nuevo")
+sim.poner(S2=True)
+check(hasta(sim, lambda s: s.motor() == "paro" and s.q("Q5"), 12), "S2 ocupado 10 s en marcha: atasco, paro y roja")
+sim.poner(S2=False)
+sim.correr(2)
+check(sim.motor() == "paro" and sim.q("Q5"), "la falla se mantiene hasta reconocerla")
+sim.pulsar("I1")
+sim.correr(0.5)
+check(sim.q("Q4") and not sim.q("Q5"), "I1 reconoce la falla")
+sim.pulsar("I1")
+sim.correr(0.5)
+check(sim.motor() == "dir1", "otro I1 arranca")
+sim.pulsar("I2")
+sim.correr(0.5)
+check(sim.motor() == "paro", "I2 detiene")
+
+# llenado: el paro manda aunque la estacion este trabajando
+r, sim = caso_general("Haz un proceso de llenado", {"id": "llenado"})
+sim.pulsar("I1")
+sim.correr(0.5)
+sim.pulsar("S1")
+sim.correr(0.5)
+check(sim.motor() == "paro" and sim.q("Q9"), "S1: la estacion detiene y baja la pluma")
+sim.pulsar("I2")
+sim.correr(15)
+check(sim.motor() == "paro" and not sim.q("Q9"), "tras I2 la estacion termina (pluma arriba) y la banda no arranca")
+
+# paletizado: espera al operador
+r, sim = caso_general("Simula paletizado de 3 cajas", {"id": "paletizado", "parametros": {"piezas": 3}})
+sim.pulsar("I1")
+sim.correr(0.5)
+for _ in range(3):
+    sim.pulsar("S1")
+    sim.correr(0.5)
+sim.correr(10)
+check(sim.motor() == "paro" and sim.q("Q4"), "pallet completo: espera al operador con amarilla")
+sim.pulsar("I1")
+sim.correr(0.5)
+check(sim.motor() == "dir1", "I1 retira el pallet y continua")
+
+# acumulacion: S2 ocupado detiene sin falla y reanuda al liberarse
+r, sim = caso_general("Simula un almacén que recibe paquetes", {"id": "alimentacion_distribucion"})
+sim.pulsar("I1")
+sim.correr(0.5)
+sim.poner(S2=True)
+sim.correr(15)
+check(sim.motor() == "paro" and not sim.q("Q5"), "final ocupado: espera sin marcar atasco")
+sim.poner(S2=False)
+sim.correr(1)
+check(sim.motor() == "dir1", "al liberarse continua")
+cerrar()
+
 app.BANDA_MOTOR_V7 = False
 
 print("\n" + "=" * 78)

@@ -1839,14 +1839,21 @@ def cfg_desde_respuesta(resp) -> dict:
             v = {s: x for s, x in v.items() if x not in (None, "")}
         if v not in (None, [], {}):
             eng[k] = v
+    proceso = None
+    if resp.get("proceso") not in (None, {}, ""):
+        import plantillas_proceso
+        eng, proceso = plantillas_proceso.expandir_proceso(resp["proceso"], eng, mover)
     if resp.get("eventos") not in (None, [], {}):
         eng = expandir_eventos(resp["eventos"], eng)
     if eng.get("secuencias"):
         eng = reglas_secuencias(eng)
     band["engine"] = normalizar_motor(eng)
-    return {"name": str(resp.get("name") or "Programa banda")[:80], "device": "banda",
-            "band": band, "outputs": [],
-            "no_soportado": [str(x) for x in _lista(resp.get("no_soportado")) if x]}
+    cfg = {"name": str(resp.get("name") or "Programa banda")[:80], "device": "banda",
+           "band": band, "outputs": [],
+           "no_soportado": [str(x) for x in _lista(resp.get("no_soportado")) if x]}
+    if proceso:
+        cfg["proceso"] = proceso
+    return cfg
 
 
 def falta_frecuencia(cfg) -> bool:

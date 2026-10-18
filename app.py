@@ -2869,6 +2869,12 @@ def _respuesta_banda_v7(texto: str, cfg: dict, analisis_llm: dict, extra: dict =
                 "compatibilidad": compat, "registros": registros,
                 "recursos": lavo_motor.recursos_usados(cfg["band"]["engine"]), **(extra or {})}
     warnings = avisos_logica_banda(cfg) + [f"No soportado: {x}" for x in compat["no_soportado"]]
+    if cfg.get("proceso"):
+        pr = cfg["proceso"]
+        analysis["proceso"] = pr
+        warnings.append(f"Plantilla de proceso '{pr['id']}' con operacion robusta (atasco, paro "
+                        f"prioritario, torreta estandar)."
+                        + (f" Valores supuestos: {', '.join(pr['supuestos'])}." if pr.get("supuestos") else ""))
     if (extra or {}).get("fuente") == "memoria":
         warnings.insert(0, f"Reutilizada de la memoria validada ({extra['memoria_id']}); "
                            f"prueba fisica: {extra.get('prueba_fisica')}.")
