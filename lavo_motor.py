@@ -1668,12 +1668,22 @@ def expandir_eventos(eventos, eng) -> dict:
         acciones = {}
         for r, est in (ev.get("acciones") or {}).items():
             r = ALIAS_RECURSO.get(_norm(r), _norm(r))
-            est = ALIAS_ESTADO.get(_norm(est), _norm(est))
-            if r in ("banda", "motor"):
-                if est not in ACCIONES_BANDA:
-                    raise ValueError(f"{tag}: la banda no puede '{est}' (usa {' / '.join(ACCIONES_BANDA)}).")
-                acciones["banda"] = est
+            if r in ("banda", "motor"):              # una accion o una lista
+                banda = []
+                for x in _lista(est):
+                    x = ALIAS_ESTADO.get(_norm(x), _norm(x))
+                    if x not in ACCIONES_BANDA:
+                        raise ValueError(f"{tag}: la banda no puede '{x}' (usa {' / '.join(ACCIONES_BANDA)}).")
+                    if x in ("derecha", "izquierda") and "avanzar" not in banda:
+                        banda.append("avanzar")      # "se mueve a la derecha" tambien la arranca
+                    if x not in banda:
+                        banda.append(x)
+                if "avanzar" in banda and ("detener" in banda or "pausar" in banda):
+                    raise ValueError(f"{tag}: la banda no puede avanzar y detenerse con la misma senal.")
+                if banda:
+                    acciones["banda"] = banda
                 continue
+            est = ALIAS_ESTADO.get(_norm(est), _norm(est))
             if r not in RECURSOS_EVENTO:
                 raise ValueError(f"{tag}: recurso '{r}' no existe (usa banda, {', '.join(RECURSOS_EVENTO)}).")
             if est not in RECURSOS_EVENTO[r]:
@@ -1688,9 +1698,10 @@ def expandir_eventos(eventos, eng) -> dict:
             raise ValueError(f"{tag}: espera_s y duracion_s deben ser segundos.")
         if espera < 0 or (dur is not None and dur <= 0):
             raise ValueError(f"{tag}: espera_s debe ser >= 0 y duracion_s > 0.")
-        if acciones.get("banda") == "detener" and dur:
-            acciones["banda"] = "pausar"             # "detente N s" = pausa, no paro
-        if acciones.get("banda") == "pausar" and not dur:
+        banda = acciones.get("banda") or []
+        if "detener" in banda and dur:
+            banda[banda.index("detener")] = "pausar"  # "detente N s" = pausa, no paro
+        if "pausar" in banda and not dur:
             raise ValueError(f"{tag}: pausar necesita duracion_s (cuanto tiempo se detiene); "
                              f"para detenerla sin reanudar usa 'detener'.")
         evs.append({"cuando": ev["cuando"], "espera": espera, "dur": dur, "acciones": acciones})
@@ -1698,19 +1709,21 @@ def expandir_eventos(eventos, eng) -> dict:
     salidas_ev = {}                                  # Q -> [senales que la encienden]
     motor_ev = {}                                    # campo del motor -> [senales]
     for ev in evs:
-        accion = ev["acciones"].pop("banda", None)
-        if accion is None:
+        banda = ev["acciones"].pop("banda", None)
+        if not banda:
             continue
-        senal = ev["cuando"]
+        disparo = ev["cuando"]
         if ev["espera"] > 0:
             t = _siguiente_id(eng, "timers", "T", N_TIMER)
-            t.update(tipo="RETARDO", entrada=senal, reset=None, segundos=ev["espera"])
-            senal = t["id"]
-        if accion == "pausar":
-            p = _siguiente_id(eng, "timers", "T", N_TIMER)
-            p.update(tipo="PULSO", entrada=senal, reset=None, segundos=ev["dur"])
-            senal = p["id"]
-        motor_ev.setdefault(ACCIONES_BANDA[accion], []).append(senal)
+            t.update(tipo="RETARDO", entrada=disparo, reset=None, segundos=ev["espera"])
+            disparo = t["id"]
+        for accion in banda:
+            senal = disparo
+            if accion == "pausar":
+                p = _siguiente_id(eng, "timers", "T", N_TIMER)
+                p.update(tipo="PULSO", entrada=disparo, reset=None, segundos=ev["dur"])
+                senal = p["id"]
+            motor_ev.setdefault(ACCIONES_BANDA[accion], []).append(senal)
     if motor_ev:
         motor = dict(eng.get("motor") or {})
         for campo, senales in motor_ev.items():

@@ -837,6 +837,233 @@ check(cfg_av["band"]["engine"]["motor"]["arranque"] == "C1"
       "avanzar por evento se suma al arranque del modelo (OR)")
 cerrar()
 
+escenario("22. Regresion: lo que funcionaba con los prompts v5/v6, ahora en v7")
+M30 = {"mover": True, "direccion": "derecha", "frecuencia_hz": 30}
+
+
+def caso_v7(texto, resp):
+    """Pasa la respuesta del modelo por /generar-logica y la carga en el ST."""
+    respuestas[:] = [dict(resp, name=resp.get("name") or texto[:40])]
+    r = generar(texto)
+    check(r.status == "ok", f"'{texto[:50]}...' -> ok ({r.status} {r.warnings} {r.questions})")
+    return cargar(r.logic["band"])
+
+
+def hasta(sim, cond, maximo=15.0):
+    return tiempo_hasta(sim, cond, maximo) is not None
+
+
+# v6-1: espera y cambia el sentido en cada deteccion
+sim = caso_v7("Arranca con I1 a la derecha a 30 Hz; cuando S1 detecte una caja espera 3 s y cambia el sentido.",
+              {"banda": M30, "motor": {"arranque": "I1"},
+               "eventos": [{"cuando": "S1", "espera_s": 3, "acciones": {"banda": "invertir"}}]})
+sim.pulsar("I1")
+sim.correr(1)
+sim.pulsar("S1")
+check(hasta(sim, lambda s: s.motor() == "dir2"), "v6-1: S1 + 3 s invierte a dir2")
+sim.correr(1)
+sim.pulsar("S1")
+check(hasta(sim, lambda s: s.motor() == "dir1"), "v6-1: el siguiente S1 vuelve a invertir")
+
+# v6-2: cada sensor mueve la banda hacia un lado
+sim = caso_v7("A 30 Hz: cuando el sensor 1 detecte la banda se mueve a la derecha y cuando el sensor 2 detecte "
+              "se mueve a la izquierda.",
+              {"banda": M30, "eventos": [{"cuando": "S1", "acciones": {"banda": "derecha"}},
+                                         {"cuando": "S2", "acciones": {"banda": "izquierda"}}]})
+sim.correr(1)
+check(sim.motor() == "paro", "v6-2: quieta hasta que un sensor detecte")
+sim.pulsar("S1")
+check(hasta(sim, lambda s: s.motor() == "dir1"), "v6-2: S1 -> derecha")
+sim.pulsar("S2")
+check(hasta(sim, lambda s: s.motor() == "dir2"), "v6-2: S2 -> izquierda")
+sim.pulsar("S1")
+check(hasta(sim, lambda s: s.motor() == "dir1"), "v6-2: S1 otra vez -> derecha")
+
+# v6-3: plumas con espera + luces de estado
+sim = caso_v7("Mueve la banda a la derecha a 20 Hz; cuando S1 detecte espera 20 s y sube las dos plumas; cuando S2 "
+              "detecte espera 10 s y bajalas. Verde en movimiento y roja detenida.",
+              {"banda": dict(M30, frecuencia_hz=20), "motor": {"arranque": "I1"},
+               "salidas": {"verde": "BANDA_CORRIENDO", "roja": "BANDA_DETENIDA"},
+               "eventos": [{"cuando": "S1", "espera_s": 20, "acciones": {"pluma1": "subir", "pluma2": "subir"}},
+                           {"cuando": "S2", "espera_s": 10, "acciones": {"pluma1": "bajar", "pluma2": "bajar"}}]})
+check(sim.q("Q5") and not sim.q("Q3"), "v6-3: roja con la banda detenida")
+sim.pulsar("I1")
+sim.correr(1)
+check(sim.q("Q3") and not sim.q("Q5"), "v6-3: verde en movimiento")
+sim.pulsar("S1")
+sim.correr(20.5)
+check(sim.q("Q8") and sim.q("Q6"), "v6-3: S1 + 20 s suben las plumas")
+sim.pulsar("S2")
+sim.correr(10.5)
+check(sim.q("Q9") and sim.q("Q7") and not sim.q("Q8"), "v6-3: S2 + 10 s bajan las plumas")
+
+# v6-4: condicion AND + contador con reset
+sim = caso_v7("Cuando presione el boton verde y S2 este activo enciende la amarilla; S1 cuenta 3 cajas y prende la "
+              "roja hasta presionar I2.",
+              {"banda": {"mover": False}, "condiciones": [{"id": "C1", "op": "AND", "entradas": ["I1", "S2"]}],
+               "contadores": [{"id": "CT1", "entrada": "S1", "reset": "I2", "preset": 3, "modo": "una_vez"}],
+               "salidas": {"amarilla": "C1", "roja": "CT1"}})
+sim.poner(I1=True, S2=True)
+sim.correr(0.5)
+check(sim.q("Q4"), "v6-4: I1 y S2 -> amarilla")
+sim.poner(I1=False, S2=False)
+sim.correr(0.5)
+for _ in range(3):
+    sim.pulsar("S1")
+    sim.correr(0.3)
+check(sim.q("Q5"), "v6-4: 3 cajas -> roja")
+sim.pulsar("I2")
+sim.correr(0.5)
+check(not sim.q("Q5"), "v6-4: I2 reinicia la cuenta")
+
+# v6-5: paro por I2 o S2, pluma 2 s con S1
+sim = caso_v7("A 25 Hz arranca con I1; se detiene cuando el boton rojo o S2 detecten. Cuando S1 detecte, sube la "
+              "pluma 1 por 2 s.",
+              {"banda": dict(M30, frecuencia_hz=25), "motor": {"arranque": "I1"},
+               "eventos": [{"cuando": "I2", "acciones": {"banda": "detener"}},
+                           {"cuando": "S2", "acciones": {"banda": "detener"}},
+                           {"cuando": "S1", "duracion_s": 2, "acciones": {"pluma1": "subir"}}]})
+sim.pulsar("I1")
+sim.correr(1)
+sim.pulsar("S1")
+sim.correr(1)
+check(sim.q("Q8") and sim.motor() == "dir1", "v6-5: S1 sube la pluma 1 sin parar la banda")
+sim.correr(1.5)
+check(not sim.q("Q8"), "v6-5: la pluma solo 2 s")
+sim.pulsar("S2")
+check(hasta(sim, lambda s: s.motor() == "paro", 3), "v6-5: S2 detiene")
+sim.pulsar("I1")
+check(hasta(sim, lambda s: s.motor() == "dir1", 3), "v6-5: I1 vuelve a arrancar")
+sim.pulsar("I2")
+check(hasta(sim, lambda s: s.motor() == "paro", 3), "v6-5: I2 detiene")
+
+# v6-6: secuencia de luces disparada por S1
+sim = caso_v7("Cuando S1 detecte una caja: luz amarilla, espera 3 s, luz verde 5 s y apaga.",
+              {"banda": {"mover": False}, "secuencias": [{"id": "SQ1", "inicio": "S1", "modo": "una_vez",
+                                                          "exclusiva": True, "pasos": [
+                  {"salidas": ["Q4"], "avanza": "tiempo", "segundos": 3},
+                  {"salidas": ["Q3"], "avanza": "tiempo", "segundos": 5}]}]})
+sim.pulsar("S1")
+sim.correr(1)
+check(sim.q("Q4") and not sim.q("Q3"), "v6-6: amarilla primero")
+sim.correr(3)
+check(sim.q("Q3") and not sim.q("Q4"), "v6-6: luego verde")
+sim.correr(5)
+check(not sim.q("Q3") and not sim.q("Q4"), "v6-6: y apaga")
+
+# v6-7: ida y vuelta
+sim = caso_v7("Con el boton verde la banda avanza a la derecha a 30 Hz; cuando S1 detecte espera 2 s, prende la "
+              "amarilla y cambia de sentido; cuando S2 detecte la caja detén la banda y prende la verde.",
+              {"banda": M30, "motor": {"arranque": "I1"},
+               "eventos": [{"cuando": "S1", "espera_s": 2, "acciones": {"amarilla": "encender", "banda": "invertir"}},
+                           {"cuando": "S2", "acciones": {"banda": "detener", "verde": "encender",
+                                                         "amarilla": "apagar"}}]})
+sim.pulsar("I1")
+sim.correr(1)
+sim.pulsar("S1")
+sim.correr(2.5)
+check(sim.q("Q4"), "v6-7: S1 + 2 s amarilla")
+check(hasta(sim, lambda s: s.motor() == "dir2"), "v6-7: y cambia de sentido")
+sim.pulsar("S2")
+check(hasta(sim, lambda s: s.motor() == "paro", 3), "v6-7: S2 detiene")
+check(sim.q("Q3") and not sim.q("Q4"), "v6-7: verde encendida, amarilla apagada")
+
+# v5-1: enclavar con I1, apagar con I2
+sim = caso_v7("El boton verde enciende la lampara verde y se queda prendida; el rojo la apaga.",
+              {"banda": {"mover": False}, "eventos": [{"cuando": "I1", "acciones": {"verde": "encender"}},
+                                                      {"cuando": "I2", "acciones": {"verde": "apagar"}}]})
+sim.pulsar("I1")
+sim.correr(1)
+check(sim.q("Q3"), "v5-1: I1 enciende y se queda")
+sim.pulsar("I2")
+sim.correr(0.5)
+check(not sim.q("Q3"), "v5-1: I2 apaga")
+
+# v5-2: contar pulsos de I1
+sim = caso_v7("Cuenta los pulsos de I1; al llegar a 5 la lampara verde se enciende y se queda enclavada.",
+              {"banda": {"mover": False}, "contadores": [{"id": "CT1", "entrada": "I1", "preset": 5,
+                                                          "modo": "una_vez"}],
+               "salidas": {"verde": "CT1"}})
+for _ in range(4):
+    sim.pulsar("I1")
+    sim.correr(0.3)
+check(not sim.q("Q3"), "v5-2: con 4 pulsos sigue apagada")
+sim.pulsar("I1")
+sim.correr(2)
+check(sim.q("Q3"), "v5-2: al 5o pulso queda encendida")
+
+# v5-3: secuencia de torreta
+sim = caso_v7("Al presionar I1 enciende la verde 5 s, luego la amarilla 2 s, luego la roja 8 s.",
+              {"banda": {"mover": False}, "secuencias": [{"id": "SQ1", "inicio": "I1", "modo": "una_vez",
+                                                          "exclusiva": True, "pasos": [
+                  {"salidas": ["Q3"], "avanza": "tiempo", "segundos": 5},
+                  {"salidas": ["Q4"], "avanza": "tiempo", "segundos": 2},
+                  {"salidas": ["Q5"], "avanza": "tiempo", "segundos": 8}]}]})
+sim.pulsar("I1")
+sim.correr(1)
+verde = sim.q("Q3")
+sim.correr(5)
+amarilla = sim.q("Q4")
+sim.correr(2)
+check(verde and amarilla and sim.q("Q5"), "v5-3: verde, amarilla y roja en orden")
+
+# v5-4: pluma con cada deteccion + contador de piezas
+sim = caso_v7("Cada que el sensor 1 detecte sube la pluma 1 y cuando cuente 3 piezas enciende la amarilla.",
+              {"banda": {"mover": False},
+               "eventos": [{"cuando": "S1", "duracion_s": 2, "acciones": {"pluma1": "subir"}}],
+               "contadores": [{"id": "CT1", "entrada": "S1", "preset": 3, "modo": "una_vez"}],
+               "salidas": {"amarilla": "CT1"}})
+for _ in range(3):
+    sim.pulsar("S1")
+    sim.correr(0.5)
+    check(sim.q("Q8"), "v5-4: S1 sube la pluma 1")
+    sim.correr(2)
+check(sim.q("Q4"), "v5-4: 3 piezas -> amarilla")
+
+# v5-5: plumas sin espera
+sim = caso_v7("Cuando el sensor 1 detecte, sube las dos plumas y cuando el sensor 2 detecte, baja las dos plumas.",
+              {"banda": {"mover": False}, "eventos": [
+                  {"cuando": "S1", "acciones": {"pluma1": "subir", "pluma2": "subir"}},
+                  {"cuando": "S2", "acciones": {"pluma1": "bajar", "pluma2": "bajar"}}]})
+for _ in range(2):
+    sim.pulsar("S1")
+    sim.correr(0.5)
+    check(sim.q("Q8") and sim.q("Q6"), "v5-5: S1 sube")
+    sim.pulsar("S2")
+    sim.correr(0.5)
+    check(sim.q("Q9") and sim.q("Q7") and not sim.q("Q8"), "v5-5: S2 baja")
+
+# v5-6: pausa con roja y plumas, luego S2 baja
+sim = caso_v7("Avanza la banda a la derecha a 30 Hz, cuando S1 detecte detente 5 segundos, prende la roja y sube "
+              "las dos plumas; despues continua y cuando S2 detecte baja las dos plumas.",
+              {"banda": M30, "motor": {"arranque": "I1"}, "eventos": [
+                  {"cuando": "S1", "duracion_s": 5, "acciones": {"banda": "pausar", "roja": "encender"}},
+                  {"cuando": "S1", "acciones": {"pluma1": "subir", "pluma2": "subir"}},
+                  {"cuando": "S2", "acciones": {"pluma1": "bajar", "pluma2": "bajar"}}]})
+sim.pulsar("I1")
+sim.correr(1)
+sim.pulsar("S1")
+sim.correr(1)
+check(sim.motor() == "paro" and sim.q("Q5") and sim.q("Q8"), "v5-6: S1 detiene, roja y plumas arriba")
+check(hasta(sim, lambda s: s.motor() == "dir1", 6) and not sim.q("Q5"), "v5-6: a los 5 s continua")
+sim.pulsar("S2")
+sim.correr(0.5)
+check(sim.q("Q9") and sim.q("Q7"), "v5-6: S2 baja las plumas")
+
+# v5-7: contador detiene todo
+sim = caso_v7("Avanza a la derecha a 30 Hz; si el contador de S1 llega a 5, detén todo el proceso y enciende la "
+              "amarilla.",
+              {"banda": M30, "motor": {"arranque": "I1"},
+               "contadores": [{"id": "CT1", "entrada": "S1", "preset": 5, "modo": "una_vez"}],
+               "eventos": [{"cuando": "CT1", "acciones": {"banda": "detener", "amarilla": "encender"}}]})
+sim.pulsar("I1")
+sim.correr(1)
+for _ in range(5):
+    sim.pulsar("S1")
+    sim.correr(0.3)
+check(hasta(sim, lambda s: s.motor() == "paro", 3) and sim.q("Q4"), "v5-7: a las 5 cajas se detiene con amarilla")
+cerrar()
+
 app.BANDA_MOTOR_V7 = False
 
 print("\n" + "=" * 78)

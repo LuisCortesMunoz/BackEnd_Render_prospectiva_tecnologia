@@ -755,7 +755,9 @@ BLOQUES (cada uno produce la senal de su id; define todo lo que uses)
 - eventos: [{"cuando":senal,"espera_s":N|0,"duracion_s":N|null,"acciones":{RECURSO:ESTADO,...}}] = "cuando <senal>
   (espera N s) haz algo con la banda, plumas o luces". RECURSO: banda (pausar | detener | avanzar | invertir |
   derecha | izquierda) · pluma1 | pluma2 (subir | bajar) · verde | amarilla | roja (encender | apagar).
-  banda pausar = se detiene duracion_s y continua sola; detener = sin reanudar. Plumas y luces: el estado dura
+  cuando = cualquier senal (S1, I1, CT1, C1...). banda acepta una accion o una lista (["avanzar","derecha"]);
+  derecha / izquierda tambien la mueven. pausar = se detiene duracion_s y continua sola; detener = sin
+  reanudar. Plumas y luces: el estado dura
   hasta que OTRO evento pide lo contrario del mismo recurso; con duracion_s dura N s. El sistema arma timers,
   resets y condiciones: no los armes a mano ni repitas esas salidas o campos del motor.
 - secuencias (hasta 2, SQ1 y SQ2, independientes; 16 pasos c/u):
@@ -779,7 +781,7 @@ dice como arranca, motor.arranque = "I1" SIEMPRE (no uses SIEMPRE, PRIMER_CICLO,
 existen). Si piden Q10/Q11/Q12 (no existen aqui) usa Q3/Q4/Q5 en el mismo orden y reportalo.
 Plumas, luces o la banda que cambian cuando una senal ocurre (con o sin espera) -> eventos, nunca timers a mano:
 "se detiene N s y vuelve a avanzar / continua" -> banda pausar con duracion_s N · "detén la banda" (sin reanudar)
--> banda detener · "cuando S1 detecte se mueve" -> banda avanzar · "espera N s y cambia el sentido" -> banda
+-> banda detener · "cuando S1 detecte se mueve (a la derecha)" -> banda avanzar (derecha) · "espera N s y cambia el sentido" -> banda
 invertir con espera_s N. Todo se repite en CADA deteccion: los bloques se rearman solos.
 
 ESQUEMA
