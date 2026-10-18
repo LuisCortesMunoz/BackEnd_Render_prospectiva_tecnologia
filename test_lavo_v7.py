@@ -801,6 +801,42 @@ check(r_ev.status == "ok" and r_ev.logic["band"]["engine"]["salidas"] == {"Q9": 
       "un evento invalido se corrige en la auto-revision")
 cerrar()
 
+escenario("21. Eventos de la banda: se detiene N s y vuelve a avanzar en cada deteccion")
+respuestas[:] = [{"name": "S1 3 s, S2 5 s", "banda": {"mover": True, "direccion": "derecha", "frecuencia_hz": 30},
+                  "motor": {"arranque": "I1"},
+                  "eventos": [{"cuando": "S1", "duracion_s": 3, "acciones": {"banda": "pausar", "roja": "encender"}},
+                              {"cuando": "S2", "duracion_s": 5, "acciones": {"banda": "detener"}}]}]
+r_ev = generar("la banda avanza a 30 Hz; cuando S1 detecte se detiene 3 s con la roja y vuelve a avanzar; "
+               "cuando S2 detecte se detiene 5 s y vuelve a avanzar")
+check(r_ev.status == "ok", f"pausas por sensor -> programa cargable ({r_ev.status} {r_ev.warnings})")
+eng_ev = r_ev.logic["band"]["engine"]
+check(eng_ev["motor"]["pausa"] == "C1" and eng_ev["condiciones"][0]["entradas"] == ["T1", "T2"]
+      and [t["tipo"] for t in eng_ev["timers"]][:2] == ["PULSO", "PULSO"],
+      "detener con duracion_s = pausa por PULSO (no paro)")
+sim = cargar(r_ev.logic["band"])
+sim.pulsar("I1")
+sim.correr(2)
+for sen, seg in (("S1", 3), ("S2", 5), ("S1", 3)):
+    sim.pulsar(sen, 0.3)
+    sim.correr(1)
+    check(sim.motor() == "paro", f"{sen}: la banda se detiene")
+    sim.correr(seg + 1.5)
+    check(sim.motor() == "dir1", f"{sen}: tras {seg} s vuelve a avanzar sola")
+check(not sim.q("Q5"), "la roja solo dura la pausa de S1")
+try:
+    lm.cfg_desde_respuesta({"banda": {"mover": True, "frecuencia_hz": 30},
+                            "eventos": [{"cuando": "S1", "acciones": {"banda": "pausar"}}]})
+    msg = ""
+except ValueError as e:
+    msg = str(e)
+check("necesita duracion_s" in msg, f"pausar sin tiempo -> error claro ({msg})")
+cfg_av = lm.cfg_desde_respuesta({"banda": {"mover": True, "frecuencia_hz": 30}, "motor": {"arranque": "I1"},
+                                 "eventos": [{"cuando": "S1", "acciones": {"banda": "avanzar"}}]})
+check(cfg_av["band"]["engine"]["motor"]["arranque"] == "C1"
+      and cfg_av["band"]["engine"]["condiciones"][0]["entradas"] == ["I1", "S1"],
+      "avanzar por evento se suma al arranque del modelo (OR)")
+cerrar()
+
 app.BANDA_MOTOR_V7 = False
 
 print("\n" + "=" * 78)

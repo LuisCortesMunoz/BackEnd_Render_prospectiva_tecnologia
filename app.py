@@ -753,9 +753,11 @@ BLOQUES (cada uno produce la senal de su id; define todo lo que uses)
   Antes de invertir SIEMPRE frena paro_inversion_s (minimo 1 s) y espera velocidad cero.
 - salidas: {"Q3":senal,...} = salida encendida mientras su senal este activa.
 - eventos: [{"cuando":senal,"espera_s":N|0,"duracion_s":N|null,"acciones":{RECURSO:ESTADO,...}}] = "cuando <senal>
-  (espera N s) haz algo con plumas o luces". RECURSO: pluma1 | pluma2 (subir | bajar) · verde | amarilla | roja
-  (encender | apagar). El estado dura hasta que OTRO evento pide lo contrario del mismo recurso; con duracion_s
-  dura N s. El sistema arma timers, resets y condiciones: no los armes a mano ni repitas esas salidas en "salidas".
+  (espera N s) haz algo con la banda, plumas o luces". RECURSO: banda (pausar | detener | avanzar | invertir |
+  derecha | izquierda) · pluma1 | pluma2 (subir | bajar) · verde | amarilla | roja (encender | apagar).
+  banda pausar = se detiene duracion_s y continua sola; detener = sin reanudar. Plumas y luces: el estado dura
+  hasta que OTRO evento pide lo contrario del mismo recurso; con duracion_s dura N s. El sistema arma timers,
+  resets y condiciones: no los armes a mano ni repitas esas salidas o campos del motor.
 - secuencias (hasta 2, SQ1 y SQ2, independientes; 16 pasos c/u):
   {"id":"SQ1","inicio":senal,"paro":senal|null,"reset":senal|null,"pausa":senal|null,
    "modo":"una_vez"|"infinita"|"repetir","repeticiones":N|null,"exclusiva":true,"pausa_apaga":true,
@@ -775,7 +777,10 @@ distintos -> SQ1 y SQ2. Reglas sueltas (Q4 con I1 Y S2) -> condiciones + salidas
 Si la banda se mueve y no dicen los Hz, frecuencia_hz = null (se preguntara). Si se mueve y la instruccion no
 dice como arranca, motor.arranque = "I1" SIEMPRE (no uses SIEMPRE, PRIMER_CICLO, CFG_LISTA ni botones que no
 existen). Si piden Q10/Q11/Q12 (no existen aqui) usa Q3/Q4/Q5 en el mismo orden y reportalo.
-Plumas o luces que cambian cuando una senal ocurre (con o sin espera) -> eventos, nunca timers a mano.
+Plumas, luces o la banda que cambian cuando una senal ocurre (con o sin espera) -> eventos, nunca timers a mano:
+"se detiene N s y vuelve a avanzar / continua" -> banda pausar con duracion_s N · "detén la banda" (sin reanudar)
+-> banda detener · "cuando S1 detecte se mueve" -> banda avanzar · "espera N s y cambia el sentido" -> banda
+invertir con espera_s N. Todo se repite en CADA deteccion: los bloques se rearman solos.
 
 ESQUEMA
 {"name":"corto","banda":{"mover":false,"direccion":"derecha","frecuencia_hz":null},
@@ -816,6 +821,13 @@ EJEMPLOS
  "eventos":[{"cuando":"S1","espera_s":5,"acciones":{"pluma1":"bajar","pluma2":"bajar"}},
             {"cuando":"S2","espera_s":3,"acciones":{"pluma1":"subir","pluma2":"subir"}}],
  "analisis":{"intencion":"plumas por sensor con retardo","compatibilidad":"total","conservado":["S1 + 5 s bajan","S2 + 3 s suben"],
+             "modificado":[],"simplificado":[],"no_soportado":[],"requiere_confirmacion":false},"preguntas":[]}
+
+"Con I1 la banda avanza a 25 Hz; cuando S1 detecte se detiene 3 s y prende la roja, y luego vuelve a avanzar."
+{"name":"S1 pausa 3 s con roja","banda":{"mover":true,"direccion":"derecha","frecuencia_hz":25},
+ "motor":{"arranque":"I1"},
+ "eventos":[{"cuando":"S1","duracion_s":3,"acciones":{"banda":"pausar","roja":"encender"}}],
+ "analisis":{"intencion":"pausa de 3 s en cada deteccion","compatibilidad":"total","conservado":["3 s","roja en la pausa"],
              "modificado":[],"simplificado":[],"no_soportado":[],"requiere_confirmacion":false},"preguntas":[]}
 
 "Enciende Q10 3 s, apagala y enciende Q12 5 s."

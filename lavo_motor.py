@@ -1609,13 +1609,19 @@ RECURSOS_EVENTO = {
     "amarilla": {"encender": "Q4", "apagar": None},
     "roja": {"encender": "Q5", "apagar": None},
 }
+# banda: cada accion va a un campo del motor (OR si varios eventos lo usan).
+ACCIONES_BANDA = {"pausar": "pausa", "detener": "paro", "avanzar": "arranque", "invertir": "invertir",
+                  "derecha": "dir_1", "izquierda": "dir_2"}
 ALIAS_RECURSO = {"pluma_1": "pluma1", "pluma 1": "pluma1", "p1": "pluma1",
                  "pluma_2": "pluma2", "pluma 2": "pluma2", "p2": "pluma2",
                  "q3": "verde", "luz_verde": "verde", "q4": "amarilla", "luz_amarilla": "amarilla",
                  "q5": "roja", "luz_roja": "roja"}
 ALIAS_ESTADO = {"sube": "subir", "arriba": "subir", "baja": "bajar", "abajo": "bajar",
                 "enciende": "encender", "prender": "encender", "prende": "encender", "on": "encender",
-                "apaga": "apagar", "off": "apagar"}
+                "apaga": "apagar", "off": "apagar",
+                "pausa": "pausar", "detenerse": "detener", "parar": "detener", "paro": "detener",
+                "detente": "detener", "avanza": "avanzar", "arrancar": "avanzar", "marcha": "avanzar",
+                "mover": "avanzar", "invierte": "invertir", "dir_1": "derecha", "dir_2": "izquierda"}
 
 
 def _siguiente_id(eng, clave, pref, maximo):
@@ -1643,11 +1649,14 @@ def expandir_eventos(eventos, eng) -> dict:
     """eventos del LLM -> timers / memorias / condiciones / salidas en 'eng'.
 
     Cada evento: {"cuando": senal, "espera_s": N|0, "duracion_s": N|null,
-                  "acciones": {"pluma1": "bajar", "roja": "encender", ...}}
+                  "acciones": {"pluma1": "bajar", "roja": "encender", "banda": "pausar", ...}}
     - el estado se mantiene hasta que OTRO evento pide un estado distinto del
       mismo recurso: su 'cuando' es el reset (reset cruzado, nunca el timer);
     - espera_s > 0 -> RETARDO; 0 -> memoria (set = cuando);
-    - duracion_s -> la salida dura N s (PULSO; tras un RETARDO si hay espera)."""
+    - duracion_s -> la salida dura N s (PULSO; tras un RETARDO si hay espera);
+    - banda: pausar (requiere duracion_s: se detiene N s y continua), detener
+      (sin reanudar; con duracion_s es pausar), avanzar, invertir, derecha,
+      izquierda -> campos del motor, con OR si varios eventos los usan."""
     eng = copy.deepcopy(eng)
     evs = []
     for i, ev in enumerate(_lista(eventos), 1):
@@ -1660,8 +1669,13 @@ def expandir_eventos(eventos, eng) -> dict:
         for r, est in (ev.get("acciones") or {}).items():
             r = ALIAS_RECURSO.get(_norm(r), _norm(r))
             est = ALIAS_ESTADO.get(_norm(est), _norm(est))
+            if r in ("banda", "motor"):
+                if est not in ACCIONES_BANDA:
+                    raise ValueError(f"{tag}: la banda no puede '{est}' (usa {' / '.join(ACCIONES_BANDA)}).")
+                acciones["banda"] = est
+                continue
             if r not in RECURSOS_EVENTO:
-                raise ValueError(f"{tag}: recurso '{r}' no existe (usa {', '.join(RECURSOS_EVENTO)}).")
+                raise ValueError(f"{tag}: recurso '{r}' no existe (usa banda, {', '.join(RECURSOS_EVENTO)}).")
             if est not in RECURSOS_EVENTO[r]:
                 raise ValueError(f"{tag}: {r} no puede '{est}' (usa {' / '.join(RECURSOS_EVENTO[r])}).")
             acciones[r] = est
@@ -1674,9 +1688,36 @@ def expandir_eventos(eventos, eng) -> dict:
             raise ValueError(f"{tag}: espera_s y duracion_s deben ser segundos.")
         if espera < 0 or (dur is not None and dur <= 0):
             raise ValueError(f"{tag}: espera_s debe ser >= 0 y duracion_s > 0.")
+        if acciones.get("banda") == "detener" and dur:
+            acciones["banda"] = "pausar"             # "detente N s" = pausa, no paro
+        if acciones.get("banda") == "pausar" and not dur:
+            raise ValueError(f"{tag}: pausar necesita duracion_s (cuanto tiempo se detiene); "
+                             f"para detenerla sin reanudar usa 'detener'.")
         evs.append({"cuando": ev["cuando"], "espera": espera, "dur": dur, "acciones": acciones})
 
     salidas_ev = {}                                  # Q -> [senales que la encienden]
+    motor_ev = {}                                    # campo del motor -> [senales]
+    for ev in evs:
+        accion = ev["acciones"].pop("banda", None)
+        if accion is None:
+            continue
+        senal = ev["cuando"]
+        if ev["espera"] > 0:
+            t = _siguiente_id(eng, "timers", "T", N_TIMER)
+            t.update(tipo="RETARDO", entrada=senal, reset=None, segundos=ev["espera"])
+            senal = t["id"]
+        if accion == "pausar":
+            p = _siguiente_id(eng, "timers", "T", N_TIMER)
+            p.update(tipo="PULSO", entrada=senal, reset=None, segundos=ev["dur"])
+            senal = p["id"]
+        motor_ev.setdefault(ACCIONES_BANDA[accion], []).append(senal)
+    if motor_ev:
+        motor = dict(eng.get("motor") or {})
+        for campo, senales in motor_ev.items():
+            previa = [] if _vacio(motor.get(campo)) else [motor[campo]]
+            motor[campo] = _o_logico(eng, previa + senales)
+        eng["motor"] = motor
+
     for i, ev in enumerate(evs):
         grupos = {}                                  # resets -> [Q...]
         for r, est in ev["acciones"].items():
