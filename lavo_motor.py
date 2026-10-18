@@ -186,6 +186,9 @@ SIG_I, SIG_Q, SIG_TRUE = 1, 13, 25
 SIG_SYS = {"BANDA_CORRIENDO": 26, "BANDA_DETENIDA": 27, "DIR_1": 28, "DIR_2": 29,
            "INVIRTIENDO": 30, "VFD_CERO": 31, "CFG_LISTA": 32, "PRIMER_CICLO": 33,
            "APP1": 34, "APP2": 35, "APP3": 36, "APP4": 37, "PARO_SOFTWARE": 38}
+# El ST conserva APP1..APP4 (codigos 34..37), pero se retiraron de los programas:
+# Unity no tiene esos botones y el modelo los ofrecia como boton de arranque.
+SENALES_RETIRADAS = ("APP1", "APP2", "APP3", "APP4")
 SIG_COND, SIG_MEM, SIG_TIMER, SIG_COUNT = 40, 56, 72, 88
 SIG_SEQ, SEQ_SIG_W = 104, 20               # +0 ACTIVA +1 PAUSADA +2 FIN +3 CICLO +4.. PASO1..16
 SIG_MAX = SIG_SEQ + N_SEQ * SEQ_SIG_W - 1  # 143
@@ -922,6 +925,9 @@ def validar_motor(band, hw=HW_BANDA) -> tuple:
                            f"(disponibles: {', '.join(sorted(entradas_hw))}).")
         if re.match(r"^Q\d+$", base) and base not in salidas_hw:
             errores.append(f"{tag}: la salida {base} no existe en este PLC.")
+        if base in SENALES_RETIRADAS:
+            errores.append(f"{tag}: {base} no existe en esta banda (no hay botones de app); "
+                           f"los botones son I1, I2 e I3.")
     for ident in sorted(d for d in definidos if re.match(r"^(C|M|T|CT)\d+$", d)):
         if ident not in usados:
             avisos.append(f"{ident} esta definido pero nada lo usa.")

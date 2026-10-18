@@ -665,22 +665,24 @@ t = tiempo_hasta(sim, lambda s: s.estado()["motor"] == "frenando para invertir")
 check(t is not None and 2.5 <= t <= 3.1, f"RETARDO de 3 s -> invierte ({t})")
 t = tiempo_hasta(sim, lambda s: s.motor() == "dir2", 12)
 check(t is not None, "frena a cero y arranca hacia la direccion 2")
-sim = cargar(banda({"timers": [{"id": "T1", "tipo": "INTERMITENTE", "entrada": "APP1", "segundos": 0.5,
+errs_app, _ = lm.validar_motor(banda({"motor": {"arranque": "APP1"}}, True))
+check(any("APP1 no existe" in e for e in errs_app), f"APP1..APP4 retirados: no se aceptan ({errs_app})")
+sim = cargar(banda({"timers": [{"id": "T1", "tipo": "INTERMITENTE", "entrada": "S2", "segundos": 0.5,
                                 "segundos_off": 0.3},
                                {"id": "T2", "tipo": "TONR", "entrada": "I1", "reset": "I2", "segundos": 2}],
                     "salidas": {"Q4": "T1", "Q5": "T2"}}))
 plc = pb.BandaPLC(ip="127.0.0.1")
 plc.client = sim.modbus
 plc._esperar = sim.correr
-plc.boton_app_v7(1, True)
+sim.poner(S2=True)
 cambios, prev = 0, None
 for _ in range(40):
     sim.correr(0.05)
     if sim.q("Q4") != prev:
         cambios += 1
         prev = sim.q("Q4")
-check(cambios >= 4, f"INTERMITENTE con APP1 ({cambios} cambios en 2 s)")
-plc.boton_app_v7(1, False)
+check(cambios >= 4, f"INTERMITENTE con S2 ({cambios} cambios en 2 s)")
+sim.poner(S2=False)
 sim.pulsar("I1", 1.0)
 sim.correr(0.5)
 check(not sim.q("Q5"), "TONR: 1 s acumulado, aun no")

@@ -728,11 +728,12 @@ HARDWARE (fijo; NA/NC lo resuelve el PLC: "I2" activo = boton presionado)
 - Salidas: Q3 torreta verde · Q4 torreta amarilla · Q5 torreta roja · Q8 pluma 1 sube · Q9 pluma 1 baja ·
   Q6 pluma 2 sube · Q7 pluma 2 baja. Una pluma nunca sube y baja a la vez.
 - Motor con VFD: direccion derecha/izquierda, 1..327 Hz (fija mientras corre).
-- NO EXISTEN en esta banda: Q1, Q2, Q10, Q11, Q12, I6..I12, otros sensores, analogicas, velocidad variable, PID.
+- NO EXISTEN en esta banda: Q1, Q2, Q10, Q11, Q12, I6..I12, botones de app (APP1..APP4), otros sensores,
+  analogicas, velocidad variable, PID. Los UNICOS botones son I1, I2 e I3.
 
 SENALES (en cualquier campo de senal; antepon "NOT " para negar)
 I1..I5 (o S1/S2) | Q3..Q9 (salida encendida) | SIEMPRE | BANDA_CORRIENDO BANDA_DETENIDA DIR_1 DIR_2 INVIRTIENDO
-VFD_CERO CFG_LISTA PRIMER_CICLO | APP1..APP4 (botones de la app) | PARO_SOFTWARE |
+VFD_CERO CFG_LISTA PRIMER_CICLO | PARO_SOFTWARE |
 C1..C16 condicion | M1..M16 memoria | T1..T16 timer | CT1..CT16 contador |
 SQ1_ACTIVA SQ1_PAUSADA SQ1_FIN SQ1_CICLO SQ1_PASO1..SQ1_PASO16 (igual SQ2).
 
@@ -767,8 +768,9 @@ GUIA RAPIDA
 "siempre / hasta que se pare" -> infinita con paro · "si la entrada esta activa ve a..." -> alternativa.
 Luces una tras otra / banda que avanza, para y repite -> secuencia. Torreta y banda a la vez con ritmos
 distintos -> SQ1 y SQ2. Reglas sueltas (Q4 con I1 Y S2) -> condiciones + salidas.
-Si la banda se mueve y no dicen los Hz, frecuencia_hz = null (se preguntara). Si se mueve y nada la arranca,
-motor.arranque = "I1". Si piden Q10/Q11/Q12 (no existen aqui) usa Q3/Q4/Q5 en el mismo orden y reportalo.
+Si la banda se mueve y no dicen los Hz, frecuencia_hz = null (se preguntara). Si se mueve y la instruccion no
+dice como arranca, motor.arranque = "I1" SIEMPRE (no uses SIEMPRE, PRIMER_CICLO, CFG_LISTA ni botones que no
+existen). Si piden Q10/Q11/Q12 (no existen aqui) usa Q3/Q4/Q5 en el mismo orden y reportalo.
 
 ESQUEMA
 {"name":"corto","banda":{"mover":false,"direccion":"derecha","frecuencia_hz":null},
