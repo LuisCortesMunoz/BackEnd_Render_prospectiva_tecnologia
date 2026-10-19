@@ -26,6 +26,8 @@ Y SIEMPRE la capa de OPERACION ROBUSTA (para todo proceso general):
   - supervision de atasco: S1 o S2 ocupado mas de atasco_s con la banda en
     marcha -> falla: la banda se detiene y la roja enciende; I1 la reconoce;
   - el paro y la falla mandan sobre cualquier etapa automatica;
+  - estaciones, lotes y desvios solo reaccionan a piezas que LLEGAN con la
+    banda en marcha (con la banda detenida el sensor no mueve nada);
   - torreta estandar: verde = en marcha, amarilla = detenida sin falla
     (lista o estacion trabajando), roja = falla (y con el paro de emergencia).
 
@@ -65,16 +67,29 @@ def _con_pluma(pasos, pluma, pluma_s, motor):
             + [dict(m, salidas=[SUBE[pluma]], avanza="tiempo", segundos=pluma_s)])
 
 
+def _llegada(eng, sensor):
+    """Pulso cuando una pieza LLEGA al sensor con la banda en marcha. Con la
+    banda detenida (paro, falla, sin arrancar) una mano frente al sensor no
+    mueve la pluma ni cuenta; y una pieza que sigue frente al sensor cuando la
+    banda vuelve a andar no repite la estacion (no hay flanco nuevo)."""
+    f = lm._siguiente_id(eng, "condiciones", "C", lm.N_COND)
+    f.update(op="AND", entradas=[sensor], flanco="subida")
+    c = lm._siguiente_id(eng, "condiciones", "C", lm.N_COND)
+    c.update(op="AND", entradas=[f["id"], "BANDA_CORRIENDO"], flanco="nivel")
+    return c["id"]
+
+
 def estacion(eng, sensor, tiempo_s, pluma=None, pluma_s=PLUMA_S):
     pasos = [{"motor": ["paro"], "avanza": "tiempo", "segundos": tiempo_s}]
-    _secuencia(eng, sensor, _con_pluma(pasos, pluma, pluma_s, ["paro"]))
+    _secuencia(eng, _llegada(eng, sensor), _con_pluma(pasos, pluma, pluma_s, ["paro"]))
 
 
 def _contador(eng, sensor, n):
+    senal = _llegada(eng, sensor)
     if n == 1:
-        return sensor
+        return senal
     ct = lm._siguiente_id(eng, "contadores", "CT", lm.N_COUNT)
-    ct.update(entrada=sensor, preset=n, modo="ciclico")
+    ct.update(entrada=senal, preset=n, modo="ciclico")
     return ct["id"]
 
 

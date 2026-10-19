@@ -1163,6 +1163,32 @@ check(sim.motor() == "paro" and sim.q("Q9"), "S1: la estacion detiene y baja la 
 sim.pulsar("I2")
 sim.correr(15)
 check(sim.motor() == "paro" and not sim.q("Q9"), "tras I2 la estacion termina (pluma arriba) y la banda no arranca")
+sim.pulsar("S1")
+sim.correr(0.5)
+check(not sim.q("Q9"), "con la banda detenida por I2, S1 no baja la pluma")
+r, sim = caso_general("Haz un proceso de llenado", {"id": "llenado"})
+sim.pulsar("S1")
+sim.correr(0.5)
+check(not sim.q("Q9"), "sin arrancar la banda, S1 no baja la pluma")
+sim.pulsar("I1")
+sim.correr(0.5)
+sim.poner(S1=True)
+check(hasta(sim, lambda s: s.motor() == "dir1" and s.q("Q3"), 15) and not sim.q("Q9"),
+      "la pieza que sigue en S1 al terminar la estacion no la repite")
+
+# empaquetado: con la banda detenida no se cuentan piezas
+r, sim = caso_general("Simula una línea de empaquetado de 2 piezas", {"id": "empaquetado", "parametros": {"piezas": 2}})
+for _ in range(2):
+    sim.pulsar("S1")
+    sim.correr(0.5)
+sim.pulsar("I1")
+sim.correr(0.5)
+sim.pulsar("S1")
+sim.correr(0.5)
+check(sim.motor() == "dir1" and not sim.q("Q9"), "las piezas con la banda detenida no cuentan para el lote")
+sim.pulsar("S1")
+sim.correr(0.5)
+check(sim.motor() == "paro" and sim.q("Q9"), "con la banda en marcha el lote de 2 se completa")
 
 # paletizado: espera al operador
 r, sim = caso_general("Simula paletizado de 3 cajas", {"id": "paletizado", "parametros": {"piezas": 3}})
