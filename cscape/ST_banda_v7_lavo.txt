@@ -308,16 +308,29 @@ IF FST_SCN THEN
     Prev1s          := Sys1Sec ;
     LB[1] := Sys100ms ;
 
-    (* v7: sin configuracion activa tras energizar (estado    *)
-    (* seguro: corre v5 con los registros que dejo el backend) *)
+    (* v7: tras energizar se restaura la ultima config       *)
+    (* aplicada (LACT en %R) si cabecera y checksum siguen   *)
+    (* integros; si no, estado seguro: corre v5.             *)
     LB[2] := TRUE ;
     LI[1] := LCMD[0] ;
     LI[0] := 0 ;
-    LI[4] := 0 ;
-    LI[5] := 0 ;
+    LCK[0] := DINT#0 ;
+    FOR ek := 0 TO 639 DO
+        IF ek <> 3 THEN
+            LCK[0] := (LCK[0] * DINT#31 + ANY_TO_DINT(LACT[ANY_TO_DINT(ek)]) + DINT#32769) MOD DINT#32749 ;
+        END_IF ;
+    END_FOR ;
+    IF (LACT[0] = 7) AND (LACT[2] = 640) AND
+       (LACT[1] >= 1) AND (ANY_TO_DINT(LACT[3]) = LCK[0]) THEN
+        LI[4] := LACT[1] ;
+        LI[5] := LACT[3] ;
+    ELSE
+        LI[4] := 0 ;
+        LI[5] := 0 ;
+    END_IF ;
     LI[2] := 0 ;
     LI[3] := 0 ;
-    LB[4] := FALSE ;
+    LB[4] := LI[4] <> 0 ;
 
     BtnStartRising   := FALSE ;
     S1_Rising        := FALSE ;
@@ -370,8 +383,9 @@ IF FST_SCN THEN
 
     (* Si existe configuracion valida previa, preparar VFD *)
 
-    IF (R_FreqRequest > 0) AND
-       ((R_DirCmd = 1) OR (R_DirCmd = 2)) THEN
+    IF ((R_FreqRequest > 0) AND
+       ((R_DirCmd = 1) OR (R_DirCmd = 2))) OR
+       (LI[4] <> 0) THEN    (* v7: config restaurada *)
 
         InitSeqState := 1 ;
 
@@ -539,6 +553,7 @@ IF LCMD[0] <> LI[1] THEN
             END_IF ;
             LI[4] := 0 ;
             LI[5] := 0 ;
+            LACT[0] := 0 ;    (* no se restaura al energizar *)
             LI[0] := 0 ;
         5:
             IF LI[4] <> 0 THEN

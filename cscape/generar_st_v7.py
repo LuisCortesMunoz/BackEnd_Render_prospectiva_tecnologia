@@ -348,6 +348,7 @@ IF LCMD[{S.C_SEQ}] <> {I('CmdPrev')} THEN
             END_IF ;
             {I('ActiveId')} := 0 ;
             {I('ActiveChk')} := 0 ;
+            LACT[{S.H_FORMAT}] := 0 ;    (* no se restaura al energizar *)
             {T} := {S.TX_IDLE} ;
         {S.CMD_RESET}:
             IF {I('ActiveId')} <> 0 THEN
@@ -1592,19 +1593,41 @@ def generar() -> str:
     # Cabecera: leyenda v7 + texto descriptivo v5 (desde "OBJETIVO v5").
     t = leyenda() + t[t.index("(* OBJETIVO v5:"):]
 
-    # §0: arranque seguro del motor v7.
+    # §0: arranque seguro del motor v7. LACT esta en %R (se conserva al
+    # apagar): si su cabecera y su checksum siguen integros se restaura la
+    # ultima config aplicada; si no, corre v5. Arrancar la banda sigue
+    # pidiendo el flanco de su senal de arranque (EngFirst / RunArmed).
+    S = lm
     t = reemplazar(t, "    EB[1]       := Sys100ms ;\n\n    (* v6: el motor configurable arranca en estado seguro *)\n    EB[2]     := TRUE ;\n",
                    f"    {B('Prev100ms')} := Sys100ms ;\n\n"
-                   "    (* v7: sin configuracion activa tras energizar (estado    *)\n"
-                   "    (* seguro: corre v5 con los registros que dejo el backend) *)\n"
+                   "    (* v7: tras energizar se restaura la ultima config       *)\n"
+                   "    (* aplicada (LACT en %R) si cabecera y checksum siguen   *)\n"
+                   "    (* integros; si no, estado seguro: corre v5.             *)\n"
                    f"    {B('EngResetReq')} := TRUE ;\n"
-                   f"    {I('CmdPrev')} := LCMD[{lm.C_SEQ}] ;\n"
-                   f"    {I('TxState')} := {lm.TX_IDLE} ;\n"
-                   f"    {I('ActiveId')} := 0 ;\n"
-                   f"    {I('ActiveChk')} := 0 ;\n"
+                   f"    {I('CmdPrev')} := LCMD[{S.C_SEQ}] ;\n"
+                   f"    {I('TxState')} := {S.TX_IDLE} ;\n"
+                   "    LCK[0] := DINT#0 ;\n"
+                   f"    FOR ek := 0 TO {S.CFG_LEN - 1} DO\n"
+                   f"        IF ek <> {S.H_CHK} THEN\n"
+                   "            LCK[0] := (LCK[0] * DINT#31 + ANY_TO_DINT(LACT[ANY_TO_DINT(ek)]) + DINT#32769) MOD DINT#32749 ;\n"
+                   "        END_IF ;\n"
+                   "    END_FOR ;\n"
+                   f"    IF (LACT[{S.H_FORMAT}] = {S.ENGINE_VERSION}) AND (LACT[{S.H_LEN}] = {S.CFG_LEN}) AND\n"
+                   f"       (LACT[{S.H_ID}] >= 1) AND (ANY_TO_DINT(LACT[{S.H_CHK}]) = LCK[0]) THEN\n"
+                   f"        {I('ActiveId')} := LACT[{S.H_ID}] ;\n"
+                   f"        {I('ActiveChk')} := LACT[{S.H_CHK}] ;\n"
+                   "    ELSE\n"
+                   f"        {I('ActiveId')} := 0 ;\n"
+                   f"        {I('ActiveChk')} := 0 ;\n"
+                   "    END_IF ;\n"
                    f"    {I('ErrCode')} := 0 ;\n"
                    f"    {I('ErrField')} := 0 ;\n"
-                   f"    {B('V7Active')} := FALSE ;\n")
+                   f"    {B('V7Active')} := {I('ActiveId')} <> 0 ;\n")
+    # Con una config v7 restaurada tambien se prepara el VFD (si no tiene
+    # movimiento, §8 la deja lista sin tocarlo).
+    t = reemplazar(t, "    IF (R_FreqRequest > 0) AND\n       ((R_DirCmd = 1) OR (R_DirCmd = 2)) THEN\n",
+                   "    IF ((R_FreqRequest > 0) AND\n       ((R_DirCmd = 1) OR (R_DirCmd = 2))) OR\n"
+                   f"       ({I('ActiveId')} <> 0) THEN    (* v7: config restaurada *)\n")
 
     # §1: pulso de 100 ms.
     t = reemplazar(t, "(* v6: pulso de 100 ms (T_100MS = %S4) para timers del motor. *)\nEB[0] := Sys100ms AND NOT EB[1] ;\nEB[1]  := Sys100ms ;",

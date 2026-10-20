@@ -1217,6 +1217,61 @@ cerrar()
 
 app.BANDA_MOTOR_V7 = False
 
+
+# ---------------------------------------------------------------------------
+escenario("24. Corte de energia: la ultima config v7 se conserva")
+# ---------------------------------------------------------------------------
+def energizar(sim):
+    """Apagar y encender: lo que esta en %R (LACT, LI, LCK...) se conserva;
+    LB y LSIG (internas, sin tag) se pierden; entradas sueltas."""
+    for a in ("LB", "LSIG"):
+        sim.V[a] = type(sim.V[a])()
+    sim.vfd_hz = 0.0
+    sim.fst = True
+    sim.poner(**{k: False for k in sim.u})
+    sim.correr(4)
+
+
+mover = {"enable": True, "direction": "derecha", "freq_hz": 30, "engine": {"version": 7}}
+sim = ls.SimV7()
+sim.correr(0.3)
+sim.cargar(mover)
+ident = sim.estado()["config_activa"]
+energizar(sim)
+check(sim.estado()["activo"] and sim.estado()["config_activa"] == ident, "tras energizar sigue la misma config v7")
+check(sim.motor() == "paro", "tras energizar la banda NO arranca sola")
+sim.pulsar("I1")
+sim.correr(2)
+check(sim.motor() == "dir1" and sim.vfd_hz > 15, "I1 arranca con la config restaurada")
+
+sim = ls.SimV7()
+sim.correr(0.3)
+sim.cargar({"enable": False, "engine": {"version": 7, "salidas": {"Q3": "S1"}}})
+energizar(sim)
+sim.poner(S1=True)
+sim.correr(0.5)
+check(sim.estado()["activo"] and sim.salidas() == {"Q3"}, "config sin movimiento: S1 sigue prendiendo Q3")
+sim.poner(S1=False)
+
+sim = ls.SimV7()
+sim.correr(0.3)
+sim.cargar(mover)
+plc = pb.BandaPLC(ip="127.0.0.1")
+plc.client = sim.modbus
+plc._esperar = sim.correr
+plc.descargar_v7()
+sim.correr(0.5)
+energizar(sim)
+check(not sim.estado()["activo"], "tras UNLOAD y corte vuelve v5 (no revive el v7 descargado)")
+
+sim = ls.SimV7()
+sim.correr(0.3)
+sim.cargar(mover)
+sim.V["LACT"][lm.H_MOVE] += 1
+energizar(sim)
+check(not sim.estado()["activo"], "LACT alterada (checksum no coincide): no se restaura, corre v5")
+cerrar()
+
 print("\n" + "=" * 78)
 print(f"{'Escenario':<66}{'comprob.':>10}")
 for nombre, _ini, n in TABLA:
