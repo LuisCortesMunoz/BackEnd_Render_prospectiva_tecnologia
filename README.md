@@ -226,6 +226,12 @@ modelo como datos ya decididos, quita las preguntas ya respondidas (equipo, entr
 maletín, frecuencia, proceso) y en la banda v7 fija la frecuencia y la dirección elegidas en el JSON.
 Con aclaraciones no se reutiliza una memoria idéntica por texto (podría tener otros valores).
 
+Las preguntas siempre traen opciones para responder con un clic (`preguntas_banda.py`): un
+movimiento incompleto de la banda ("Quiero mover la banda") pregunta solo lo que falta de arranque,
+dirección, frecuencia y paro, con opciones del hardware real (`lavo_motor.HW_BANDA`; I3 nunca se
+ofrece). Con todo respondido el JSON se arma sin llamar al modelo, sobre la lógica activa si la hay.
+Las preguntas del modelo que lleguen sin opciones se completan. Pruebas: `python test_preguntas_banda.py`.
+
 ## Instalación local
 
 ```powershell

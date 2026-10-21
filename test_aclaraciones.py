@@ -77,7 +77,8 @@ def mueve(freq=None, extra=None, preguntas=None):
     return d
 
 
-TEXTO = "Mueve la banda hacia la derecha"
+# Trae arranque y paro: solo falta la frecuencia (el resto lo integra el modelo).
+TEXTO = "Mueve la banda hacia la derecha con I1 hasta presionar I2"
 
 # ---------------------------------------------------------------------------
 escenario("1. Movimiento sin frecuencia: se pregunta y se responde 20 Hz")
@@ -160,7 +161,7 @@ check(ac.autoriza_catalogo(ac.normalizar({"proceso": "Autorizar ampliar el catal
 # ---------------------------------------------------------------------------
 escenario("7. Una memoria identica por texto no ignora las respuestas")
 app.guardar_memoria_validada(app.GuardarMemoriaRequest(dispositivo="banda", instruccion=TEXTO,
-                                                       logic=generar(TEXTO, mueve(40)).logic))
+                                                       logic=generar(TEXTO, mueve(40), acl={"freq_hz": {"respuesta": "40 Hz"}}).logic))
 r = generar(TEXTO)
 check(r.analysis.get("fuente") == "memoria" and not llamadas, "sin aclaraciones se reutiliza la memoria")
 r = generar(TEXTO, mueve(None), acl={"freq_hz": {"respuesta": "20 Hz"}})

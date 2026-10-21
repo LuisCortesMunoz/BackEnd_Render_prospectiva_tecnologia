@@ -121,6 +121,7 @@ AGENT_MEMORY_ENABLED   = _AGENTS_OK and os.environ.get("AGENT_MEMORY_ENABLED", "
 import metricas_lavo
 import edicion_incremental
 import aclaraciones
+import preguntas_banda
 try:
     import memoria_validada
     import contexto_ramificado
@@ -720,6 +721,8 @@ PROCESO (siempre en este orden)
 3. Si algo no existe en este hardware, construye la ALTERNATIVA mas cercana que sea segura y explicala en
    "analisis" (conservado / modificado / simplificado / no_soportado) con requiere_confirmacion = true.
 4. Si falta un dato imprescindible que no se puede suponer, pregunta en "preguntas" (y deja lo demas vacio).
+   Cada pregunta lleva SIEMPRE "opciones": 2 a 5 valores concretos de ESTE hardware (I1, S1, Q3, 5 s, 30 Hz...)
+   para que el usuario responda con un clic; nunca preguntas abiertas.
 5. Nunca inventes capacidades, nunca quites el paro de emergencia y no cambies tiempos o conteos pedidos.
 
 HARDWARE (fijo; NA/NC lo resuelve el PLC: "I2" activo = boton presionado)
@@ -2731,6 +2734,21 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         if r is not None:
             return r
 
+    # "Quiero mover la banda": arranque, direccion, frecuencia y paro se eligen
+    # con opciones del hardware; con todo respondido se arma sin el modelo.
+    mov = preguntas_banda.analizar(texto, prev, acl)
+    if mov["aplica"]:
+        if mov["preguntas"]:
+            log.info(f"/generar-logica banda v7: movimiento incompleto — {[q['campo'] for q in mov['preguntas']]}")
+            return LogicaResponse(
+                logic={}, name="", outputs=0, device="banda", status="needs_clarification",
+                questions=mov["preguntas"], assumptions=[],
+                analysis={"equipo": "banda", "motor_v7": True, "movimiento_basico": True})
+        if mov["construible"]:
+            r = _movimiento_desde_aclaraciones(texto, prev, acl)
+            if r is not None:
+                return r
+
     if CONTEXTO_RAMIFICADO:
         if _pide_ampliar_catalogo(texto) or aclaraciones.autoriza_catalogo(acl):
             return _respuesta_ampliar_catalogo(texto)
@@ -2794,6 +2812,7 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
             continue
         if preguntas:
             log.info("/generar-logica banda v7: el modelo pide aclaracion")
+            preguntas = preguntas_banda.completar_opciones(preguntas)
             return LogicaResponse(
                 logic={}, name="", outputs=0, device="banda", status="needs_clarification",
                 questions=[{"id": q.get("campo") or f"q{i}", "campo": q.get("campo") or "",
@@ -2813,7 +2832,7 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         if cand is not None and lavo_motor.falta_frecuencia(cand) and all("frecuencia" in e for e in errores):
             return LogicaResponse(
                 logic={}, name="", outputs=0, device="banda", status="needs_clarification",
-                questions=[lavo_motor.pregunta_frecuencia()], assumptions=[],
+                questions=[preguntas_banda.pregunta("freq_hz")], assumptions=[],
                 analysis={"equipo": "banda", "motor_v7": True, "contexto": plan})
         if not errores and vigilar_perdidas:
             perdidas = edicion_incremental.piezas_perdidas("banda", prev, cand["respuesta_llm"])
@@ -2858,6 +2877,36 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     return _respuesta_banda_v7(texto, cfg, analisis_llm, extra={
         "fuente": "modelo", "contexto": plan, "edicion": bool(prev),
         "memorias_referencia": [{"id": r["id"], "similitud": p} for p, r in similares]})
+
+
+def _movimiento_desde_aclaraciones(texto: str, prev, acl: dict):
+    """Movimiento basico con todo respondido: JSON armado con las respuestas
+    (sobre la logica activa si la hay), sin llamar al modelo. None = que lo
+    resuelva el modelo."""
+    import lavo_motor
+    resp = preguntas_banda.construir(texto, prev, acl)
+    try:
+        cand = lavo_motor.cfg_desde_respuesta(resp)
+        cand["respuesta_llm"] = {k: v for k, v in resp.items() if k not in ("analisis", "preguntas", "no_soportado")}
+        errores = validar_logica_banda(cand)
+    except (ValueError, TypeError) as e:
+        errores, cand = [str(e)], None
+    if any("misma senal" in e for e in errores):
+        # Eligio la misma senal para arrancar y parar: se vuelve a preguntar el paro.
+        q = preguntas_banda.pregunta("paro", excluir=(preguntas_banda.senal(acl["arranque"]["respuesta"]),))
+        q["pregunta"] = "¿Cómo se detiene la banda? (no puede ser la misma señal que la arranca)"
+        q["reemplaza"] = True
+        return LogicaResponse(logic={}, name="", outputs=0, device="banda", status="needs_clarification",
+                              questions=[q], assumptions=[],
+                              analysis={"equipo": "banda", "motor_v7": True, "movimiento_basico": True})
+    if errores:
+        log.warning(f"Movimiento desde aclaraciones no valido ({errores}); lo resuelve el modelo.")
+        return None
+    log.info("/generar-logica banda v7: movimiento armado con las aclaraciones, sin llamar al modelo")
+    metricas_lavo.poner("fuente", "aclaraciones")
+    metricas_lavo.poner("contexto", ["aclaraciones"])
+    return _respuesta_banda_v7(texto, cand, resp["analisis"],
+                               extra={"fuente": "aclaraciones", "edicion": bool(prev)})
 
 
 def _reusar_banda_v7(texto: str, reg: dict):
