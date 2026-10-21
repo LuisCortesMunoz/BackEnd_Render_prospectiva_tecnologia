@@ -60,7 +60,7 @@ LB_MAP = {
     "seqOwnMot": 36, "sStart": 37, "sStop": 38, "sRst": 39, "sPause": 40, "fire": 41,
     "timeOk": 42, "tsig": 43, "owned": 44, "seqv": 45, "pUp": 46, "pDn": 47, "sRise": 48,
     "contrib": 49, "sigRun": 50, "sigStop": 51, "sigPause": 52, "sigD1": 53, "sigD2": 54,
-    "sigTog": 55, "FirstCycle": 56, "tdn": 57, "trun": 58,
+    "sigTog": 55, "FirstCycle": 56, "tdn": 57, "trun": 58, "PowerHold": 59,
 }
 LB_RANGOS = {"RawIn": (60, 12), "DebIn": (72, 12), "CPrev": (84, 16), "TDn": (100, 16),
              "TRun": (116, 16), "TPrevIn": (132, 16), "CtDn": (148, 16), "CtUpPrev": (164, 16),
@@ -349,10 +349,12 @@ IF LCMD[{S.C_SEQ}] <> {I('CmdPrev')} THEN
             {I('ActiveId')} := 0 ;
             {I('ActiveChk')} := 0 ;
             LACT[{S.H_FORMAT}] := 0 ;    (* no se restaura al energizar *)
+            RLACT[{S.H_FORMAT}] := 0 ;
             {T} := {S.TX_IDLE} ;
         {S.CMD_RESET}:
             IF {I('ActiveId')} <> 0 THEN
                 {B('EngResetReq')} := TRUE ;
+                {B('PowerHold')} := FALSE ;
             ELSE
                 {I('LastResult')} := {S.E_NOTX} ;
             END_IF ;
@@ -418,9 +420,11 @@ IF {T} = {S.TX_VAL} THEN
             (* Aplicar: copia atomica (un scan) y reinicio seguro. *)
             FOR ek := 0 TO {S.CFG_LEN - 1} DO
                 LACT[ANY_TO_DINT(ek)] := LPEN[ANY_TO_DINT(ek)] ;
+                RLACT[ANY_TO_DINT(ek)] := LPEN[ANY_TO_DINT(ek)] ;    (* RETAIN *)
             END_FOR ;
             {I('ActiveId')} := LPEN[{S.H_ID}] ;
             {I('ActiveChk')} := LPEN[{S.H_CHK}] ;
+            {B('PowerHold')} := FALSE ;
             {T} := {S.TX_OK} ;
             {B('ApplyPulse')} := TRUE ;
             {B('EngResetReq')} := TRUE ;
@@ -604,7 +608,7 @@ LSIG[{S.SIG_SYS['DIR_1']}] := ({I('DirActual')} = 1) ;
 LSIG[{S.SIG_SYS['DIR_2']}] := ({I('DirActual')} = 2) ;
 LSIG[{S.SIG_SYS['INVIRTIENDO']}] := ({I('MotorState')} = 2) ;
 LSIG[{S.SIG_SYS['VFD_CERO']}] := ({I('SpeedAbs')} < 50) ;
-LSIG[{S.SIG_SYS['CFG_LISTA']}] := CfgReady ;
+LSIG[{S.SIG_SYS['CFG_LISTA']}] := CfgReady AND NOT {B('PowerHold')} ;
 LSIG[{S.SIG_SYS['PRIMER_CICLO']}] := {B('FirstCycle')} ;
 FOR ek := 0 TO {S.N_APP - 1} DO
     LSIG[ANY_TO_DINT({S.SIG_SYS['APP1']} + ek)] := (LCMD[ANY_TO_DINT({S.C_APP} + ek)] <> 0) ;
@@ -1394,7 +1398,9 @@ tVerde    := PhQ3 ;
 tAmarilla := PhQ4 ;
 tRoja     := PhQ5 ;
 
-{B('FirstCycle')} := {ef} ;
+(* Tras energizar, PRIMER_CICLO espera a que el operador presione I1. *)
+{B('FirstCycle')} := ({ef} AND NOT {B('PowerHold')}) OR ({B('PowerHold')} AND BtnStartRising AND CfgReady) ;
+IF BtnStartRising AND CfgReady THEN {B('PowerHold')} := FALSE ; END_IF ;
 {B('EngResetReq')} := FALSE ;
 """
     return reinicio + entradas + condiciones + memorias + timers + contadores + secuencias + motor + salidas
@@ -1593,21 +1599,24 @@ def generar() -> str:
     # Cabecera: leyenda v7 + texto descriptivo v5 (desde "OBJETIVO v5").
     t = leyenda() + t[t.index("(* OBJETIVO v5:"):]
 
-    # §0: arranque seguro del motor v7. LACT esta en %R (se conserva al
-    # apagar): si su cabecera y su checksum siguen integros se restaura la
-    # ultima config aplicada; si no, corre v5. Arrancar la banda sigue
-    # pidiendo el flanco de su senal de arranque (EngFirst / RunArmed).
+    # §0: arranque seguro del motor v7. LACT esta en el grupo GLOBAL de
+    # Cscape (vuelve a 0 al energizar aunque tenga %R): se repone desde su
+    # copia RLACT (grupo RETAIN) y, si cabecera y checksum siguen integros, se
+    # restaura la ultima config aplicada; si no, corre v5. Arrancar la banda
+    # sigue pidiendo el flanco de su senal de arranque (EngFirst / RunArmed) y
+    # los arranques automaticos esperan a I1 (PowerHold).
     S = lm
     t = reemplazar(t, "    EB[1]       := Sys100ms ;\n\n    (* v6: el motor configurable arranca en estado seguro *)\n    EB[2]     := TRUE ;\n",
                    f"    {B('Prev100ms')} := Sys100ms ;\n\n"
                    "    (* v7: tras energizar se restaura la ultima config       *)\n"
-                   "    (* aplicada (LACT en %R) si cabecera y checksum siguen   *)\n"
-                   "    (* integros; si no, estado seguro: corre v5.             *)\n"
+                   "    (* aplicada: RLACT (RETAIN) -> LACT (GLOBAL, Modbus) y se *)\n"
+                   "    (* valida cabecera + checksum; si no, estado seguro: v5. *)\n"
                    f"    {B('EngResetReq')} := TRUE ;\n"
                    f"    {I('CmdPrev')} := LCMD[{S.C_SEQ}] ;\n"
                    f"    {I('TxState')} := {S.TX_IDLE} ;\n"
                    "    LCK[0] := DINT#0 ;\n"
                    f"    FOR ek := 0 TO {S.CFG_LEN - 1} DO\n"
+                   "        LACT[ANY_TO_DINT(ek)] := RLACT[ANY_TO_DINT(ek)] ;\n"
                    f"        IF ek <> {S.H_CHK} THEN\n"
                    "            LCK[0] := (LCK[0] * DINT#31 + ANY_TO_DINT(LACT[ANY_TO_DINT(ek)]) + DINT#32769) MOD DINT#32749 ;\n"
                    "        END_IF ;\n"
@@ -1622,7 +1631,9 @@ def generar() -> str:
                    "    END_IF ;\n"
                    f"    {I('ErrCode')} := 0 ;\n"
                    f"    {I('ErrField')} := 0 ;\n"
-                   f"    {B('V7Active')} := {I('ActiveId')} <> 0 ;\n")
+                   f"    {B('V7Active')} := {I('ActiveId')} <> 0 ;\n"
+                   "    (* Restaurada = en espera: arranques automaticos esperan I1 (§L2i) *)\n"
+                   f"    {B('PowerHold')} := {I('ActiveId')} <> 0 ;\n")
     # Con una config v7 restaurada tambien se prepara el VFD (si no tiene
     # movimiento, §8 la deja lista sin tocarlo).
     t = reemplazar(t, "    IF (R_FreqRequest > 0) AND\n       ((R_DirCmd = 1) OR (R_DirCmd = 2)) THEN\n",
@@ -1788,27 +1799,56 @@ def generar_variables() -> str:
         ("LB", "BOOL", LB_LEN, "(sin tag)", "no", "Booleanos internos del motor (leyenda del ST)."),
         ("em", "INT", None, "(sin tag)", "no", "Contador del tercer ciclo FOR anidado."),
     ]
+    # Grupo RETAIN (Retain Variables): lo UNICO que Cscape conserva al apagar.
+    retain = [
+        ("RLACT", "INT", S.CFG_LEN, "(sin tag)", "no",
+         "Copia RETAIN de LACT. COMMIT la escribe junto con LACT; §0 la copia a LACT al energizar."),
+    ]
     L = []
     w = L.append
     w("=" * 78)
     w(" LAVO - PROGRAMA MAESTRO v7 (motor general) - VARIABLES PARA CSCAPE")
-    w(" Generado por cscape/generar_st_v7.py junto con LAVO_Main_ST.txt.")
+    w(" Generado por cscape/generar_st_v7.py junto con LAVO_Main_ST_Retentivo.txt")
+    w(" (= LAVO_Main_ST.txt, mismo contenido).")
     w(" Si cambias lavo_motor.py, regenera AMBOS archivos.")
     w("=" * 78)
     w("")
-    w("Donde se declaran: TODAS en el editor de variables de Cscape, seccion")
-    w("Global Variables (igual que las del v5/v6). El texto ST no trae bloques")
-    w("VAR ... END_VAR: el programa actual tampoco los usa y es el formato que")
-    w("ya se compilo en este proyecto.")
-    w("Retentivas: NINGUNA. No pongas ninguna variable v7 en Retain Variables.")
-    w("Valor inicial: 0 / FALSE en todas (no hace falta escribir valores")
-    w("iniciales). Tras energizar, el motor v7 arranca SIN configuracion activa")
-    w("(estado seguro): el backend la vuelve a cargar.")
+    w("Donde se declaran: en el editor de variables de Cscape. El proyecto tiene")
+    w("DOS grupos y la diferencia es la retentividad:")
+    w("  GLOBAL (Global Variables) : vuelven a 0 al apagar y encender el PLC,")
+    w("                              AUNQUE tengan direccion %R (LACT, LCMD, LI...).")
+    w("  RETAIN (Retain Variables) : conservan su valor al apagar. Ahi estan las")
+    w("                              copias R_* del v5 (R_DirCmd, R_FreqRequest...).")
+    w("El v5 ya funciona asi: trabaja con DirCmd, FreqRequest... (GLOBAL, %R fijas")
+    w("para Modbus), las copia a R_* en §20 y las repone desde R_* en §0.")
+    w("")
+    w("POR QUE SE PERDIA LA CONFIGURACION v7: la config activa (LACT, %R2000) esta")
+    w("en GLOBAL. Al energizar Cscape la deja en 0, el checksum de §0 no coincide y")
+    w("el PLC vuelve a v5 sin configuracion. (La correccion del 19 oct suponia que")
+    w("todo %R se conserva; en este proyecto no es asi.)")
+    w("")
+    w("CORRECCION (mismo patron que el v5):")
+    w("  - NUEVA variable RLACT (640 INT) en el grupo RETAIN, sin direccion fija.")
+    w("  - COMMIT aplicado: copia LPEN -> LACT y -> RLACT en el mismo scan.")
+    w("  - §0 (primer scan): copia RLACT -> LACT y valida cabecera + checksum; si")
+    w("    son correctos restaura la config (id, checksum, VFD). Si no, corre v5.")
+    w("  - UNLOAD pone LACT[0] y RLACT[0] en 0: lo descargado no revive.")
+    w("  - LACT sigue en %R2000: el mapa Modbus y el backend NO cambian.")
+    w("")
+    w("ARRANQUE SEGURO TRAS ENERGIZAR (la banda nunca se mueve sola):")
+    w("  - El motor queda detenido y los timers, contadores y secuencias en 0.")
+    w("  - Arranque por boton o sensor: pide su flanco (como siempre).")
+    w("  - Arranque automatico (CFG_LISTA o PRIMER_CICLO): queda EN ESPERA hasta")
+    w("    que el operador presione I1 (boton verde) o LAVO mande RESET o una")
+    w("    config nueva. Ese es el unico cambio de comportamiento.")
+    w("  - Se pierden al apagar (a proposito): cuentas de contadores, tiempos")
+    w("    acumulados y paso de las secuencias.")
     w("")
     w("-" * 78)
     w("1. CAMBIOS EN LA TABLA DE VARIABLES")
     w("-" * 78)
-    w("ELIMINAR (eran del motor v6, el v7 ya no las usa):")
+    w("OPCIONAL - ELIMINAR (eran del motor v6; siguen declaradas en el .csp y")
+    w("el v7 ya no las usa; dejarlas no afecta la retentividad):")
     w("   EC  INT[260]  %R200      ES  INT[40]  %R460")
     w("   EI  INT[65]   (interna)  EB  BOOL[203] (interna)")
     w("   -> Cscape marcara 'variable no usada' si las dejas; no son error,")
@@ -1816,11 +1856,22 @@ def generar_variables() -> str:
     w("CONSERVAR SIN CAMBIOS:")
     w("   todas las variables del v5 (FST_SCN, PhIn1..5, PhQ3..9, DirCmd, ...,")
     w("   R_*, Mon_*, VFD_*) y Sys100ms (BOOL %S4), ek (INT), ej (INT).")
-    w("AGREGAR (10):")
+    w("YA DECLARADAS EN GLOBAL (10, del v7 - conservar SIN cambios):")
     w("")
     w(f"  {'Nombre':<6} {'Tipo':<5} {'Dim':>5}  {'Tag':<10} {'Modbus':<26} Funcion")
     for n, t, d, tag, mb, fn in nuevas:
         w(f"  {n:<6} {t:<5} {('-' if d is None else d):>5}  {tag:<10} {mb:<26} {fn}")
+    w("")
+    w("AGREGAR EN EL GRUPO RETAIN (1) - lo unico nuevo:")
+    w("")
+    for n, t, d, tag, mb, fn in retain:
+        w(f"  {n:<6} {t:<5} {d:>5}  {'sin tag':<10} {mb:<26} {fn}")
+    w("  Como: en el editor de variables, grupo RETAIN (donde estan R_DirCmd,")
+    w("  R_FreqRequest...), agrega RLACT, tipo INT, arreglo 0..639, SIN direccion")
+    w("  (deja que Cscape la asigne: asi quedo cada R_* del v5). No la pongas en")
+    w("  GLOBAL ni le des %R fija: dejaria de ser retentiva o chocaria con Modbus.")
+    w("  Valor inicial 0: tras descargar el programa nuevo la primera vez no hay")
+    w("  config guardada; carga una desde LAVO y desde ahi se conserva.")
     w("")
     w("  'Dim' = tamano del arreglo (en Cscape: Dim / Array size). Arreglos")
     w("  empezando en 0: ARRAY [0..Dim-1].")
@@ -1829,7 +1880,8 @@ def generar_variables() -> str:
     w("  v5 del backend aun escribe. LSIG, LB y em pueden quedar sin tag")
     w("  (Cscape las asigna en %T / %R libres).")
     w("")
-    w("  Alcance: global (todas). Retentividad: ninguna. Valor inicial: 0/FALSE.")
+    w("  Alcance: global. Retentividad: las 10 de la tabla en GLOBAL (no se")
+    w("  conservan; LACT se repone desde RLACT); RLACT en RETAIN. Valor inicial 0.")
     w("")
     w("  Relacion con el Main (LAVO_Main_ST.txt):")
     w("    LCMD  lo lee §L1 (comandos) y §L2b (APP1..APP4, paro software).")
@@ -1840,6 +1892,8 @@ def generar_variables() -> str:
     w("    LI/LB estado interno de §L0..§L3 (leyenda al inicio del ST).")
     w("    LSIG  tabla de senales: la llenan §L2b..§L2g y la leen todos los bloques.")
     w("    LCK   acumulador del checksum en §L1.  em: ciclos FOR anidados.")
+    w("    RLACT la escribe §L1 al aplicar un COMMIT (y UNLOAD pone RLACT[0] = 0);")
+    w("          la lee §0 en el primer scan para reponer LACT.")
     w("  Variables v5 que usa el motor v7 (ya existen, no se tocan):")
     w("    lee     BtnStart, BtnAux, BtnStop, S1_Det, S2_Det (§2 normaliza NA/NC),")
     w("            Pulse1s, CfgReady, CfgValid, MotionCfgPresent, InitSeqState,")
@@ -1867,6 +1921,12 @@ def generar_variables() -> str:
     w("------------------------- copiar hasta aqui -------------------------")
     w("Si el editor no deja pegar texto, crea cada una a mano con la tabla de")
     w("arriba (Nombre, Tipo, Dim, Tag).")
+    w("")
+    w("2b. GRUPO RETAIN (Retain Variables) - agregar al final del grupo:")
+    w("----------------------- copiar desde aqui (RETAIN) -----------------------")
+    for n, t, d, _tag, _mb, _fn in retain:
+        w(f"   {n} : ARRAY [0..{d - 1}] OF {t} ;")
+    w("------------------------ copiar hasta aqui (RETAIN) -----------------------")
     w("")
     w("-" * 78)
     w("3. MAPA MODBUS (holding registers; direccion Modbus = %R + 2999)")
@@ -1961,12 +2021,12 @@ def generar_variables() -> str:
     w("4. INSTALACION EN CSCAPE (paso a paso)")
     w("-" * 78)
     w("  1. Abre ladder_maestro_banda.csp y GUARDALO COMO COPIA")
-    w("     (p. ej. ladder_maestro_banda_v7.csp). El original es tu respaldo.")
-    w("  2. En Global Variables: elimina EC, ES, EI, EB (seccion 1) y pega el")
-    w("     bloque de la seccion 2. Conserva Sys100ms, ek y ej.")
+    w("     (p. ej. ladder_maestro_banda_retentivo.csp). El original es tu respaldo.")
+    w("  2. Variables: las del grupo GLOBAL NO cambian (ya estan las del v7).")
+    w("     En el grupo RETAIN agrega RLACT (seccion 2b). Nada mas.")
     w("  3. Abre el bloque ST STBLOCK1 y REEMPLAZA todo su texto por el")
-    w("     contenido completo de LAVO_Main_ST.txt (es el programa COMPLETO en")
-    w("     un solo bloque; no hace falta un STBLOCK2).")
+    w("     contenido completo de LAVO_Main_ST_Retentivo.txt (programa COMPLETO")
+    w("     en un solo bloque; no hace falta un STBLOCK2).")
     w("  4. Compila (Program > Compile / Verify). Los avisos W10034 ('loop")
     w("     instructions may block the target cycle') son normales.")
     w("     Si aparece un error de tipo en una linea con DINT#, cambia esa")
@@ -1980,7 +2040,25 @@ def generar_variables() -> str:
       f"%R{S.STATUS_BASE + S.S_CFGLEN} = 640   %R{S.STATUS_BASE + S.S_SCANS} = scans/s")
     w("  8. En Render (o en el puente local) pon BANDA_MOTOR_V7 = 1. Con 0, el")
     w("     backend sigue generando programas v5/v6 exactamente como antes.")
-    w("  9. Primera prueba fisica sugerida (en este orden):")
+    w("  9. PRUEBAS DE RETENTIVIDAD (banda detenida, I3 a la mano):")
+    w(f"       a) Carga desde LAVO 'a 20 Hz arranca con I1 y para con I2'. Anota")
+    w(f"          %R{S.STATUS_BASE + S.S_ACTIVE_ID} (id) y %R{S.STATUS_BASE + S.S_ACTIVE_CHK} (checksum). Prueba I1 / I2.")
+    w("       b) APAGA el PLC 30 s y enciendelo SIN tocar LAVO.")
+    w(f"       c) Data Watch: %R{S.STATUS_BASE + S.S_ACTIVE_ID} y %R{S.STATUS_BASE + S.S_ACTIVE_CHK} = los mismos de (a),")
+    w(f"          %R{S.STATUS_BASE + S.S_ENGINE} = 1 (motor v7 activo), %R{S.ACT_BASE + 1} = id (LACT repuesta).")
+    w("       d) La banda debe estar DETENIDA y la torreta como en reposo.")
+    w("       e) I1 la arranca a 20 Hz con UNA pulsacion; I2 la detiene; I3")
+    w("          detiene todo y al soltarlo nada arranca solo.")
+    w("       f) Repite con un sensor ('S1 prende la roja') y una secuencia de")
+    w("          torreta con I1: tras el corte deben funcionar sin recargar.")
+    w("       g) Arranque automatico: carga 'Quiero mover la banda' con arranque")
+    w("          'Automatico'. Tras el corte NO debe moverse hasta presionar I1.")
+    w("       h) Descargar (UNLOAD) desde LAVO, apagar y encender: debe volver a")
+    w("          v5 (%R1709 = 0), sin revivir la config descargada.")
+    w("       i) Carga otra config despues del corte: LAVO debe cargarla normal.")
+    w("     Si (c) falla: confirma en el editor de variables que RLACT esta en el")
+    w("     grupo RETAIN (no en GLOBAL) y que se descargo el programa recompilado.")
+    w("  10. Primera prueba fisica del motor (si es la primera vez con el v7):")
     w("       a) programa v5 conocido -> debe comportarse igual que antes;")
     w("       b) 'verde con I1' (sin motor) -> I1 enciende Q3;")
     w("       c) 'torreta verde, amarilla, roja 2 s cada una con I1, paro I2';")
@@ -2004,10 +2082,47 @@ def generar_variables() -> str:
     return "\r\n".join(L) + "\r\n"
 
 
+def inventario_csp(ruta) -> str:
+    """Todas las variables del .csp (grupo, tipo, dim, direccion) y que hacer
+    con cada una. Solo lee el archivo."""
+    import olefile
+    datos = olefile.OleFileIO(ruta).openstream("Contents").read().decode("cp1252", errors="replace")
+    tags = {}
+    for m in re.finditer(r"(%[A-Z]+\d+)\t(\w+)\t(\w+)\t(\d+)\t(Fixed|Allocated)", datos):
+        tags.setdefault(m.group(2), (m.group(1), m.group(5)))
+    filas = re.findall(r"/V,([GR]),(\w+)\((\d+)\)\[(\d+)\],\d+,(\w+)", datos)
+    v6 = {"EC", "ES", "EI", "EB"}
+    v7 = {"LCMD", "LSTG", "LSTA", "LACT", "LPEN", "LI", "LCK", "LSIG", "LB", "em"}
+    L = ["-" * 78, "6. INVENTARIO COMPLETO DE VARIABLES (leido de " + os.path.basename(ruta) + ")", "-" * 78,
+         "  Grupo  = GLOBAL (vuelve a 0 al energizar) | RETAIN (se conserva).",
+         "  Accion = CONSERVAR (no tocar) | OPCIONAL (v6, ya no se usa) | AGREGAR.", "",
+         f"  {'Grupo':<7} {'Nombre':<22} {'Tipo':<5} {'Dim':>4}  {'Direccion':<10} {'Asignacion':<10} Accion"]
+    vistos = set()
+    for grupo, nombre, tipo, _ini, dim, in [(f[0], f[4], f[1], f[2], f[3]) for f in filas]:
+        if nombre in vistos:
+            continue
+        vistos.add(nombre)
+        dirc, asig = tags.get(nombre, ("-", "-"))
+        accion = "OPCIONAL: eliminar (v6)" if nombre in v6 else "CONSERVAR"
+        if nombre == "LACT":
+            accion = "CONSERVAR (se repone desde RLACT)"
+        elif nombre in v7:
+            accion = "CONSERVAR (v7)"
+        L.append(f"  {('RETAIN' if grupo == 'R' else 'GLOBAL'):<7} {nombre:<22} {tipo:<5} "
+                 f"{(dim if dim != '0' else '-'):>4}  {dirc:<10} {asig:<10} {accion}")
+    if "RLACT" not in vistos:
+        L.append(f"  {'RETAIN':<7} {'RLACT':<22} {'INT':<5} {lm.CFG_LEN:>4}  {'(Cscape)':<10} "
+                 f"{'Allocated':<10} AGREGAR (seccion 2b)")
+    L.append("")
+    L.append(f"  Total: {len(vistos)} declaradas + RLACT. Ninguna cambia de grupo, tipo ni direccion.")
+    return "\r\n".join(L) + "\r\n"
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--destino", help="carpeta 'Archivos Cscape' donde escribir LAVO_Main_ST.txt "
-                                      "y LAVO_Variables_Cscape.txt")
+    ap.add_argument("--destino", help="carpeta 'Archivos Cscape' donde escribir LAVO_Main_ST_Retentivo.txt "
+                                      "y LAVO_Variables_Retentivas.txt")
+    ap.add_argument("--csp", help="ladder_maestro_banda.csp: agrega el inventario completo de variables")
     args = ap.parse_args()
     st = generar()
     n = tokens_st(st)
@@ -2027,13 +2142,21 @@ def main():
     with open(os.path.join(AQUI, "LAVO_Variables_Cscape.txt"), "w", encoding="utf-8", newline="") as f:
         f.write(variables)
     if args.destino:
-        ruta = os.path.join(args.destino, "LAVO_Main_ST.txt")
-        with open(ruta, "w", encoding="utf-8", newline="\r\n") as f:
-            f.write(st)
-        print(f"{ruta}: escrito")
+        # El ST va con los dos nombres (el de siempre y el pedido); son iguales.
+        for nombre in ("LAVO_Main_ST_Retentivo.txt", "LAVO_Main_ST.txt"):
+            ruta = os.path.join(args.destino, nombre)
+            with open(ruta, "w", encoding="utf-8", newline="\r\n") as f:
+                f.write(st)
+            print(f"{ruta}: escrito")
         ruta = os.path.join(args.destino, "LAVO_Variables_Cscape.txt")
         with open(ruta, "w", encoding="utf-8", newline="") as f:
             f.write(variables)
+        print(f"{ruta}: escrito")
+        # Referencia completa: grupos, cambios, mapa Modbus, instalacion,
+        # pruebas de retentividad e inventario de TODAS las variables.
+        ruta = os.path.join(args.destino, "LAVO_Variables_Retentivas.txt")
+        with open(ruta, "w", encoding="utf-8", newline="") as f:
+            f.write(referencia + ("\r\n" + inventario_csp(args.csp) if args.csp else ""))
         print(f"{ruta}: escrito")
 
 

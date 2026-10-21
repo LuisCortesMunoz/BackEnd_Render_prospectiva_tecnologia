@@ -1,22 +1,46 @@
 ==============================================================================
  LAVO - PROGRAMA MAESTRO v7 (motor general) - VARIABLES PARA CSCAPE
- Generado por cscape/generar_st_v7.py junto con LAVO_Main_ST.txt.
+ Generado por cscape/generar_st_v7.py junto con LAVO_Main_ST_Retentivo.txt
+ (= LAVO_Main_ST.txt, mismo contenido).
  Si cambias lavo_motor.py, regenera AMBOS archivos.
 ==============================================================================
 
-Donde se declaran: TODAS en el editor de variables de Cscape, seccion
-Global Variables (igual que las del v5/v6). El texto ST no trae bloques
-VAR ... END_VAR: el programa actual tampoco los usa y es el formato que
-ya se compilo en este proyecto.
-Retentivas: NINGUNA. No pongas ninguna variable v7 en Retain Variables.
-Valor inicial: 0 / FALSE en todas (no hace falta escribir valores
-iniciales). Tras energizar, el motor v7 arranca SIN configuracion activa
-(estado seguro): el backend la vuelve a cargar.
+Donde se declaran: en el editor de variables de Cscape. El proyecto tiene
+DOS grupos y la diferencia es la retentividad:
+  GLOBAL (Global Variables) : vuelven a 0 al apagar y encender el PLC,
+                              AUNQUE tengan direccion %R (LACT, LCMD, LI...).
+  RETAIN (Retain Variables) : conservan su valor al apagar. Ahi estan las
+                              copias R_* del v5 (R_DirCmd, R_FreqRequest...).
+El v5 ya funciona asi: trabaja con DirCmd, FreqRequest... (GLOBAL, %R fijas
+para Modbus), las copia a R_* en §20 y las repone desde R_* en §0.
+
+POR QUE SE PERDIA LA CONFIGURACION v7: la config activa (LACT, %R2000) esta
+en GLOBAL. Al energizar Cscape la deja en 0, el checksum de §0 no coincide y
+el PLC vuelve a v5 sin configuracion. (La correccion del 19 oct suponia que
+todo %R se conserva; en este proyecto no es asi.)
+
+CORRECCION (mismo patron que el v5):
+  - NUEVA variable RLACT (640 INT) en el grupo RETAIN, sin direccion fija.
+  - COMMIT aplicado: copia LPEN -> LACT y -> RLACT en el mismo scan.
+  - §0 (primer scan): copia RLACT -> LACT y valida cabecera + checksum; si
+    son correctos restaura la config (id, checksum, VFD). Si no, corre v5.
+  - UNLOAD pone LACT[0] y RLACT[0] en 0: lo descargado no revive.
+  - LACT sigue en %R2000: el mapa Modbus y el backend NO cambian.
+
+ARRANQUE SEGURO TRAS ENERGIZAR (la banda nunca se mueve sola):
+  - El motor queda detenido y los timers, contadores y secuencias en 0.
+  - Arranque por boton o sensor: pide su flanco (como siempre).
+  - Arranque automatico (CFG_LISTA o PRIMER_CICLO): queda EN ESPERA hasta
+    que el operador presione I1 (boton verde) o LAVO mande RESET o una
+    config nueva. Ese es el unico cambio de comportamiento.
+  - Se pierden al apagar (a proposito): cuentas de contadores, tiempos
+    acumulados y paso de las secuencias.
 
 ------------------------------------------------------------------------------
 1. CAMBIOS EN LA TABLA DE VARIABLES
 ------------------------------------------------------------------------------
-ELIMINAR (eran del motor v6, el v7 ya no las usa):
+OPCIONAL - ELIMINAR (eran del motor v6; siguen declaradas en el .csp y
+el v7 ya no las usa; dejarlas no afecta la retentividad):
    EC  INT[260]  %R200      ES  INT[40]  %R460
    EI  INT[65]   (interna)  EB  BOOL[203] (interna)
    -> Cscape marcara 'variable no usada' si las dejas; no son error,
@@ -24,7 +48,7 @@ ELIMINAR (eran del motor v6, el v7 ya no las usa):
 CONSERVAR SIN CAMBIOS:
    todas las variables del v5 (FST_SCN, PhIn1..5, PhQ3..9, DirCmd, ...,
    R_*, Mon_*, VFD_*) y Sys100ms (BOOL %S4), ek (INT), ej (INT).
-AGREGAR (10):
+YA DECLARADAS EN GLOBAL (10, del v7 - conservar SIN cambios):
 
   Nombre Tipo    Dim  Tag        Modbus                     Funcion
   LCMD   INT      10  %R1000     ESCRITURA (backend)        Comandos: [0] CmdSeq, [1] CmdCode, [2] arg, [3..6] APP1..APP4, [7] paro software
@@ -38,6 +62,16 @@ AGREGAR (10):
   LB     BOOL    400  (sin tag)  no                         Booleanos internos del motor (leyenda del ST).
   em     INT       -  (sin tag)  no                         Contador del tercer ciclo FOR anidado.
 
+AGREGAR EN EL GRUPO RETAIN (1) - lo unico nuevo:
+
+  RLACT  INT     640  sin tag    no                         Copia RETAIN de LACT. COMMIT la escribe junto con LACT; §0 la copia a LACT al energizar.
+  Como: en el editor de variables, grupo RETAIN (donde estan R_DirCmd,
+  R_FreqRequest...), agrega RLACT, tipo INT, arreglo 0..639, SIN direccion
+  (deja que Cscape la asigne: asi quedo cada R_* del v5). No la pongas en
+  GLOBAL ni le des %R fija: dejaria de ser retentiva o chocaria con Modbus.
+  Valor inicial 0: tras descargar el programa nuevo la primera vez no hay
+  config guardada; carga una desde LAVO y desde ahi se conserva.
+
   'Dim' = tamano del arreglo (en Cscape: Dim / Array size). Arreglos
   empezando en 0: ARRAY [0..Dim-1].
   Las 7 primeras llevan direccion FIJA a proposito: si Cscape las asignara
@@ -45,7 +79,8 @@ AGREGAR (10):
   v5 del backend aun escribe. LSIG, LB y em pueden quedar sin tag
   (Cscape las asigna en %T / %R libres).
 
-  Alcance: global (todas). Retentividad: ninguna. Valor inicial: 0/FALSE.
+  Alcance: global. Retentividad: las 10 de la tabla en GLOBAL (no se
+  conservan; LACT se repone desde RLACT); RLACT en RETAIN. Valor inicial 0.
 
   Relacion con el Main (LAVO_Main_ST.txt):
     LCMD  lo lee §L1 (comandos) y §L2b (APP1..APP4, paro software).
@@ -56,6 +91,8 @@ AGREGAR (10):
     LI/LB estado interno de §L0..§L3 (leyenda al inicio del ST).
     LSIG  tabla de senales: la llenan §L2b..§L2g y la leen todos los bloques.
     LCK   acumulador del checksum en §L1.  em: ciclos FOR anidados.
+    RLACT la escribe §L1 al aplicar un COMMIT (y UNLOAD pone RLACT[0] = 0);
+          la lee §0 en el primer scan para reponer LACT.
   Variables v5 que usa el motor v7 (ya existen, no se tocan):
     lee     BtnStart, BtnAux, BtnStop, S1_Det, S2_Det (§2 normaliza NA/NC),
             Pulse1s, CfgReady, CfgValid, MotionCfgPresent, InitSeqState,
@@ -95,6 +132,11 @@ AGREGAR (10):
 ------------------------- copiar hasta aqui -------------------------
 Si el editor no deja pegar texto, crea cada una a mano con la tabla de
 arriba (Nombre, Tipo, Dim, Tag).
+
+2b. GRUPO RETAIN (Retain Variables) - agregar al final del grupo:
+----------------------- copiar desde aqui (RETAIN) -----------------------
+   RLACT : ARRAY [0..639] OF INT ;
+------------------------ copiar hasta aqui (RETAIN) -----------------------
 
 ------------------------------------------------------------------------------
 3. MAPA MODBUS (holding registers; direccion Modbus = %R + 2999)
@@ -193,12 +235,12 @@ arriba (Nombre, Tipo, Dim, Tag).
 4. INSTALACION EN CSCAPE (paso a paso)
 ------------------------------------------------------------------------------
   1. Abre ladder_maestro_banda.csp y GUARDALO COMO COPIA
-     (p. ej. ladder_maestro_banda_v7.csp). El original es tu respaldo.
-  2. En Global Variables: elimina EC, ES, EI, EB (seccion 1) y pega el
-     bloque de la seccion 2. Conserva Sys100ms, ek y ej.
+     (p. ej. ladder_maestro_banda_retentivo.csp). El original es tu respaldo.
+  2. Variables: las del grupo GLOBAL NO cambian (ya estan las del v7).
+     En el grupo RETAIN agrega RLACT (seccion 2b). Nada mas.
   3. Abre el bloque ST STBLOCK1 y REEMPLAZA todo su texto por el
-     contenido completo de LAVO_Main_ST.txt (es el programa COMPLETO en
-     un solo bloque; no hace falta un STBLOCK2).
+     contenido completo de LAVO_Main_ST_Retentivo.txt (programa COMPLETO
+     en un solo bloque; no hace falta un STBLOCK2).
   4. Compila (Program > Compile / Verify). Los avisos W10034 ('loop
      instructions may block the target cycle') son normales.
      Si aparece un error de tipo en una linea con DINT#, cambia esa
@@ -211,7 +253,25 @@ arriba (Nombre, Tipo, Dim, Tag).
        %R1770 = 508   %R1772 = 28   %R1774 = 640   %R1703 = scans/s
   8. En Render (o en el puente local) pon BANDA_MOTOR_V7 = 1. Con 0, el
      backend sigue generando programas v5/v6 exactamente como antes.
-  9. Primera prueba fisica sugerida (en este orden):
+  9. PRUEBAS DE RETENTIVIDAD (banda detenida, I3 a la mano):
+       a) Carga desde LAVO 'a 20 Hz arranca con I1 y para con I2'. Anota
+          %R1709 (id) y %R1710 (checksum). Prueba I1 / I2.
+       b) APAGA el PLC 30 s y enciendelo SIN tocar LAVO.
+       c) Data Watch: %R1709 y %R1710 = los mismos de (a),
+          %R1711 = 1 (motor v7 activo), %R2001 = id (LACT repuesta).
+       d) La banda debe estar DETENIDA y la torreta como en reposo.
+       e) I1 la arranca a 20 Hz con UNA pulsacion; I2 la detiene; I3
+          detiene todo y al soltarlo nada arranca solo.
+       f) Repite con un sensor ('S1 prende la roja') y una secuencia de
+          torreta con I1: tras el corte deben funcionar sin recargar.
+       g) Arranque automatico: carga 'Quiero mover la banda' con arranque
+          'Automatico'. Tras el corte NO debe moverse hasta presionar I1.
+       h) Descargar (UNLOAD) desde LAVO, apagar y encender: debe volver a
+          v5 (%R1709 = 0), sin revivir la config descargada.
+       i) Carga otra config despues del corte: LAVO debe cargarla normal.
+     Si (c) falla: confirma en el editor de variables que RLACT esta en el
+     grupo RETAIN (no en GLOBAL) y que se descargo el programa recompilado.
+  10. Primera prueba fisica del motor (si es la primera vez con el v7):
        a) programa v5 conocido -> debe comportarse igual que antes;
        b) 'verde con I1' (sin motor) -> I1 enciende Q3;
        c) 'torreta verde, amarilla, roja 2 s cada una con I1, paro I2';

@@ -1219,57 +1219,143 @@ app.BANDA_MOTOR_V7 = False
 
 
 # ---------------------------------------------------------------------------
-escenario("24. Corte de energia: la ultima config v7 se conserva")
+escenario("24. Corte de energia: la ultima config v7 se conserva (RETAIN)")
 # ---------------------------------------------------------------------------
+# En Cscape solo el grupo RETAIN de Global Variables conserva su valor al
+# apagar: las copias R_* del v5 y RLACT. TODO lo demas (grupo GLOBAL, aunque
+# tenga direccion %R: LACT, LCMD, LI, LCK, LSTA, LSTG, LPEN, DirCmd...) vuelve
+# a 0. El modelo anterior conservaba todo %R y por eso no vio la falla real.
+def es_retain(nombre):
+    n = nombre.upper()
+    return n.startswith("R_") or n == "RLACT"
+
+
 def energizar(sim):
-    """Apagar y encender: lo que esta en %R (LACT, LI, LCK...) se conserva;
-    LB y LSIG (internas, sin tag) se pierden; entradas sueltas."""
-    for a in ("LB", "LSIG"):
-        sim.V[a] = type(sim.V[a])()
+    for a in list(sim.V):
+        if not es_retain(a):
+            v = sim.V[a]
+            sim.V[a] = type(v)() if isinstance(v, dict) else (False if isinstance(v, bool) else 0)
     sim.vfd_hz = 0.0
     sim.fst = True
     sim.poner(**{k: False for k in sim.u})
     sim.correr(4)
 
 
-mover = {"enable": True, "direction": "derecha", "freq_hz": 30, "engine": {"version": 7}}
-sim = ls.SimV7()
-sim.correr(0.3)
-sim.cargar(mover)
+def sim_con(band):
+    s = ls.SimV7()
+    s.correr(0.3)
+    err, _ = s.cargar(band)
+    assert err == 0, f"carga rechazada: {err}"
+    return s
+
+
+def plc_de(s):
+    p = pb.BandaPLC(ip="127.0.0.1")
+    p.client = s.modbus
+    p._esperar = s.correr
+    return p
+
+
+mover = {"enable": True, "direction": "derecha", "freq_hz": 30,
+         "engine": {"version": 7, "motor": {"arranque": "I1", "paro": "I2"}}}
+sim = sim_con(mover)
 ident = sim.estado()["config_activa"]
+check(sim.V["RLACT"][lm.H_ID] == ident, "el COMMIT deja la copia en RLACT (RETAIN)")
 energizar(sim)
 check(sim.estado()["activo"] and sim.estado()["config_activa"] == ident, "tras energizar sigue la misma config v7")
-check(sim.motor() == "paro", "tras energizar la banda NO arranca sola")
+check(sim.V["LACT"][lm.H_ID] == ident and sim.V["LACT"][lm.H_CHK] == sim.V["RLACT"][lm.H_CHK],
+      "LACT (%R2000, la que relee el backend) se repone desde RLACT")
+check(sim.motor() == "paro" and sim.vfd_hz == 0, "tras energizar la banda NO arranca sola")
 sim.pulsar("I1")
 sim.correr(2)
-check(sim.motor() == "dir1" and sim.vfd_hz > 15, "I1 arranca con la config restaurada")
+check(sim.motor() == "dir1" and sim.vfd_hz > 15, "un solo I1 arranca con la config restaurada")
+sim.pulsar("I2")
+sim.correr(2)
+check(sim.motor() == "paro", "I2 la detiene: el paro restaurado funciona")
 
-sim = ls.SimV7()
-sim.correr(0.3)
-sim.cargar({"enable": False, "engine": {"version": 7, "salidas": {"Q3": "S1"}}})
+# Arranques AUTOMATICOS: tras energizar quedan en espera hasta que el operador presione I1.
+auto = {"enable": True, "direction": "derecha", "freq_hz": 30,
+        "engine": {"version": 7, "motor": {"arranque": "PRIMER_CICLO", "paro": "I2"}}}
+sim = sim_con(auto)
+energizar(sim)
+sim.correr(3)
+check(sim.estado()["activo"] and sim.motor() == "paro", "tras energizar PRIMER_CICLO NO arranca la banda")
+
+lista = {"enable": True, "direction": "derecha", "freq_hz": 30,
+         "engine": {"version": 7, "motor": {"arranque": "CFG_LISTA", "paro": "I2"}}}
+sim = sim_con(lista)
+sim.correr(2)
+check(sim.motor() == "dir1", "CFG_LISTA ('automatico') arranca cuando el VFD esta listo")
+energizar(sim)
+sim.correr(3)
+check(sim.motor() == "paro", "tras energizar CFG_LISTA NO arranca la banda")
+sim.pulsar("I1")
+sim.correr(2)
+check(sim.motor() == "dir1", "I1 la reanuda")
+
+seq = {"enable": False, "engine": {"version": 7, "secuencias": [{"id": "SQ1", "inicio": "PRIMER_CICLO",
+       "modo": "infinita", "pasos": [{"salidas": ["Q3"], "segundos": 1}, {"salidas": ["Q4"], "segundos": 1}]}]}}
+sim = sim_con(seq)
+check(bool(sim.salidas() & {"Q3", "Q4"}), "secuencia con PRIMER_CICLO corre al cargar")
+energizar(sim)
+sim.correr(2)
+check(sim.estado()["activo"] and not sim.salidas(), "tras energizar la secuencia NO arranca sola")
+sim.pulsar("I1")
+sim.correr(1.5)
+check(bool(sim.salidas() & {"Q3", "Q4"}), "I1 la arranca")
+
+sim = sim_con({"enable": False, "engine": {"version": 7, "salidas": {"Q3": "S1"}}})
 energizar(sim)
 sim.poner(S1=True)
 sim.correr(0.5)
 check(sim.estado()["activo"] and sim.salidas() == {"Q3"}, "config sin movimiento: S1 sigue prendiendo Q3")
 sim.poner(S1=False)
 
-sim = ls.SimV7()
-sim.correr(0.3)
-sim.cargar(mover)
-plc = pb.BandaPLC(ip="127.0.0.1")
-plc.client = sim.modbus
-plc._esperar = sim.correr
-plc.descargar_v7()
+# Sensores, timers y contadores con la config restaurada.
+cont = {"enable": True, "direction": "derecha", "freq_hz": 25, "engine": {"version": 7,
+        "motor": {"arranque": "I1", "paro": "CT1"},
+        "contadores": [{"id": "CT1", "entrada": "S1", "reset": "I2", "preset": 2, "modo": "una_vez"}],
+        "timers": [{"id": "T1", "tipo": "PULSO", "entrada": "S2", "segundos": 1}], "salidas": {"Q5": "T1"}}}
+sim = sim_con(cont)
+energizar(sim)
+sim.pulsar("I1")
+sim.correr(1)
+check(sim.motor() == "dir1", "contador: arranca con I1 tras el corte")
+for _ in range(2):
+    sim.pulsar("S1", 0.3)
+    sim.correr(0.3)
+sim.correr(2)
+check(sim.motor() == "paro", "el contador restaurado detiene la banda a las 2 cajas")
+sim.pulsar("S2", 0.2)
+check(sim.salidas() == {"Q5"}, "el timer restaurado prende Q5 con S2")
+
+# El backend sigue hablando con el PLC tras el corte (LCMD vuelve a 0).
+sim = sim_con(mover)
+energizar(sim)
+otra = {"enable": True, "direction": "izquierda", "freq_hz": 20,
+        "engine": {"version": 7, "motor": {"arranque": "I1", "paro": "I2"}}}
+err, _ = sim.cargar(otra)
+check(err == 0 and sim.estado()["config_activa"] != ident, "tras el corte el backend carga otra config por Modbus")
+nueva = sim.estado()["config_activa"]
+energizar(sim)
+check(sim.estado()["config_activa"] == nueva, "y esa nueva es la que se conserva en el siguiente corte")
+
+sim = sim_con(mover)
+plc_de(sim).descargar_v7()
 sim.correr(0.5)
 energizar(sim)
 check(not sim.estado()["activo"], "tras UNLOAD y corte vuelve v5 (no revive el v7 descargado)")
 
+sim = sim_con(mover)
+sim.V["RLACT"][lm.H_MOVE] += 1
+energizar(sim)
+check(not sim.estado()["activo"], "RLACT alterada (checksum no coincide): no se restaura, corre v5")
+check(sim.motor() == "paro", "y la banda sigue detenida")
+
 sim = ls.SimV7()
 sim.correr(0.3)
-sim.cargar(mover)
-sim.V["LACT"][lm.H_MOVE] += 1
 energizar(sim)
-check(not sim.estado()["activo"], "LACT alterada (checksum no coincide): no se restaura, corre v5")
+check(not sim.estado()["activo"] and sim.motor() == "paro", "PLC nuevo (RLACT en 0): arranca en v5, detenido")
 cerrar()
 
 print("\n" + "=" * 78)

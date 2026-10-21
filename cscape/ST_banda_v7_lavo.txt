@@ -58,9 +58,9 @@
 (*   LB[48]=sRise  LB[49]=contrib  LB[50]=sigRun              *)
 (*   LB[51]=sigStop  LB[52]=sigPause  LB[53]=sigD1            *)
 (*   LB[54]=sigD2  LB[55]=sigTog  LB[56]=FirstCycle  LB[57]=tdn*)
-(*   LB[58]=trun  LB[60..71]=RawIn  LB[72..83]=DebIn          *)
-(*   LB[84..99]=CPrev  LB[100..115]=TDn  LB[116..131]=TRun    *)
-(*   LB[132..147]=TPrevIn  LB[148..163]=CtDn                  *)
+(*   LB[58]=trun  LB[59]=PowerHold  LB[60..71]=RawIn          *)
+(*   LB[72..83]=DebIn  LB[84..99]=CPrev  LB[100..115]=TDn     *)
+(*   LB[116..131]=TRun  LB[132..147]=TPrevIn  LB[148..163]=CtDn*)
 (*   LB[164..179]=CtUpPrev  LB[180..195]=CtDnPrev             *)
 (*   LB[196..211]=MBit  LB[212..223]=OutReq                   *)
 (*   LB[224..235]=OutFinal  LB[236..237]=PlTimeout            *)
@@ -309,13 +309,14 @@ IF FST_SCN THEN
     LB[1] := Sys100ms ;
 
     (* v7: tras energizar se restaura la ultima config       *)
-    (* aplicada (LACT en %R) si cabecera y checksum siguen   *)
-    (* integros; si no, estado seguro: corre v5.             *)
+    (* aplicada: RLACT (RETAIN) -> LACT (GLOBAL, Modbus) y se *)
+    (* valida cabecera + checksum; si no, estado seguro: v5. *)
     LB[2] := TRUE ;
     LI[1] := LCMD[0] ;
     LI[0] := 0 ;
     LCK[0] := DINT#0 ;
     FOR ek := 0 TO 639 DO
+        LACT[ANY_TO_DINT(ek)] := RLACT[ANY_TO_DINT(ek)] ;
         IF ek <> 3 THEN
             LCK[0] := (LCK[0] * DINT#31 + ANY_TO_DINT(LACT[ANY_TO_DINT(ek)]) + DINT#32769) MOD DINT#32749 ;
         END_IF ;
@@ -331,6 +332,8 @@ IF FST_SCN THEN
     LI[2] := 0 ;
     LI[3] := 0 ;
     LB[4] := LI[4] <> 0 ;
+    (* Restaurada = en espera: arranques automaticos esperan I1 (§L2i) *)
+    LB[59] := LI[4] <> 0 ;
 
     BtnStartRising   := FALSE ;
     S1_Rising        := FALSE ;
@@ -554,10 +557,12 @@ IF LCMD[0] <> LI[1] THEN
             LI[4] := 0 ;
             LI[5] := 0 ;
             LACT[0] := 0 ;    (* no se restaura al energizar *)
+            RLACT[0] := 0 ;
             LI[0] := 0 ;
         5:
             IF LI[4] <> 0 THEN
                 LB[2] := TRUE ;
+                LB[59] := FALSE ;
             ELSE
                 LI[20] := 9 ;
             END_IF ;
@@ -699,9 +704,11 @@ IF LI[0] = 2 THEN
             (* Aplicar: copia atomica (un scan) y reinicio seguro. *)
             FOR ek := 0 TO 639 DO
                 LACT[ANY_TO_DINT(ek)] := LPEN[ANY_TO_DINT(ek)] ;
+                RLACT[ANY_TO_DINT(ek)] := LPEN[ANY_TO_DINT(ek)] ;    (* RETAIN *)
             END_FOR ;
             LI[4] := LPEN[1] ;
             LI[5] := LPEN[3] ;
+            LB[59] := FALSE ;
             LI[0] := 3 ;
             LB[17] := TRUE ;
             LB[2] := TRUE ;
@@ -3033,7 +3040,7 @@ LSIG[28] := (LI[14] = 1) ;
 LSIG[29] := (LI[14] = 2) ;
 LSIG[30] := (LI[13] = 2) ;
 LSIG[31] := (LI[22] < 50) ;
-LSIG[32] := CfgReady ;
+LSIG[32] := CfgReady AND NOT LB[59] ;
 LSIG[33] := LB[56] ;
 FOR ek := 0 TO 3 DO
     LSIG[ANY_TO_DINT(34 + ek)] := (LCMD[ANY_TO_DINT(3 + ek)] <> 0) ;
@@ -3810,7 +3817,9 @@ tVerde    := PhQ3 ;
 tAmarilla := PhQ4 ;
 tRoja     := PhQ5 ;
 
-LB[56] := LB[3] ;
+(* Tras energizar, PRIMER_CICLO espera a que el operador presione I1. *)
+LB[56] := (LB[3] AND NOT LB[59]) OR (LB[59] AND BtnStartRising AND CfgReady) ;
+IF BtnStartRising AND CfgReady THEN LB[59] := FALSE ; END_IF ;
 LB[2] := FALSE ;
 
 END_IF ;

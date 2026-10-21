@@ -126,7 +126,7 @@ check(r.status == "ok" and t["tipo"] == "TON" and t["segundos"] == 10 and motor(
 # ---------------------------------------------------------------------------
 escenario("5. Continuo y automatico")
 r = generar(TEXTO, acl=resp(**dict(TODAS, arranque=pb.AUTOMATICO, paro=pb.CONTINUO)))
-check(r.status == "ok" and motor(r)["motor"]["arranque"] == "PRIMER_CICLO", "automatico = al cargar el programa")
+check(r.status == "ok" and motor(r)["motor"]["arranque"] == "CFG_LISTA", "automatico = CFG_LISTA (arranca con el VFD listo)")
 check("paro" not in motor(r)["motor"], "continuo: sin paro (queda el de emergencia I3)")
 
 # ---------------------------------------------------------------------------

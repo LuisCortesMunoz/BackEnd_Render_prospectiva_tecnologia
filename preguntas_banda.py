@@ -67,10 +67,14 @@ def pregunta(clave: str, excluir=()) -> dict:
 
 
 def senal(respuesta):
-    """'I1 (boton verde)' -> 'I1', 'S1 (sensor S1)' -> 'S1', automatico -> 'PRIMER_CICLO'."""
+    """'I1 (boton verde)' -> 'I1', 'S1 (sensor S1)' -> 'S1', automatico -> 'CFG_LISTA'.
+
+    Automatico = CFG_LISTA (arranca cuando el VFD queda listo tras cargar). No
+    PRIMER_CICLO: su pulso cae en el scan en que el VFD se reinicia y la banda
+    nunca arrancaba. Tras un corte de energia espera a que se presione I1."""
     t = _fold(respuesta)
     if "automatic" in t or "al cargar" in t:
-        return "PRIMER_CICLO"
+        return "CFG_LISTA"
     m = re.match(r"\s*([is]\d)\b", t)
     return m.group(1).upper() if m else None
 
