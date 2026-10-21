@@ -211,6 +211,21 @@ instrucciones ya aplicadas (`contexto.historial`). Con lógica activa:
 
 Pruebas: `python test_edicion_incremental.py` (y en el front `node tests/test_sesion_logica.mjs`).
 
+## Aclaraciones (respuestas a `needs_clarification`)
+
+La instrucción llega siempre tal cual la escribió el usuario. Las opciones que elige en las
+preguntas viajan aparte, en `aclaraciones` de `POST /generar-logica`:
+
+```json
+{"texto": "Mueve la banda hacia la derecha",
+ "aclaraciones": {"freq_hz": {"pregunta": "¿A qué frecuencia...?", "respuesta": "20 Hz"}}}
+```
+
+`aclaraciones.py` las normaliza (`frecuencia_hz` = `freq_hz`, `salida` = `output`...), se las da al
+modelo como datos ya decididos, quita las preguntas ya respondidas (equipo, entrada/salida del
+maletín, frecuencia, proceso) y en la banda v7 fija la frecuencia y la dirección elegidas en el JSON.
+Con aclaraciones no se reutiliza una memoria idéntica por texto (podría tener otros valores).
+
 ## Instalación local
 
 ```powershell

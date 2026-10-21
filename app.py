@@ -120,6 +120,7 @@ AGENT_MEMORY_ENABLED   = _AGENTS_OK and os.environ.get("AGENT_MEMORY_ENABLED", "
 # Import defensivo: si algo faltara, la generacion sigue con el flujo de siempre.
 import metricas_lavo
 import edicion_incremental
+import aclaraciones
 try:
     import memoria_validada
     import contexto_ramificado
@@ -2237,6 +2238,10 @@ class LogicaRequest(BaseModel):
     # Equipo elegido por el usuario: "maletin" | "banda". None = que lo deduzca
     # el backend a partir del texto (y pregunte si es ambiguo).
     device: Optional[str] = None
+    # Respuestas a las preguntas de aclaracion, APARTE del texto (que llega tal
+    # cual lo escribio el usuario): {parametro: respuesta | {pregunta, respuesta}}.
+    # Ver aclaraciones.py.
+    aclaraciones: Optional[dict] = None
 
 
 class LogicaResponse(BaseModel):
@@ -2580,7 +2585,7 @@ def _generar_logica_banda_motor(texto: str, req: "LogicaRequest") -> "LogicaResp
             messages.append({"role": "assistant", "content":
                              "Entendido. Devolvere el JSON completo de bloques de la banda."})
     messages.append({"role": "user", "content":
-                     f"{texto}\n\nResponde SOLO con el JSON del esquema indicado."})
+                     aclaraciones.mensaje_usuario(texto, _acl(req))})
 
     if AGENT_MEMORY_ENABLED:
         try:
@@ -2667,6 +2672,11 @@ def _generar_logica_banda_motor(texto: str, req: "LogicaRequest") -> "LogicaResp
     )
 
 
+def _acl(req) -> dict:
+    """Respuestas de aclaracion normalizadas de la peticion ({} si no hay)."""
+    return aclaraciones.normalizar(getattr(req, "aclaraciones", None))
+
+
 def _programa_previo_v7(req) -> Optional[dict]:
     """Programa anterior de la banda en formato v7 (si el editor manda uno)."""
     import banda_motor
@@ -2712,17 +2722,21 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     # Con logica activa la instruccion la EDITA: una memoria identica la
     # reemplazaria entera, asi que solo se reutiliza en logicas nuevas.
     prev = _programa_previo_v7(req)
+    acl = _acl(req)
     identica, similares = _buscar_memoria("banda", texto)
-    if identica is not None and prev is None:
+    # Con respuestas de aclaracion la memoria identica (mismo texto) puede tener
+    # otros valores: se genera con el modelo usando lo que eligio el usuario.
+    if identica is not None and prev is None and not acl:
         r = _reusar_banda_v7(texto, identica)
         if r is not None:
             return r
 
     if CONTEXTO_RAMIFICADO:
-        if _pide_ampliar_catalogo(texto):
+        if _pide_ampliar_catalogo(texto) or aclaraciones.autoriza_catalogo(acl):
             return _respuesta_ampliar_catalogo(texto)
         sistema, plan = contexto_ramificado.mensajes_sistema_banda_v7(SYSTEM_PROMPT_BANDA_V7, texto, similares)
-        if plan["proceso_desconocido"]:
+        # Si ya respondio como seguir con ese proceso, no se vuelve a preguntar.
+        if plan["proceso_desconocido"] and "proceso" not in acl:
             log.info(f"/generar-logica banda v7: proceso fuera del catalogo ({plan['proceso_desconocido']})")
             metricas_lavo.poner("contexto", ["catalogo_sin_proceso"])
             return LogicaResponse(
@@ -2746,7 +2760,7 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         previas = "\n".join(f"- {p}" for p in historial[-4:])
         messages.append({"role": "user", "content": f"Peticiones anteriores del usuario:\n{previas}"})
         messages.append({"role": "assistant", "content": "Entendido. Devolvere el JSON completo del motor v7."})
-    messages.append({"role": "user", "content": f"{texto}\n\nResponde SOLO con el JSON del esquema indicado."})
+    messages.append({"role": "user", "content": aclaraciones.mensaje_usuario(texto, _acl(req))})
 
     # Edicion: si la version nueva pierde piezas que no se pidio quitar, se le
     # pide UNA vez que las restaure; si insiste, queda como alternativa que el
@@ -2768,7 +2782,16 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
             log.error(f"Error generar-logica banda v7 (modelo): {e}")
             raise HTTPException(500, str(e))
 
-        preguntas = [q for q in (candidato.get("preguntas") or []) if isinstance(q, dict)]
+        pedidas = [q for q in (candidato.get("preguntas") or []) if isinstance(q, dict)]
+        preguntas = aclaraciones.sin_respondidas(pedidas, acl)
+        if pedidas and not preguntas and intento < intentos:
+            # Volvio a preguntar algo que el usuario ya respondio.
+            msgs_iter = list(messages)
+            msgs_iter.append({"role": "assistant", "content": json.dumps(candidato, ensure_ascii=False)})
+            msgs_iter.append({"role": "user", "content": (
+                "Esas preguntas ya estan respondidas en los datos aclarados. Genera la configuracion "
+                "completa con esos valores y deja \"preguntas\" vacio. Devuelve el JSON COMPLETO.")})
+            continue
         if preguntas:
             log.info("/generar-logica banda v7: el modelo pide aclaracion")
             return LogicaResponse(
@@ -2779,6 +2802,7 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                 assumptions=[], analysis={"equipo": "banda", "motor_v7": True, "contexto": plan,
                                           "analisis": candidato.get("analisis") or {}})
         try:
+            candidato = aclaraciones.aplicar_banda_v7(candidato, acl)
             cand = lavo_motor.cfg_desde_respuesta(candidato)
             cand["respuesta_llm"] = {k: v for k, v in candidato.items()
                                      if k not in ("analisis", "preguntas", "no_soportado")}
@@ -3008,7 +3032,7 @@ def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
                              "Entendido. Leere la nueva instruccion completa y devolvere la "
                              "intencion estructurada de la banda."})
     messages.append({"role": "user", "content":
-                     f"{texto}\n\nResponde SOLO con el JSON del esquema indicado."})
+                     aclaraciones.mensaje_usuario(texto, _acl(req))})
 
     # Memoria de feedback: ejemplos de la BANDA que el usuario valido con 👍 o
     # corrigio. Solo ejemplos de la banda; la cobertura y las validaciones
@@ -3165,7 +3189,7 @@ async def _generar_logica(req: LogicaRequest):
     #   4) si es ambiguo -> se pregunta (no se adivina).
     equipo = "maletin"
     if _ROUTER_OK:
-        device_pedido = req.device
+        device_pedido = req.device or aclaraciones.equipo(_acl(req))
         if not device_pedido and es_modificacion:
             meta_prev = req.contexto.programa_anterior.get("metadata", {}) or {}
             prev = meta_prev.get("engine_config") or {}
@@ -3195,7 +3219,7 @@ async def _generar_logica(req: LogicaRequest):
                             (req.contexto.programa_anterior.get("metadata", {}) or {}).get("engine_config"))
     identica_m, similares_m = _buscar_memoria("maletin", texto)
     # Con logica activa la instruccion la edita: no se reemplaza por una memoria.
-    if identica_m is not None and not tiene_cfg_previo:
+    if identica_m is not None and not tiene_cfg_previo and not _acl(req):
         r = _reusar_maletin(texto, identica_m, req)
         if r is not None:
             return r
@@ -3212,6 +3236,11 @@ async def _generar_logica(req: LogicaRequest):
             perfil_clarify = None
         if perfil_clarify:
             analisis = agent_clarify.analizar_peticion(texto, perfil_clarify, req.contexto)
+            # Lo que ya respondio el usuario (salida, entrada...) no se vuelve a preguntar.
+            acl_m = _acl(req)
+            analisis["missing"] = [m for m in analisis["missing"] if aclaraciones.clave(m) not in acl_m]
+            analisis["questions"] = aclaraciones.sin_respondidas(analisis["questions"], acl_m)
+            analisis["ambiguous"] = bool(analisis["missing"])
             if analisis["ambiguous"]:
                 log.info(f"/generar-logica needs_clarification — falta: {analisis['missing']}")
                 return LogicaResponse(
@@ -3264,7 +3293,7 @@ async def _generar_logica(req: LogicaRequest):
                              "Entendido. Aplicare la siguiente instruccion sobre ese "
                              "programa y devolvere el JSON completo actualizado."})
     messages.append({"role": "user", "content":
-                     f"{texto}\n\nResponde SOLO con el JSON del esquema indicado."})
+                     aclaraciones.mensaje_usuario(texto, _acl(req))})
 
     # Perfil activo (Fases 0/2/3/4). Cacheado por el registro.
     perfil_activo = None
