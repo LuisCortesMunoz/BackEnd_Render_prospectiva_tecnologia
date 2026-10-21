@@ -119,6 +119,7 @@ AGENT_MEMORY_ENABLED   = _AGENTS_OK and os.environ.get("AGENT_MEMORY_ENABLED", "
 # Nivel 3: catalogo de procesos industriales genericos (procesos_industriales/).
 # Import defensivo: si algo faltara, la generacion sigue con el flujo de siempre.
 import metricas_lavo
+import edicion_incremental
 try:
     import memoria_validada
     import contexto_ramificado
@@ -2708,8 +2709,11 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     import lavo_motor
     metricas_lavo.poner("dispositivo", "banda")
 
+    # Con logica activa la instruccion la EDITA: una memoria identica la
+    # reemplazaria entera, asi que solo se reutiliza en logicas nuevas.
+    prev = _programa_previo_v7(req)
     identica, similares = _buscar_memoria("banda", texto)
-    if identica is not None:
+    if identica is not None and prev is None:
         r = _reusar_banda_v7(texto, identica)
         if r is not None:
             return r
@@ -2733,20 +2737,22 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     metricas_lavo.poner("procesos_usados", plan["procesos"])
 
     messages = list(sistema)
-    previas = "\n".join(f"- {p}" for p in ((req.contexto.historial if req.contexto else None) or [])[-4:])
-    prev = _programa_previo_v7(req)
-    if previas or prev:
-        partes = []
-        if previas:
-            partes.append(f"Peticiones anteriores del usuario:\n{previas}")
-        if prev:
-            partes.append("PROGRAMA ACTUAL DE LA BANDA (si la instruccion lo modifica, devuelve el JSON "
-                          "COMPLETO actualizado y conserva lo no pedido; si describe un proceso nuevo, "
-                          "reemplazalo):\n" + json.dumps(prev, ensure_ascii=False))
-        messages.append({"role": "user", "content": "\n\n".join(partes)})
+    historial = (req.contexto.historial if req.contexto else None) or []
+    if prev:
+        messages += edicion_incremental.mensajes_edicion(
+            prev, historial, "LOGICA ACTIVA DE LA BANDA (motor v7).",
+            "Entendido. Editare esa logica y devolvere el JSON completo del motor v7.")
+    elif historial:
+        previas = "\n".join(f"- {p}" for p in historial[-4:])
+        messages.append({"role": "user", "content": f"Peticiones anteriores del usuario:\n{previas}"})
         messages.append({"role": "assistant", "content": "Entendido. Devolvere el JSON completo del motor v7."})
     messages.append({"role": "user", "content": f"{texto}\n\nResponde SOLO con el JSON del esquema indicado."})
 
+    # Edicion: si la version nueva pierde piezas que no se pidio quitar, se le
+    # pide UNA vez que las restaure; si insiste, queda como alternativa que el
+    # usuario debe confirmar (la logica activa no se reemplaza sola).
+    vigilar_perdidas = bool(prev) and not edicion_incremental.pide_quitar(texto)
+    perdidas, restauracion_pedida = [], False
     cfg, errores, candidato = None, [], {}
     intentos = max(1, MAX_AUTOREVISIONES)
     msgs_iter = list(messages)
@@ -2785,6 +2791,15 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                 logic={}, name="", outputs=0, device="banda", status="needs_clarification",
                 questions=[lavo_motor.pregunta_frecuencia()], assumptions=[],
                 analysis={"equipo": "banda", "motor_v7": True, "contexto": plan})
+        if not errores and vigilar_perdidas:
+            perdidas = edicion_incremental.piezas_perdidas("banda", prev, cand["respuesta_llm"])
+            if perdidas and intento < intentos and not restauracion_pedida:
+                log.warning(f"Banda v7 edicion {intento}/{intentos}: piezas perdidas {perdidas}")
+                restauracion_pedida = True    # una sola revision por esto
+                msgs_iter = list(messages)
+                msgs_iter.append({"role": "assistant", "content": json.dumps(candidato, ensure_ascii=False)})
+                msgs_iter.append({"role": "user", "content": edicion_incremental.mensaje_restaurar(perdidas)})
+                continue
         if not errores:
             cfg = cand
             break
@@ -2810,8 +2825,14 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                       + "; ".join(errores)],
             analysis={"equipo": "banda", "motor_v7": True, "compatibilidad": compat, "contexto": plan})
 
+    if perdidas:
+        analisis_llm = dict(analisis_llm or {})
+        analisis_llm["modificado"] = list(analisis_llm.get("modificado") or []) + [
+            edicion_incremental.aviso_perdidas(perdidas)]
+        analisis_llm["requiere_confirmacion"] = True
+
     return _respuesta_banda_v7(texto, cfg, analisis_llm, extra={
-        "fuente": "modelo", "contexto": plan,
+        "fuente": "modelo", "contexto": plan, "edicion": bool(prev),
         "memorias_referencia": [{"id": r["id"], "similitud": p} for p, r in similares]})
 
 
@@ -3170,8 +3191,11 @@ async def _generar_logica(req: LogicaRequest):
     # Nivel 1 (memoria validada del MALETIN): una memoria identica se reutiliza
     # sin llamar al modelo si vuelve a pasar la validacion; las similares se le
     # muestran al modelo mas abajo. Nunca se consultan memorias de la banda.
+    tiene_cfg_previo = bool(req.contexto and req.contexto.programa_anterior and
+                            (req.contexto.programa_anterior.get("metadata", {}) or {}).get("engine_config"))
     identica_m, similares_m = _buscar_memoria("maletin", texto)
-    if identica_m is not None:
+    # Con logica activa la instruccion la edita: no se reemplaza por una memoria.
+    if identica_m is not None and not tiene_cfg_previo:
         r = _reusar_maletin(texto, identica_m, req)
         if r is not None:
             return r
@@ -3208,8 +3232,6 @@ async def _generar_logica(req: LogicaRequest):
     # o, si no hay ninguna adecuada, los programas de codigos/ relacionados.
     # Solo en peticiones nuevas (sin engine_config previo): en una modificacion
     # manda el programa actual.
-    tiene_cfg_previo = bool(req.contexto and req.contexto.programa_anterior and
-                            (req.contexto.programa_anterior.get("metadata", {}) or {}).get("engine_config"))
     if CONTEXTO_RAMIFICADO and not tiene_cfg_previo:
         if similares_m:
             messages.append({"role": "system",
@@ -3222,22 +3244,22 @@ async def _generar_logica(req: LogicaRequest):
                 messages.append({"role": "system", "content": bloque})
                 contexto_usado.append("contexto_tecnico_local(" + ",".join(nombres) + ")")
     metricas_lavo.poner("contexto", contexto_usado)
+    # En modificaciones, el programa anterior trae su engine_config en la
+    # metadata: se lo damos al modelo para que "agregue/cambie" sobre el.
+    prev_cfg = None
     if req.contexto:
-        previas = "\n".join(f"- {p}" for p in (req.contexto.historial or [])[-4:])
-        # En modificaciones, el programa anterior trae su engine_config en la
-        # metadata: se lo damos al modelo para que "agregue/cambie" sobre el.
-        prev_cfg = None
+        historial = req.contexto.historial or []
         if req.contexto.programa_anterior:
             prev_cfg = (req.contexto.programa_anterior.get("metadata", {})
                         .get("engine_config"))
-        if previas or prev_cfg:
-            partes = []
-            if previas:
-                partes.append(f"Peticiones anteriores del usuario:\n{previas}")
-            if prev_cfg:
-                partes.append("PROGRAMA ACTUAL (modifica este JSON, conserva lo no pedido):\n"
-                              + json.dumps(prev_cfg, ensure_ascii=False))
-            messages.append({"role": "user", "content": "\n\n".join(partes)})
+        if prev_cfg:
+            messages += edicion_incremental.mensajes_edicion(
+                prev_cfg, historial, "LOGICA ACTIVA DEL MALETIN.",
+                "Entendido. Aplicare la siguiente instruccion sobre ese "
+                "programa y devolvere el JSON completo actualizado.")
+        elif historial:
+            previas = "\n".join(f"- {p}" for p in historial[-4:])
+            messages.append({"role": "user", "content": f"Peticiones anteriores del usuario:\n{previas}"})
             messages.append({"role": "assistant", "content":
                              "Entendido. Aplicare la siguiente instruccion sobre ese "
                              "programa y devolvere el JSON completo actualizado."})
@@ -3299,6 +3321,9 @@ async def _generar_logica(req: LogicaRequest):
     errores = []
     mejor_candidato = None   # ultimo candidato SINTACTICAMENTE valido (para fallback)
     mejor_avisos = []        # avisos/problemas semanticos asociados a cfg o al fallback
+    # Edicion: una version que pierde piezas no pedidas se revisa una vez.
+    vigilar_perdidas = bool(prev_cfg) and not edicion_incremental.pide_quitar(texto)
+    restauracion_pedida = False
     intentos = max(1, MAX_AUTOREVISIONES)
     msgs_iter = list(messages)
     for intento in range(1, intentos + 1):
@@ -3324,6 +3349,18 @@ async def _generar_logica(req: LogicaRequest):
                 avisos_semanticos  = sem.get("warnings", []) or []
             except Exception as e:
                 log.warning(f"Validacion semantica fallo (se ignora): {e}")
+
+        if not errores and not errores_semanticos and vigilar_perdidas:
+            perdidas = edicion_incremental.piezas_perdidas("maletin", prev_cfg, candidato)
+            if perdidas and intento < intentos and not restauracion_pedida:
+                log.warning(f"Edicion maletin {intento}/{intentos}: piezas perdidas {perdidas}")
+                restauracion_pedida = True
+                msgs_iter = list(messages)
+                msgs_iter.append({"role": "assistant", "content": json.dumps(candidato, ensure_ascii=False)})
+                msgs_iter.append({"role": "user", "content": edicion_incremental.mensaje_restaurar(perdidas)})
+                continue
+            if perdidas:
+                avisos_semanticos = list(avisos_semanticos) + [edicion_incremental.aviso_perdidas(perdidas)]
 
         if not errores and not errores_semanticos:
             cfg = candidato

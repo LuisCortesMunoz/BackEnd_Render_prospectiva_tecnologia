@@ -746,7 +746,7 @@ ctx = app.ContextoLadder(programa_anterior=r.program, historial=["enciende la ve
 respuestas[:] = [{"name": "verde I1 + roja S1", "banda": {"mover": False}, "salidas": {"Q3": "I1", "Q5": "S1"}}]
 r2 = generar("agrega que la roja encienda con S1", contexto=ctx)
 mensajes = " ".join(m["content"] for m in capturado["msgs"])
-check(r2.status == "ok" and "PROGRAMA ACTUAL" in mensajes and '"Q3": "I1"' in mensajes,
+check(r2.status == "ok" and "LOGICA ACTIVA DE LA BANDA" in mensajes and '"Q3": "I1"' in mensajes,
       "el programa anterior (v7) viaja al modelo para modificarlo")
 check(r2.logic["band"]["engine"]["salidas"] == {"Q3": "I1", "Q5": "S1"}, "conserva lo anterior y agrega lo nuevo")
 prog_v6 = {"metadata": {"engine_config": {"device": "banda", "band": {"enable": False, "engine": {

@@ -196,6 +196,21 @@ Sin repo y token la memoria cae a una carpeta local, que en Render **se borra en
 Pruebas: `python test_memoria_validada.py` (14 escenarios: guardar, reutilizar, similares, catálogo,
 separación banda/maletín, persistencia con GitHub simulado y comparación de rendimiento).
 
+## Edición incremental (lógica activa de la sesión)
+
+El front guarda una sola lógica activa por sesión (`assets/js/lavo-sesion.js`) y, en cada
+modificación, manda su JSON completo (`contexto.programa_anterior.metadata.engine_config`) y las
+instrucciones ya aplicadas (`contexto.historial`). Con lógica activa:
+
+- El modelo recibe ese JSON con reglas de edición: conservar lo no pedido y devolver el JSON completo
+  (`edicion_incremental.py`, maletín y banda v7).
+- Una memoria validada idéntica no reemplaza la lógica activa: solo se reutiliza en lógicas nuevas.
+- Si la versión nueva pierde piezas que la instrucción no pidió quitar (timers, eventos, pasos,
+  salidas...), se pide una revisión; si insiste, en la banda queda como alternativa por confirmar
+  (`needs_confirmation`) y en el maletín como aviso.
+
+Pruebas: `python test_edicion_incremental.py` (y en el front `node tests/test_sesion_logica.mjs`).
+
 ## Instalación local
 
 ```powershell
