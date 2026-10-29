@@ -2071,6 +2071,15 @@ async def lifespan(app: FastAPI):
     # 2. Cargar historial persistente de respuestas anteriores
     STATE["history"] = cargar_historial()
 
+    # 3. Puente local: abrir el editor en el navegador (lo pide el .bat con
+    #    LAVO_ABRIR_NAVEGADOR=1). El servidor acepta conexiones justo despues
+    #    de este yield, por eso se abre con un pequeno retraso.
+    if WEB_DIR and os.environ.get("LAVO_ABRIR_NAVEGADOR") == "1":
+        import webbrowser
+        url = os.environ.get("LAVO_URL_EDITOR", "http://localhost:8000/web/ladder.html")
+        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+        log.info(f"Editor: {url}")
+
     yield
     log.info("Servidor detenido.")
 
@@ -2090,6 +2099,7 @@ ALLOWED_ORIGINS = os.environ.get(
     "ALLOWED_ORIGINS",
     "http://localhost:3000,http://localhost:5173,"
     "http://127.0.0.1:5500,http://127.0.0.1:5173,"
+    "http://localhost:8000,http://127.0.0.1:8000,"
     "https://sebas30073007.github.io,"
     "https://luiscortesmunoz.github.io"
 ).split(",")
@@ -2134,12 +2144,16 @@ def _token_valido(token: str) -> bool:
 # en vez del 401 y el front no podria distinguir "sesion caducada".
 @app.middleware("http")
 async def proteger_con_password(request: Request, call_next):
+    ruta = request.url.path
+    # La carpeta del frontend no expone archivos ocultos (.git, .github...).
+    if ruta.startswith("/web/") and "/." in ruta:
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
     if not APP_PASSWORD:                       # proteccion desactivada
         return await call_next(request)
-    ruta = request.url.path
     # El preflight de CORS nunca lleva cabecera Authorization.
     if (request.method == "OPTIONS" or ruta in RUTAS_ABIERTAS
-            or ruta.startswith("/static") or ruta.startswith("/admin")):
+            or ruta.startswith("/static") or ruta.startswith("/admin")
+            or ruta == "/web" or ruta.startswith("/web/")):
         return await call_next(request)
 
     cabecera = request.headers.get("authorization", "")
@@ -2179,6 +2193,23 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ─── Editor web servido por el puente local ──────────────────────
+# En la PC del PLC, el mismo proceso que habla Modbus sirve el editor en
+# http://localhost:8000/web/ladder.html: un solo .bat, y la pagina y el puente
+# quedan en el mismo origen. Se busca la carpeta del frontend junto a la del
+# backend (o la que diga LAVO_WEB_DIR). En Render no existe y no se monta.
+def _carpeta_web():
+    pedida = os.environ.get("LAVO_WEB_DIR", "").strip()
+    aqui = os.path.dirname(os.path.abspath(__file__))
+    candidata = pedida or os.path.join(os.path.dirname(aqui), "Proyecto_Final_Prospectiva_Tecnologia")
+    return candidata if os.path.isfile(os.path.join(candidata, "ladder.html")) else ""
+
+
+WEB_DIR = _carpeta_web()
+if WEB_DIR:
+    app.mount("/web", StaticFiles(directory=WEB_DIR, html=True), name="web")
+    log.info(f"Editor web servido desde '{WEB_DIR}' en /web/ladder.html")
 
 # ─── Modelos Pydantic ─────────────────────────────────────────────
 

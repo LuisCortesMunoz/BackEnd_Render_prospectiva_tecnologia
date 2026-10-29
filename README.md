@@ -60,35 +60,37 @@ La carga al PLC se hace **localmente**, en la PC conectada a la red del PLC.
 Una página publicada en HTTPS (GitHub Pages) **no puede** contactar un servidor
 local por seguridad del navegador, así que el editor también se sirve en local.
 
-En la PC de la red del PLC, abre **dos** ventanas:
+En la PC de la red del PLC basta **un solo** archivo: doble clic en
+`iniciar_puente_PLC.bat` (esta carpeta).
 
-1. **Puente al PLC** — doble clic en `iniciar_puente_PLC.bat` (esta carpeta).
-   Levanta el backend en `http://localhost:8000`.
-   - No necesita `GROQ_API_KEY`: verás un WARNING amarillo de eso, es **normal**.
-     El puente queda listo cuando aparece `Uvicorn running on http://0.0.0.0:8000`.
+- Levanta el backend en `http://localhost:8000`, que habla Modbus con el PLC
+  **y además sirve el editor** en `http://localhost:8000/web/ladder.html`.
+  El navegador se abre solo cuando el servidor está listo.
+- El editor se toma de la carpeta del frontend que está **junto a esta**
+  (`../Proyecto_Final_Prospectiva_Tecnologia`) o de la variable `LAVO_WEB_DIR`.
+  Si no la encuentra, el .bat lo avisa y el puente sigue funcionando.
+- No necesita `GROQ_API_KEY`: verás un WARNING amarillo de eso, es **normal**.
 
-2. **Página local del editor** — doble clic en `iniciar_pagina_local.bat`
-   (en la carpeta del frontend `Proyecto_Final_Prospectiva_Tecnologia`).
-   Sirve la web y abre el navegador en `http://127.0.0.1:5500/ladder.html`.
-
-Desde esa pestaña local usa el botón **"Cargar al PLC"**. Funciona porque es
-`http://127.0.0.1` (origen permitido en CORS) hablando con el puente local, sin
-HTTPS de por medio.
+Desde esa pestaña usa **Cargar** o **Simular en lentes**. La página y el puente
+están en el mismo origen; para lo que va a Render (generar lógica, chat, espera
+de los lentes) `http://localhost:8000` y `http://127.0.0.1:8000` están en la
+lista de CORS por defecto. Si en Render defines `ALLOWED_ORIGINS`, agrégalos.
+`/web` no expone archivos ocultos (`.git`, `.github`) y queda fuera de la
+contraseña porque es la propia página la que la pide.
 
 > El **chat** y **generar lógica** puedes seguir usándolos desde la página
 > publicada (van a Render); el servir local es **solo** para cargar al PLC.
+> `iniciar_pagina_local.bat` (frontend, puerto 5500) sigue funcionando, pero
+> ya no hace falta.
 
-Para detener cualquiera de los dos: `Ctrl + C` en su ventana (se cierra sola).
+Para detenerlo: `Ctrl + C` en su ventana (se cierra sola).
 
-### Ejecución manual (sin los .bat)
+### Ejecución manual (sin el .bat)
 
 ```powershell
-# Puente al PLC (carpeta del backend)
+# Puente al PLC + editor (carpeta del backend)
 uvicorn app:app --host 0.0.0.0 --port 8000
-
-# Página local (carpeta del frontend)
-python -m http.server 5500 --bind 127.0.0.1
-# luego abre http://127.0.0.1:5500/ladder.html
+# luego abre http://localhost:8000/web/ladder.html
 ```
 
 ## Banda: motor configurable (ST v6)
