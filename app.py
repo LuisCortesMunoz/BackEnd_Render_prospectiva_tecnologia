@@ -122,6 +122,7 @@ import metricas_lavo
 import edicion_incremental
 import aclaraciones
 import preguntas_banda
+import enlace_lentes
 try:
     import memoria_validada
     import contexto_ramificado
@@ -4948,6 +4949,132 @@ def banda_v7_reset(req: BandaRequestBase):
 def banda_v7_descargar(req: BandaRequestBase):
     """UNLOAD: el PLC deja el motor v7 y vuelve a la logica v5."""
     return _mando_v7(req, lambda plc: plc.descargar_v7())
+
+
+# ─── Enlace lentes -> PC (simular en los lentes, cargar en el PLC) ──
+# La PC elige el PLC y espera; los lentes mandan la ultima configuracion
+# simulada y la PC la carga sola por el puente local (ver enlace_lentes.py).
+
+ENLACE = enlace_lentes.Enlace()
+ENLACE_ESPERA_MAX_S = 25        # long-poll: por debajo de los timeouts de Render
+
+
+class EnlaceAbrirRequest(BaseModel):
+    device: str
+    ip: Optional[str] = None
+    port: Optional[int] = None
+    nombre_plc: Optional[str] = None
+
+
+class EnlaceCanalRequest(BaseModel):
+    canal_id: str
+
+
+class EnlaceEnviarRequest(BaseModel):
+    device: str
+    logic: dict
+    nombre: Optional[str] = None
+    # Todas las frases de la conversacion que formaron el programa.
+    frases: Optional[List[str]] = None
+    origen: Optional[str] = "lentes"
+
+
+class EnlaceResultadoRequest(BaseModel):
+    canal_id: str
+    envio_id: str
+    ok: bool
+    mensaje: Optional[str] = ""
+
+
+def _enlace(fn, *args, **kw):
+    try:
+        return fn(*args, **kw)
+    except enlace_lentes.ErrorEnlace as e:
+        raise HTTPException(e.codigo, e.mensaje)
+
+
+def _errores_enlace(cfg: dict, device: str) -> list:
+    """Las mismas comprobaciones que /aplicar-plc, sin tocar el PLC: a la PC
+    solo le llega una configuracion que se puede cargar sin preguntar."""
+    destino = device_de_config(cfg)
+    if destino != device:
+        return [f"El programa es para {'la banda' if destino == 'banda' else 'el maletin'}, "
+                f"pero la PC espera un programa para {'la banda' if device == 'banda' else 'el maletin'}."]
+    if device == "banda":
+        try:
+            errores = _errores_banda(cfg)
+        except Exception as e:
+            return [f"No se pudo validar la configuracion de la banda: {e}"]
+        if errores:
+            return errores
+        try:
+            _guardia_confirmacion(cfg)
+        except HTTPException as e:
+            return [e.detail]
+        return []
+    if isinstance(cfg.get("band"), dict):
+        return ["El programa trae el bloque 'band' (banda) y va al PLC del maletin."]
+    try:
+        import plc_maestro
+    except Exception as e:
+        return [f"No se pudo cargar plc_maestro para validar: {e}"]
+    return plc_maestro.validar_config(cfg)
+
+
+@app.post("/enlace/abrir")
+def enlace_abrir(req: EnlaceAbrirRequest):
+    """PC: 'Simular en lentes'. Elige el equipo y el PLC destino y queda
+    esperando. Reemplaza cualquier espera anterior del mismo equipo."""
+    canal = _enlace(ENLACE.abrir, req.device, req.ip, req.port, req.nombre_plc)
+    log.info(f"/enlace/abrir {canal['device']} -> {canal['plc_texto']}")
+    return {"status": "ok", "canal": canal}
+
+
+@app.post("/enlace/cerrar")
+def enlace_cerrar(req: EnlaceCanalRequest):
+    """PC: deja de esperar (boton cancelar o cerrar la pagina)."""
+    return ENLACE.cerrar(req.canal_id)
+
+
+@app.get("/enlace/esperar")
+async def enlace_esperar(canal_id: str, timeout_s: int = ENLACE_ESPERA_MAX_S):
+    """PC: long-poll. Devuelve en cuanto llega un envio de los lentes
+    (status 'envio'), o 'sin_envio' al vencer el plazo (la PC vuelve a
+    preguntar), o 'cerrado' si otro canal lo reemplazo."""
+    limite = time.monotonic() + max(0, min(int(timeout_s), ENLACE_ESPERA_MAX_S))
+    while True:
+        r = ENLACE.recoger(canal_id)
+        if r["status"] != "sin_envio" or time.monotonic() >= limite:
+            return r
+        await asyncio.sleep(0.5)
+
+
+@app.post("/enlace/resultado")
+def enlace_resultado(req: EnlaceResultadoRequest):
+    """PC: informa si la carga automatica en el PLC salio bien."""
+    return _enlace(ENLACE.resultado, req.canal_id, req.envio_id, req.ok, req.mensaje)
+
+
+@app.get("/enlace/estado")
+def enlace_estado(device: Optional[str] = None):
+    """Lentes: que PC esta esperando y para que PLC."""
+    return ENLACE.estado(device)
+
+
+@app.post("/enlace/enviar")
+def enlace_enviar(req: EnlaceEnviarRequest):
+    """Lentes: manda la ultima configuracion simulada a la PC que espera ese
+    equipo. Se valida aqui; si no se puede cargar, los lentes ven el error."""
+    r = _enlace(ENLACE.enviar, req.device, req.logic, _errores_enlace,
+                nombre=req.nombre, frases=req.frases, origen=req.origen)
+    log.info(f"/enlace/enviar {r['device']} -> {r['plc']} (envio {r['envio_id']})")
+    return r
+
+
+@app.get("/enlace/envio/{envio_id}")
+def enlace_envio(envio_id: str):
+    """Lentes: como va un envio (pendiente, entregado, cargado o error)."""
+    return _enlace(ENLACE.consultar_envio, envio_id)
 
 
 @app.post("/feedback")

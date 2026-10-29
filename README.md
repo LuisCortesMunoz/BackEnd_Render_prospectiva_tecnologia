@@ -232,6 +232,35 @@ dirección, frecuencia y paro, con opciones del hardware real (`lavo_motor.HW_BA
 ofrece). Con todo respondido el JSON se arma sin llamar al modelo, sobre la lógica activa si la hay.
 Las preguntas del modelo que lleguen sin opciones se completan. Pruebas: `python test_preguntas_banda.py`.
 
+## Simular en lentes y cargar en el PLC (enlace lentes → PC)
+
+La PC del maletín o de la banda pulsa **Simular en lentes**, elige el PLC
+destino y queda esperando. En los lentes se simula como siempre; al pulsar
+**Enviar al sistema físico** la última configuración viaja a la PC, que la
+**carga automáticamente** en el PLC elegido, sin volver a preguntar.
+
+```
+PC     POST /enlace/abrir     {device, ip, port, nombre_plc}  -> canal
+PC     GET  /enlace/esperar   ?canal_id&timeout_s (long-poll ≤ 25 s, se repite)
+Lentes GET  /enlace/estado    ?device                         -> PC esperando
+Lentes POST /enlace/enviar    {device, logic, nombre, frases} -> envio_id
+PC     POST /enlace/resultado {canal_id, envio_id, ok, mensaje}
+Lentes GET  /enlace/envio/{envio_id}   -> pendiente | entregado | cargado | error
+PC     POST /enlace/cerrar    {canal_id}
+```
+
+- Render solo hace de **relevo** (`enlace_lentes.py`): quien escribe Modbus es
+  la página local de la PC, por el puente `localhost:8000`.
+- `/enlace/enviar` valida con las mismas reglas que `/aplicar-plc` (equipo
+  correcto, `plc_banda`/`plc_maestro`, alternativas sin confirmar): a la PC
+  solo llega lo que se puede cargar. Si no, los lentes ven el error.
+- Un canal por equipo; abrir otro del mismo equipo reemplaza al anterior.
+  Si hay varios envíos sin recoger, llega solo el último.
+- La PC se da por desconectada si deja de preguntar 75 s.
+- Estado en memoria del proceso (un solo worker): si Render reinicia, la PC
+  vuelve a abrir el canal. Protegido con `APP_PASSWORD` como el resto.
+- Pruebas: `python test_enlace_lentes.py`.
+
 ## Instalación local
 
 ```powershell
