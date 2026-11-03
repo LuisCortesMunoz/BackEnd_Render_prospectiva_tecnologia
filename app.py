@@ -135,6 +135,7 @@ import aclaraciones
 import preguntas_banda
 import etapas_orden
 import comportamiento
+import simulacion_etapas
 import enlace_lentes
 try:
     import memoria_validada
@@ -2864,8 +2865,19 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     historial = (req.contexto.historial if req.contexto else None) or []
     # "revisa", "no esta funcionando", "corrige"...: la logica activa falla.
     correccion = bool(prev) and edicion_incremental.es_correccion(texto)
+    # Acciones en orden pedidas en ESTA instruccion; en una correccion ("la
+    # secuencia esta mal") las de la instruccion original del historial.
+    etapas = etapas_orden.detectar(texto, "banda", acl)
+    etapas_de_historial = False
+    if correccion and not etapas["aplica"]:
+        etapas = etapas_orden.de_historial(historial, "banda", acl)
+        etapas_de_historial = etapas["aplica"]
     # Comportamientos que se pueden probar simulando el PLC (de toda la sesion).
     reqs = comportamiento.de_sesion(historial, texto, acl)
+    if etapas["aplica"]:
+        # En una secuencia el paro automatico es una etapa: lo prueba la
+        # simulacion de etapas (con sus tiempos), no la prueba suelta.
+        reqs = [r for r in reqs if r["tipo"] != "para_sola"]
     if comportamiento.paro_solo_sin_condicion(reqs, acl):
         log.info("/generar-logica banda v7: paro automatico sin condicion — se pregunta")
         return LogicaResponse(
@@ -2875,7 +2887,8 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     diagnostico = []
     if correccion:
         try:
-            diagnostico = comportamiento.verificar(lavo_motor.cfg_desde_respuesta(prev), reqs)
+            cfg_prev = lavo_motor.cfg_desde_respuesta(prev)
+            diagnostico = comportamiento.verificar(cfg_prev, reqs) + simulacion_etapas.verificar(cfg_prev, etapas)
         except (ValueError, TypeError) as e:
             diagnostico = [f"La logica vigente no se pudo simular: {e}"]
         log.info(f"/generar-logica banda v7: correccion — diagnostico {diagnostico}")
@@ -2906,7 +2919,6 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     # Varias acciones en orden ("primero A, cuando termine B, para cerrar C"):
     # las etapas se detectan aqui, se pregunta cuando termina la que no lo dice
     # y despues se comprueba que la secuencia las respete en ese orden.
-    etapas = etapas_orden.detectar(texto, "banda", acl)
     if etapas["aplica"]:
         faltan = etapas_orden.preguntas(etapas, "banda")
         if faltan:
@@ -3051,9 +3063,12 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                     questions=[edicion_incremental.pregunta_que_falla("banda")], assumptions=[],
                     analysis={"equipo": "banda", "motor_v7": True, "correccion": True,
                               "diagnostico": diagnostico})
-        if not errores and reqs:
-            # Validacion final: el programa simulado hace lo pedido.
+        if not errores and (reqs or (etapas["aplica"] and not orden)):
+            # Validacion final: el programa simulado hace lo pedido (requisitos
+            # sueltos y, si hay acciones en orden, la historia completa etapa por etapa).
             fallas = comportamiento.verificar(cand, reqs)
+            if etapas["aplica"] and not orden and not fallas:
+                fallas = simulacion_etapas.verificar(cand, etapas)
             if fallas:
                 sin_comportamiento = (cand, candidato)
                 metricas_lavo.sumar("errores_comportamiento", 1)
@@ -3086,7 +3101,7 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     if cfg is None and sin_comportamiento is not None:
         # La ultima revision ya no carga: vale el ultimo cargable (con su aviso).
         cfg, candidato = sin_comportamiento
-        fallas = comportamiento.verificar(cfg, reqs)
+        fallas = comportamiento.verificar(cfg, reqs) or simulacion_etapas.verificar(cfg, etapas)
     analisis_llm = candidato.get("analisis") if isinstance(candidato, dict) else {}
     if cfg is not None and fallas:
         # No se presenta como si funcionara: se dice que falla y se pide confirmar.
@@ -3129,7 +3144,8 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         "memorias_referencia": [{"id": r["id"], "similitud": p} for p, r in similares],
         # Validacion final por simulacion: que se probo y si cumple.
         "comportamiento": {"probado": [r["tipo"] + (f" {r['senal']}" if r.get("senal") else "")
-                                       for r in reqs], "fallas": fallas},
+                                       for r in reqs] + (["etapas (historia completa)"] if etapas["aplica"] else []),
+                           "fallas": fallas},
         "avisos": avisos_extra,
         **({"correccion": True, "diagnostico": diagnostico} if correccion else {})})
 

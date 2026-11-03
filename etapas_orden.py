@@ -83,13 +83,36 @@ _RX_INVIERTE = re.compile(r"\b(invier\w*|invert\w*|revers\w*|regres\w*|retroced\
                          r"cambi\w* (?:de |el )?(?:sentido|direccion))\b")
 _RX_TIEMPO = re.compile(rf"\b({_NUM_RX})\s*(s|seg|segs|segundos?|min|minutos?)\b")
 # "luego la verde durante 1": sin unidad, en una secuencia son segundos
-_RX_TIEMPO_SOLO = re.compile(rf"\b(?:durante|por) ({_NUM_RX})\b(?!\s*(?:[.,]\d|s\b|seg|min|hz|veces|%))")
+# ("durante un tiempo" NO es 1 s: los articulos un/una/uno no cuentan como numero aqui)
+_NUM_SOLO_RX = r"\d+(?:[.,]\d+)?|" + "|".join(sorted((k for k in _NUM if k not in ("un", "una", "uno")),
+                                                    key=len, reverse=True))
+_RX_TIEMPO_SOLO = re.compile(rf"\b(?:durante|por) ({_NUM_SOLO_RX})\b(?!\s*(?:[.,]\d|s\b|seg|min|hz|veces|%))")
+# Duracion que el usuario NO dio: se pregunta, no se inventa.
+_RX_TIEMPO_INDEFINIDO = re.compile(r"\b(?:durante |por )?(?:un|cierto|algun) (?:tiempo|rato|lapso|periodo)"
+                                   r"(?: determinado| definido| dado| fijo| corto| breve)?\b|"
+                                   r"\bunos (?:segundos|instantes|momentos)\b|\bun momento\b")
+# "se detiene 5 s antes de continuar avanzando": tras la pausa la banda REANUDA
+_RX_REANUDA = re.compile(r"\b(?:antes de|y (?:luego |despues )?(?:vuelve a|sigue|continua)|para (?:luego )?)"
+                         r"\s*(?:continuar|seguir|volver a|reanudar|avanzar|arrancar|moverse)?\s*"
+                         r"(?:avanz\w*|en marcha|moviendose|mover\w*|su marcha|su camino)?\b|"
+                         r"\b(?:reanud\w*|vuelve a avanzar|continua avanzando|sigue avanzando)\b")
+# "el contador se reinicia (a cero)"
+_RX_REINICIA_CONTADOR = re.compile(r"\b(?:contador|conteo|cuenta)\b[^.;]{0,25}\b(?:reinici\w*|resete\w*|"
+                                   r"vuelve a (?:cero|0)|a cero|en cero|borr\w*|limpi\w*)\b|"
+                                   r"\b(?:reinici\w*|resete\w*|borr\w*)\b[^.;]{0,10}\b(?:el )?(?:contador|conteo)\b")
+# "una vez que S2 acumula 3 detecciones", "al contar 5 cajas", "despues de 3 piezas"
+_RX_CONTEO_N = re.compile(rf"\b(?:acumul\w*|cuent\w*|cont\w*|llegue\w* a|complet\w*|despues de|al pasar|registr\w*)"
+                          rf"\s+(?:a\s+)?({_NUM_RX})\s+(?:detecciones|deteccion|cajas|piezas|objetos|productos|veces|"
+                          rf"pulsos|conteos)\b")
+_RX_INCREMENTA = re.compile(r"\b(?:se )?(?:increment\w*|aument\w*|sum\w*|cuent\w*)\b[^.;]{0,15}\b(?:un |el )?"
+                            r"(?:contador|conteo|uno)\b|\bcontador\b[^.;]{0,15}\b(?:increment\w*|aument\w*|sube)\b")
 # "... hasta que yo detenga todo": la etapa sigue hasta el paro (no hay que preguntar)
 _RX_HASTA_PARO = re.compile(r"\bhasta que (?:yo |lo |la |el usuario |se )?(?:detenga\w*|deteng\w+|pare|pares|apague|"
                             r"presione (?:el )?(?:boton de )?paro)\b(?: todo\b)?|\bhasta (?:el|un) paro\b")
 _RX_PARO_GENERAL = re.compile(r"\b(?:y )?con (?:el )?(?:boton )?(?:i ?\d|s ?\d|rojo|verde|paro)\b[^.]*?"
                               r"\b(?:se )?(?:detiene|detenga|para|apaga) todo\b")
-_SENAL = r"(?:el |la )?(?:sensor |boton )?(s ?1|s ?2|i ?[1245]|sensor (?:1|2|uno|dos)|primer sensor|segundo sensor|verde|rojo)"
+_SENAL = (r"(?:el |la )?(?:sensor |boton |pulsador |boton pulsador |interruptor )?"
+          r"(s ?1|s ?2|i ?[1245]|sensor (?:1|2|uno|dos)|primer sensor|segundo sensor|verde|rojo)")
 _RX_HASTA = re.compile(rf"\bhasta que {_SENAL}\b|\bhasta que (?:se )?(?:presione|pulse|oprima|detecte) {_SENAL}\b")
 _DISPARO = r"(?:detecte |detectar |presione |presionar |pulse |pulsar |se active |activarse |se activa )?"
 _RX_CUANDO = re.compile(rf"^\W*(?:y )?(?:cuando|en cuanto|al) {_DISPARO}{_SENAL}\b")
@@ -263,8 +286,17 @@ def detectar(texto: str, dispositivo: str = "banda", acl: dict = None) -> dict:
              "tiempos": _tiempos(frag),
              "hasta": _senal(next(g for g in hasta.groups() if g)) if hasta else None,
              "hasta_paro": bool(_RX_HASTA_PARO.search(frag)),
-             "entra_con": _senal(cuando.group(1)) if cuando else None}
-        if req or e["tiempos"] or e["hasta"]:       # sin contenido = preambulo ("Con I1:", "A 30 Hz,")
+             "entra_con": _senal(cuando.group(1)) if cuando else None,
+             # lo que la etapa dice ademas de sus salidas
+             "tiempo_indefinido": bool(_RX_TIEMPO_INDEFINIDO.search(frag)),
+             "reanuda": bool(_RX_REANUDA.search(frag)) and bool(_RX_PARO.search(limpio)),
+             "incrementa": bool(_RX_INCREMENTA.search(frag)),
+             "reinicia_contador": bool(_RX_REINICIA_CONTADOR.search(frag)),
+             "conteo": _conteo(frag)}
+        if e["tiempo_indefinido"] and not _RX_TIEMPO.search(frag):
+            e["tiempos"] = []                       # "durante un tiempo determinado": se pregunta
+        if req or e["tiempos"] or e["hasta"] or e["conteo"] or e["reinicia_contador"]:
+            # (sin contenido = preambulo: "Con I1:", "A 30 Hz,")
             if cierra and etapas:
                 grupo += 1
                 plumas_previas = []
@@ -287,6 +319,7 @@ def detectar(texto: str, dispositivo: str = "banda", acl: dict = None) -> dict:
                        "veces": int(_numero(veces_g.group(1))) if veces_g else None})
         for e in de_g:
             e["grupo"] = len(grupos)
+        _ciclo(grupos[-1], de_g)
         if dispositivo == "banda":
             _banda_sigue_en_marcha(de_g)
     aplica = len(etapas) >= 2 and (fuerte or (len(etapas) >= 3 and orden >= 2))
@@ -295,6 +328,33 @@ def detectar(texto: str, dispositivo: str = "banda", acl: dict = None) -> dict:
             "conteo": bool(_RX_CONTEO.search(t)),
             "repite": bool(_RX_REPITE.search(t)) or bool(veces),
             "veces": int(_numero(veces.group(1))) if veces else None}
+
+
+def _conteo(frag: str):
+    """{"n", "senal"} si la etapa empieza al llegar a un conteo."""
+    m = _RX_CONTEO_N.search(frag)
+    if not m:
+        return None
+    s = re.search(_SENAL, frag[max(0, m.start() - 40):m.end() + 25])
+    return {"n": int(_numero(m.group(1))), "senal": _senal(s.group(1)) if s else None}
+
+
+def _ciclo(g: dict, de_g: list):
+    """Conteo dentro de una secuencia: las etapas que se repiten con cada
+    objeto (desde la primera que espera un sensor) hasta la que empieza al
+    llegar a N. g["ciclo"] = [n...], g["conteo"] = {"n", "senal", "etapa"}."""
+    g["ciclo"], g["conteo"] = [], None
+    k = next((i for i, e in enumerate(de_g) if e.get("conteo")), None)
+    if k is None or k == 0:
+        return
+    c = dict(de_g[k]["conteo"])
+    if not c.get("senal"):
+        c["senal"] = next((e["entra_con"] for e in reversed(de_g[:k]) if e["entra_con"] in ("S1", "S2")), None)
+    ini = next((i for i in range(1, k) if de_g[i]["entra_con"] in ("S1", "S2")), None)
+    if ini is None:
+        ini = next((i for i in range(k) if de_g[i]["entra_con"] == c["senal"]), k - 1)
+    g["ciclo"] = [e["n"] for e in de_g[ini:k]]
+    g["conteo"] = {**c, "etapa": de_g[k]["n"]}
 
 
 def _grupo(etapas, e) -> list:
@@ -312,6 +372,8 @@ def _banda_sigue_en_marcha(etapas):
         mot = [r["accion"] for r in e["requisitos"] if r["tipo"] == "motor"]
         if mot:
             en_marcha = mot[0] in ("marcha", "invertir") and not (e["hasta"] or e["tiempos"])
+            # "se detiene 5 s antes de continuar avanzando": despues vuelve a avanzar
+            en_marcha = en_marcha or (mot[0] == "paro" and bool(e.get("reanuda")))
         elif en_marcha:
             e["requisitos"].append({"tipo": "motor", "accion": "marcha", "desc": "la banda sigue en marcha"})
 
@@ -352,6 +414,8 @@ def _solo_paro(e) -> bool:
 
 def _sabe_cuando_termina(etapas, i) -> bool:
     e = etapas[i]
+    if e.get("tiempo_indefinido") and not (e["tiempos"] or e["hasta"]):
+        return False                       # "durante un tiempo determinado": hay que preguntarlo
     if e["tiempos"] or e["hasta"] or e.get("hasta_paro") or _solo_plumas(e) or _solo_paro(e):
         return True
     sig = etapas[i + 1] if i + 1 < len(etapas) else None
@@ -368,6 +432,11 @@ def preguntas(det: dict, dispositivo: str = "banda") -> list:
         if _sabe_cuando_termina(etapas, i):
             continue
         ultima = e is _grupo(etapas, e)[-1]
+        if e.get("tiempo_indefinido"):
+            out.append({"id": _clave_fin(e["n"]), "campo": _clave_fin(e["n"]),
+                        "pregunta": f"No dijiste cuánto dura la etapa {e['n']} («{e['texto']}»). ¿Cuánto tiempo?",
+                        "opciones": ["2 s", "3 s", "5 s", "10 s", "15 s"]})
+            continue
         if dispositivo == "banda":
             ops = ["A los 3 s", "A los 5 s", "A los 10 s", "Cuando S1 detecte", "Cuando S2 detecte"]
             if ultima:
@@ -396,8 +465,18 @@ def bloque_modelo(det: dict, dispositivo: str = "banda") -> str:
             fin.append(f"termina cuando {e['hasta']} se activa")
         if e.get("hasta_paro"):
             fin.append("sigue hasta el paro")
-        if e["entra_con"]:
-            fin.append(f"empieza cuando {e['entra_con']} se activa (el paso anterior avanza con esa senal)")
+        if e["entra_con"] and e["n"] == det["etapas"][0]["n"]:
+            fin.append(f"la secuencia ARRANCA con {e['entra_con']} (inicio = {e['entra_con']})")
+        elif e["entra_con"]:
+            fin.append(f"empieza cuando {e['entra_con']} se activa (el paso anterior avanza con flanco de esa senal)")
+        if e.get("conteo"):
+            fin.append(f"empieza cuando {e['conteo'].get('senal') or 'el sensor'} llega a {e['conteo']['n']}")
+        if e.get("reanuda"):
+            fin.append("despues la banda VUELVE a avanzar")
+        if e.get("incrementa"):
+            fin.append("aqui cuenta el objeto")
+        if e.get("reinicia_contador"):
+            fin.append("el contador vuelve a cero")
         if not fin and _solo_plumas(e) and dispositivo == "banda":
             fin.append(f"sin tiempo dicho: {PLUMA_S} s de recorrido de la pluma")
         if not fin and _solo_paro(e):
@@ -410,7 +489,11 @@ def bloque_modelo(det: dict, dispositivo: str = "banda") -> str:
                   "lleva TODAS las salidas que deben estar encendidas en esa etapa (una luz que sigue encendida "
                   "se repite en los pasos siguientes) y \"marcha\" en cada paso en que la banda deba avanzar. "
                   "Si la secuencia mueve la banda, NO pongas motor.arranque.")
-        if det.get("conteo"):
+        reglas += _reglas_estado()
+        g = (det.get("grupos") or [{}])[0]
+        if g.get("conteo") and g.get("ciclo"):
+            reglas += _receta_ciclo(det, g)
+        elif det.get("conteo"):
             reglas += (" Hay un CONTEO: las etapas que se repiten con cada objeto hasta llegar a N forman un ciclo "
                        "dentro de la secuencia (el ultimo paso del ciclo vuelve con \"siguiente\" al primero) y un "
                        "contador CTn de esa senal (p. ej. S2, modo una_vez) sale del ciclo con \"alternativa\" "
@@ -429,6 +512,36 @@ def bloque_modelo(det: dict, dispositivo: str = "banda") -> str:
         reglas += " Se repite: mode loop." if det["repite"] else " Una sola vez: mode once."
     return ("ACCIONES EN ORDEN (el usuario pidio estas etapas, una despues de otra):\n"
             + "\n".join(filas) + "\n" + reglas)
+
+
+def _reglas_estado() -> str:
+    """Estados y transiciones: lo que suele salir mal en secuencias largas."""
+    return (" TRANSICIONES: \"cuando S1 detecta\" = el paso que espera ese objeto avanza con \"flanco\" de S1 (si "
+            "la banda debe moverse mientras espera, ese paso lleva \"marcha\"); \"durante N s\" / \"despues de "
+            "N s\" = \"tiempo\" con N. ESTADOS: la banda solo avanza en los pasos con \"marcha\": si debe seguir "
+            "avanzando entre etapas, cada paso lleva marcha; \"se detiene N s antes de continuar\" = un paso sin "
+            "marcha de N s y el siguiente con marcha. Una pluma que ya se movio se queda donde quedo (no repitas "
+            "su salida en pasos posteriores salvo que deba moverse otra vez). FIN: si la ultima etapa detiene la "
+            "banda, la secuencia termina ahi (modo una_vez) y la banda queda detenida hasta un nuevo inicio; no "
+            "pongas motor.arranque ni nada que la rearranque o repita la secuencia sola.")
+
+
+def _receta_ciclo(det: dict, g: dict) -> str:
+    c = g["conteo"]
+    ciclo = g["ciclo"]
+    fin_ciclo = ciclo[-1]
+    sig = next((e for e in det["etapas"] if e["n"] == c["etapa"]), None)
+    reset = "SQ1_FIN"
+    return (f" CICLO CON CONTEO: las etapas {ciclo[0]}..{fin_ciclo} se repiten con CADA objeto; la etapa "
+            f"{c['etapa']} empieza cuando {c.get('senal') or 'el sensor'} llega a {c['n']}. Receta (probada en el "
+            f"PLC): contador CT1 {{\"entrada\":\"{c.get('senal') or 'S2'}\",\"preset\":{c['n']},"
+            f"\"modo\":\"una_vez\",\"reset\":\"{reset}\"}}; los pasos del ciclo en orden; despues del ultimo "
+            f"paso de la etapa {fin_ciclo} un PASO DE DECISION {{\"salidas\":[],\"motor\":[],\"avanza\":"
+            f"\"tiempo\",\"segundos\":0,\"siguiente\":<paso donde empieza la etapa {ciclo[0]} (el que espera "
+            f"su objeto)>,\"alternativa\":{{\"senal\":\"CT1\",\"ir_a\":<primer paso de la etapa "
+            f"{c['etapa']}>}}}}. Asi el objeto {c['n']} tambien hace la etapa {fin_ciclo} y luego sigue la "
+            f"{c['etapa']}. No pongas la alternativa en un paso con acciones (las saltaria). El contador se "
+            f"reinicia con SQ1_FIN para que la siguiente corrida cuente desde cero. Modo una_vez.")
 
 
 def _fila(e) -> str:
@@ -461,7 +574,7 @@ def _bloque_varias(det: dict) -> str:
               "mismas luces, la que arranca despues detiene a la otra (su inicio va en el paro de la otra). Un "
               "movimiento de plumas al arrancar una secuencia puede ir como evento o timer de su senal en vez "
               "de paso. Cada paso lleva TODAS las salidas encendidas en esa etapa y \"marcha\" si la banda "
-              "avanza. Si una secuencia mueve la banda, NO pongas motor.arranque.")
+              "avanza. Si una secuencia mueve la banda, NO pongas motor.arranque." + _reglas_estado())
     return ("ACCIONES EN ORDEN (el usuario pidio estas secuencias):\n" + "\n\n".join(partes) + "\n" + reglas)
 
 
@@ -490,6 +603,11 @@ def _cadenas_banda(eng: dict) -> list:
             continue                                       # va encadenada detras de otra
         cadenas.append(lm._lista(s.get("pasos")) + (lm._lista(otra.get("pasos")) if otra else []))
     return cadenas
+
+
+def _es_decision(p) -> bool:
+    return (isinstance(p, dict) and isinstance(p.get("alternativa"), dict) and not p.get("salidas")
+            and not p.get("motor") and not float(p.get("segundos") or 0))
 
 
 def _cumple_banda(paso, req) -> bool:
@@ -526,7 +644,8 @@ def verificar(cfg: dict, det: dict, dispositivo: str = "banda") -> list:
         return _verificar_cadena(etapas, pasos, cumple, dispositivo)
 
     eng = ((cfg or {}).get("band") or {}).get("engine") or {}
-    cadenas = _cadenas_banda(eng)
+    # Los pasos de decision (0 s, sin acciones, con alternativa) no son etapas.
+    cadenas = [[p for p in c if not _es_decision(p)] for c in _cadenas_banda(eng)]
     if not cadenas:
         return [f"Pediste {len(etapas)} acciones en orden y el JSON no tiene una secuencia: arma SQ1 con un "
                 f"paso por etapa en ese orden (no las encadenes con eventos ni timers sueltos)."]
@@ -590,3 +709,30 @@ def mensaje_corregir(problemas: list) -> str:
 
 def aviso(problemas: list) -> str:
     return "El orden pedido no quedo exacto, revisalo antes de cargar: " + " ".join(problemas)
+
+
+# ── Etapas de la instruccion original (correcciones) ───────────────────────
+def separar_aclaraciones(texto: str):
+    """'texto [etapa_5_fin: 4 s; freq_hz: 20 Hz]' (como lo manda el front en el
+    historial) -> ('texto', {clave: {"pregunta": "", "respuesta": valor}})."""
+    m = re.search(r"\s*\[([^\[\]]*)\]\s*$", str(texto or ""))
+    if not m:
+        return str(texto or ""), {}
+    acl = {}
+    for par in m.group(1).split(";"):
+        if ":" in par:
+            k, v = par.split(":", 1)
+            if k.strip() and v.strip():
+                acl[k.strip()] = {"pregunta": "", "respuesta": v.strip()}
+    return texto[:m.start()], acl
+
+
+def de_historial(historial, dispositivo: str = "banda", acl: dict = None) -> dict:
+    """Las etapas de la instruccion MAS RECIENTE del historial que pidio acciones
+    en orden ("la secuencia esta mal" se revisa contra lo que se pidio)."""
+    for h in reversed(list(historial or [])):
+        texto, propias = separar_aclaraciones(h)
+        d = detectar(texto, dispositivo, {**propias, **(acl or {})})
+        if d["aplica"]:
+            return d
+    return detectar("", dispositivo, acl)
