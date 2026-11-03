@@ -49,7 +49,6 @@ REGLAS_EDICION = (
     "condiciones, memorias, eventos, secuencias y sus pasos, con sus ids y valores.\n"
     "- Agrega solo lo nuevo, cambia solo lo pedido y quita solo lo que se pide quitar (y lo que "
     "dependa unicamente de eso).\n"
-    "- \"Corrige\" o \"no funciona\" = ajusta la parte indicada de ESTA logica; no la rehagas.\n"
     "- Referencias como \"el ultimo tiempo\", \"ese timer\" o \"el segundo paso\": resuelvelas con las "
     "instrucciones anteriores (la mas reciente manda). Si hay varias piezas posibles y el contexto no "
     "decide, pregunta en \"preguntas\" en vez de adivinar.\n"
@@ -57,18 +56,113 @@ REGLAS_EDICION = (
 )
 
 
-def mensajes_edicion(prev: dict, historial, titulo: str, respuesta: str) -> list:
+def mensajes_edicion(prev: dict, historial, titulo: str, respuesta: str,
+                     correccion: bool = False, diagnostico=None) -> list:
     """Par user/assistant que antecede a la instruccion nueva cuando hay
     logica activa. `prev` es el JSON vigente en el formato que el modelo
-    devuelve (para que lo edite en su propio esquema)."""
+    devuelve (para que lo edite en su propio esquema). Con `correccion` el
+    usuario dice que esa logica NO funciona: las reglas cambian (se permite
+    rehacer la parte que falla) y va el diagnostico de la simulacion."""
     partes = []
     cambios = _lista_cambios(historial)
     if cambios:
         partes.append("Instrucciones ya aplicadas en esta sesion (de la mas antigua a la mas reciente):\n"
                       + cambios)
-    partes.append(f"{titulo}\n{REGLAS_EDICION}\nJSON vigente:\n" + json.dumps(prev, ensure_ascii=False))
+    reglas = REGLAS_CORRECCION if correccion else REGLAS_EDICION
+    partes.append(f"{titulo}\n{reglas}\nJSON vigente:\n" + json.dumps(prev, ensure_ascii=False))
+    if correccion and diagnostico is not None:      # None = no hay simulador para este equipo
+        partes.append(bloque_diagnostico(diagnostico))
     return [{"role": "user", "content": "\n\n".join(partes)},
             {"role": "assistant", "content": respuesta}]
+
+
+# ---------------------------------------------------------------------------
+# Correcciones: "revisa", "checa", "no esta funcionando", "corrige"
+# ---------------------------------------------------------------------------
+# El usuario dice que la logica activa NO hace lo que pidio. Antes la regla
+# era "ajusta la parte indicada; no la rehagas" y, con la restauracion de
+# piezas, el modelo devolvia casi la misma solucion. Ahora: diagnostico,
+# rediseño de la parte que falla y prueba de que la version nueva cambio.
+_RX_CORRECCION = re.compile(
+    r"\b(revis\w*|chec\w*|cheque\w*|verifica\w*|corrig\w*|corrige\w*|arregl\w*|repar\w*|"
+    r"no (?:esta |estan )?(?:funcionando|funciona|funcionan|sirve|sirven|jala|jalan|hace|hizo|cumple|quedo|"
+    r"respeta|obedece|detiene|detuvo|para|paro|arranca|arranco|mueve|movio|avanza|enciende|prende|apaga|"
+    r"sube|baja|cuenta|cambia|cambio|se (?:detiene|detuvo|para|paro|mueve|movio|enciende|prende|apaga|"
+    r"apago|sube|baja|activa|repite|reinicia))|"
+    r"esta mal|estan mal|salio mal|quedo mal|mal hecho|falla\w*|incorrect\w*|"
+    r"sigue (?:igual|sin|mal|sin funcionar)|todavia no|aun no|tampoco|otra vez (?:no|mal)|"
+    r"no es (?:lo que|asi)|eso no)\b")
+
+
+def es_correccion(texto: str) -> bool:
+    """True si el usuario reporta que la logica activa no funciona como pidio."""
+    return bool(_RX_CORRECCION.search(_norm(texto)))
+
+
+REGLAS_CORRECCION = (
+    "El usuario dice que la logica activa NO funciona como pidio. Antes de responder:\n"
+    "1. DIAGNOSTICO: compara el JSON vigente con TODAS las instrucciones de la sesion (y con el diagnostico "
+    "de la simulacion, si lo hay) y encuentra que parte no cumple y por que.\n"
+    "2. REDISEÑA esa parte desde cero si hace falta: puedes cambiar el tipo de bloque, usar condiciones, "
+    "memorias, timers, contadores, eventos o secuencias distintos, cambiar campos del motor e ids. No "
+    "repitas la misma estructura con otro valor si la estructura es la que falla.\n"
+    "3. Conserva TAL CUAL lo que si funciona y no tiene que ver con la falla.\n"
+    "4. En \"analisis\" agrega \"diagnostico\": que estaba mal y que cambiaste para corregirlo (una o dos "
+    "frases). \"modificado\" sigue siendo SOLO para lo que no se pudo hacer como el usuario pidio.\n"
+    "5. Devolver el mismo JSON NO es una respuesta valida. Si de verdad no encuentras ninguna falla, pregunta "
+    "en \"preguntas\" que es lo que no funciona, con opciones concretas.\n"
+    "Devuelve el JSON COMPLETO corregido, nunca solo el cambio."
+)
+
+
+def bloque_diagnostico(diagnostico) -> str:
+    if diagnostico:
+        return ("DIAGNOSTICO AUTOMATICO (se simulo el programa del PLC con la logica vigente):\n- "
+                + "\n- ".join(diagnostico))
+    return ("DIAGNOSTICO AUTOMATICO: la simulacion no pudo probar la falla que reporta el usuario; "
+            "revisa la logica contra sus instrucciones.")
+
+
+def misma_logica(dispositivo: str, prev: dict, nuevo: dict) -> bool:
+    """La version nueva hace EXACTAMENTE lo mismo que la vigente (mismos
+    registros en el PLC para la banda; mismo JSON sin textos en el maletin)."""
+    if not isinstance(prev, dict) or not isinstance(nuevo, dict):
+        return False
+    if dispositivo == "banda":
+        try:
+            import lavo_motor as lm
+            a = lm.compilar_motor(lm.cfg_desde_respuesta(prev)["band"])
+            b = lm.compilar_motor(lm.cfg_desde_respuesta(nuevo)["band"])
+            return list(a) == list(b)
+        except Exception:
+            pass
+    quitar = ("analisis", "preguntas", "no_soportado", "name", "comment", "compatibilidad", "analysis")
+
+    def limpio(x):
+        if isinstance(x, dict):
+            return {k: limpio(v) for k, v in x.items() if k not in quitar}
+        if isinstance(x, list):
+            return [limpio(v) for v in x]
+        return x
+    return json.dumps(limpio(prev), sort_keys=True) == json.dumps(limpio(nuevo), sort_keys=True)
+
+
+def mensaje_misma_logica(diagnostico) -> str:
+    return ("Devolviste la MISMA logica que el usuario dice que no funciona (los registros del PLC son "
+            "identicos). Vuelve al diagnostico, cambia la parte que falla (otra estructura, no solo otro "
+            "valor) y conserva lo demas. " + (("Fallas encontradas al simular:\n- " + "\n- ".join(diagnostico))
+                                             if diagnostico else "")
+            + "\nDevuelve el JSON COMPLETO, sin texto extra.")
+
+
+def pregunta_que_falla(dispositivo: str = "banda") -> dict:
+    ops = (["No arranca", "No se detiene con el botón", "No se detiene sola", "Las luces no hacen lo pedido",
+            "Las plumas no se mueven bien", "El orden de las acciones no es el correcto"]
+           if dispositivo == "banda" else
+           ["La lámpara no enciende", "La lámpara no se apaga", "El tiempo no es el correcto",
+            "El contador no cuenta bien", "El orden de la secuencia no es el correcto"])
+    return {"id": "falla", "campo": "falla",
+            "pregunta": "No encontré qué cambiar en la lógica. ¿Qué es lo que no funciona?", "opciones": ops}
 
 
 # ---------------------------------------------------------------------------

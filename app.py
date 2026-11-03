@@ -134,6 +134,7 @@ import edicion_incremental
 import aclaraciones
 import preguntas_banda
 import etapas_orden
+import comportamiento
 import enlace_lentes
 try:
     import memoria_validada
@@ -809,6 +810,9 @@ GUIA RAPIDA
 "durante N s" -> PULSO o un paso de N s · "despues de N s" -> RETARDO o TON · "parpadea" -> INTERMITENTE ·
 "cuenta N y ..." -> contador · "cada N" -> ciclico · "mantener hasta" -> memoria · "N veces" -> modo repetir ·
 "siempre / hasta que se pare" -> infinita con paro · "si la entrada esta activa ve a..." -> alternativa.
+"se detenga SOLA / por si sola / automaticamente / sin que nadie la toque" -> el PARO (motor.paro, o el paro
+de la secuencia que la mueve) incluye una senal que NO es un boton: TON de BANDA_CORRIENDO (N s de marcha),
+S1/S2 o un contador CTn; si ya habia paro manual (I2) se conserva con una condicion OR (I2 OR T1).
 Luces una tras otra / banda que avanza, para y repite -> secuencia. Torreta y banda a la vez con ritmos
 distintos -> SQ1 y SQ2. Reglas sueltas (Q4 con I1 Y S2) -> condiciones + salidas.
 Si la banda se mueve y no dicen los Hz, frecuencia_hz = null (se preguntara). Si se mueve y la instruccion no
@@ -2857,6 +2861,25 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     # reemplazaria entera, asi que solo se reutiliza en logicas nuevas.
     prev = _programa_previo_v7(req)
     acl = _acl(req)
+    historial = (req.contexto.historial if req.contexto else None) or []
+    # "revisa", "no esta funcionando", "corrige"...: la logica activa falla.
+    correccion = bool(prev) and edicion_incremental.es_correccion(texto)
+    # Comportamientos que se pueden probar simulando el PLC (de toda la sesion).
+    reqs = comportamiento.de_sesion(historial, texto, acl)
+    if comportamiento.paro_solo_sin_condicion(reqs, acl):
+        log.info("/generar-logica banda v7: paro automatico sin condicion — se pregunta")
+        return LogicaResponse(
+            logic={}, name="", outputs=0, device="banda", status="needs_clarification",
+            questions=[comportamiento.pregunta_paro_solo()], assumptions=[],
+            analysis={"equipo": "banda", "motor_v7": True, "paro_automatico": True})
+    diagnostico = []
+    if correccion:
+        try:
+            diagnostico = comportamiento.verificar(lavo_motor.cfg_desde_respuesta(prev), reqs)
+        except (ValueError, TypeError) as e:
+            diagnostico = [f"La logica vigente no se pudo simular: {e}"]
+        log.info(f"/generar-logica banda v7: correccion — diagnostico {diagnostico}")
+        metricas_lavo.poner("correccion", True)
     identica, similares = _buscar_memoria("banda", texto)
     # Con respuestas de aclaracion la memoria identica (mismo texto) puede tener
     # otros valores: se genera con el modelo usando lo que eligio el usuario.
@@ -2915,24 +2938,31 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     metricas_lavo.poner("procesos_usados", plan["procesos"])
 
     messages = list(sistema)
-    historial = (req.contexto.historial if req.contexto else None) or []
     if prev:
         messages += edicion_incremental.mensajes_edicion(
             prev, historial, "LOGICA ACTIVA DE LA BANDA (motor v7).",
-            "Entendido. Editare esa logica y devolvere el JSON completo del motor v7.")
+            ("Entendido. Hare el diagnostico, rediseñare la parte que falla y devolvere el JSON completo."
+             if correccion else "Entendido. Editare esa logica y devolvere el JSON completo del motor v7."),
+            correccion=correccion, diagnostico=diagnostico)
     elif historial:
         previas = "\n".join(f"- {p}" for p in historial[-4:])
         messages.append({"role": "user", "content": f"Peticiones anteriores del usuario:\n{previas}"})
         messages.append({"role": "assistant", "content": "Entendido. Devolvere el JSON completo del motor v7."})
     if etapas["aplica"]:
         messages.append({"role": "system", "content": etapas_orden.bloque_modelo(etapas, "banda")})
+    if reqs:
+        messages.append({"role": "system", "content": comportamiento.bloque_modelo(reqs)})
     messages.append({"role": "user", "content": aclaraciones.mensaje_usuario(texto, _acl(req))})
 
     # Edicion: si la version nueva pierde piezas que no se pidio quitar, se le
     # pide UNA vez que las restaure; si insiste, queda como alternativa que el
-    # usuario debe confirmar (la logica activa no se reemplaza sola).
-    vigilar_perdidas = bool(prev) and not edicion_incremental.pide_quitar(texto)
+    # usuario debe confirmar (la logica activa no se reemplaza sola). En una
+    # CORRECCION rehacer la parte que falla puede quitar piezas: se avisa, no
+    # se obliga a restaurarlas (la simulacion vigila que lo demas siga igual).
+    vigilar_perdidas = bool(prev) and not edicion_incremental.pide_quitar(texto) and not correccion
     perdidas, restauracion_pedida = [], False
+    # Correccion: devolver la misma logica no vale (una revision y luego se pregunta).
+    misma_pedida, fallas, sin_comportamiento = False, [], None
     # Orden de las etapas: si no se respeta se pide corregir; si insiste, queda
     # como alternativa por confirmar (con el ultimo candidato cargable).
     orden, sin_orden = [], None
@@ -3005,6 +3035,37 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                     msgs_iter.append({"role": "assistant", "content": json.dumps(candidato, ensure_ascii=False)})
                     msgs_iter.append({"role": "user", "content": etapas_orden.mensaje_corregir(orden)})
                     continue
+        if not errores and correccion and edicion_incremental.misma_logica("banda", prev, cand["respuesta_llm"]):
+            if intento < intentos and not misma_pedida:
+                log.warning(f"Banda v7 correccion {intento}/{intentos}: devolvio la misma logica")
+                misma_pedida = True
+                metricas_lavo.sumar("misma_logica", 1)
+                msgs_iter = list(messages)
+                msgs_iter.append({"role": "assistant", "content": json.dumps(candidato, ensure_ascii=False)})
+                msgs_iter.append({"role": "user", "content": edicion_incremental.mensaje_misma_logica(diagnostico)})
+                continue
+            if "falla" not in acl:
+                # No encontro que cambiar: se pregunta que es lo que falla (con opciones).
+                return LogicaResponse(
+                    logic={}, name="", outputs=0, device="banda", status="needs_clarification",
+                    questions=[edicion_incremental.pregunta_que_falla("banda")], assumptions=[],
+                    analysis={"equipo": "banda", "motor_v7": True, "correccion": True,
+                              "diagnostico": diagnostico})
+        if not errores and reqs:
+            # Validacion final: el programa simulado hace lo pedido.
+            fallas = comportamiento.verificar(cand, reqs)
+            if fallas:
+                sin_comportamiento = (cand, candidato)
+                metricas_lavo.sumar("errores_comportamiento", 1)
+                if intento < intentos:
+                    log.warning(f"Banda v7 comportamiento {intento}/{intentos}: {fallas}")
+                    msgs_iter = list(messages)
+                    msgs_iter.append({"role": "assistant", "content": json.dumps(candidato, ensure_ascii=False)})
+                    msgs_iter.append({"role": "user", "content": (
+                        "Se simulo el programa del PLC con ese JSON y NO hace lo pedido:\n- " + "\n- ".join(fallas)
+                        + "\nCorrige la parte que causa esto (cambia la estructura si hace falta) sin perder lo "
+                          "demas. Devuelve el JSON COMPLETO, sin texto extra.")})
+                    continue
         if not errores:
             cfg = cand
             break
@@ -3022,7 +3083,27 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     if cfg is None and sin_orden is not None:
         # La revision del orden dejo un JSON que ya no carga: vale el anterior.
         (cfg, candidato), orden = sin_orden, etapas_orden.verificar(sin_orden[0], etapas, "banda")
+    if cfg is None and sin_comportamiento is not None:
+        # La ultima revision ya no carga: vale el ultimo cargable (con su aviso).
+        cfg, candidato = sin_comportamiento
+        fallas = comportamiento.verificar(cfg, reqs)
     analisis_llm = candidato.get("analisis") if isinstance(candidato, dict) else {}
+    if cfg is not None and fallas:
+        # No se presenta como si funcionara: se dice que falla y se pide confirmar.
+        analisis_llm = dict(analisis_llm or {})
+        analisis_llm["modificado"] = list(analisis_llm.get("modificado") or []) + [
+            "Al simular el PLC la logica todavia NO cumple: " + " ".join(fallas)]
+        analisis_llm["requiere_confirmacion"] = True
+    # Avisos informativos (no obligan a confirmar): diagnostico de la correccion
+    # y piezas que se reemplazaron para corregirla.
+    avisos_extra = []
+    if cfg is not None and correccion:
+        diag = (analisis_llm or {}).get("diagnostico") or "; ".join(diagnostico)
+        if diag:
+            avisos_extra.append(f"Diagnóstico: {diag}")
+        quitadas = edicion_incremental.piezas_perdidas("banda", prev, cfg.get("respuesta_llm") or {})
+        if quitadas:
+            avisos_extra.append("Para corregir la falla se reemplazaron: " + ", ".join(quitadas) + ".")
     if cfg is not None and orden:
         analisis_llm = dict(analisis_llm or {})
         analisis_llm["modificado"] = list(analisis_llm.get("modificado") or []) + [etapas_orden.aviso(orden)]
@@ -3045,7 +3126,12 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
 
     return _respuesta_banda_v7(texto, cfg, analisis_llm, extra={
         "fuente": "modelo", "contexto": plan, "edicion": bool(prev),
-        "memorias_referencia": [{"id": r["id"], "similitud": p} for p, r in similares]})
+        "memorias_referencia": [{"id": r["id"], "similitud": p} for p, r in similares],
+        # Validacion final por simulacion: que se probo y si cumple.
+        "comportamiento": {"probado": [r["tipo"] + (f" {r['senal']}" if r.get("senal") else "")
+                                       for r in reqs], "fallas": fallas},
+        "avisos": avisos_extra,
+        **({"correccion": True, "diagnostico": diagnostico} if correccion else {})})
 
 
 def _movimiento_desde_aclaraciones(texto: str, prev, acl: dict):
@@ -3112,6 +3198,7 @@ def _respuesta_banda_v7(texto: str, cfg: dict, analisis_llm: dict, extra: dict =
                 "compatibilidad": compat, "registros": registros,
                 "recursos": lavo_motor.recursos_usados(cfg["band"]["engine"]), **(extra or {})}
     warnings = avisos_logica_banda(cfg) + [f"No soportado: {x}" for x in compat["no_soportado"]]
+    warnings += list(analysis.pop("avisos", None) or [])
     if cfg.get("proceso"):
         pr = cfg["proceso"]
         analysis["proceso"] = pr
@@ -3512,10 +3599,13 @@ async def _generar_logica(req: LogicaRequest):
             prev_cfg = (req.contexto.programa_anterior.get("metadata", {})
                         .get("engine_config"))
         if prev_cfg:
+            correccion_m = edicion_incremental.es_correccion(texto)
             messages += edicion_incremental.mensajes_edicion(
                 prev_cfg, historial, "LOGICA ACTIVA DEL MALETIN.",
-                "Entendido. Aplicare la siguiente instruccion sobre ese "
-                "programa y devolvere el JSON completo actualizado.")
+                ("Entendido. Hare el diagnostico, rediseñare la parte que falla y devolvere el JSON completo."
+                 if correccion_m else "Entendido. Aplicare la siguiente instruccion sobre ese "
+                 "programa y devolvere el JSON completo actualizado."),
+                correccion=correccion_m)
         elif historial:
             previas = "\n".join(f"- {p}" for p in historial[-4:])
             messages.append({"role": "user", "content": f"Peticiones anteriores del usuario:\n{previas}"})
@@ -3583,8 +3673,11 @@ async def _generar_logica(req: LogicaRequest):
     mejor_candidato = None   # ultimo candidato SINTACTICAMENTE valido (para fallback)
     mejor_avisos = []        # avisos/problemas semanticos asociados a cfg o al fallback
     # Edicion: una version que pierde piezas no pedidas se revisa una vez.
-    vigilar_perdidas = bool(prev_cfg) and not edicion_incremental.pide_quitar(texto)
-    restauracion_pedida = False
+    # Correccion ("no funciona", "revisa"): se puede rehacer la parte que falla
+    # (sin restaurar piezas a la fuerza) y devolver la misma logica no vale.
+    correccion_m = bool(prev_cfg) and edicion_incremental.es_correccion(texto)
+    vigilar_perdidas = bool(prev_cfg) and not edicion_incremental.pide_quitar(texto) and not correccion_m
+    restauracion_pedida, misma_pedida = False, False
     intentos = max(1, MAX_AUTOREVISIONES)
     msgs_iter = list(messages)
     for intento in range(1, intentos + 1):
@@ -3622,6 +3715,22 @@ async def _generar_logica(req: LogicaRequest):
                 continue
             if perdidas:
                 avisos_semanticos = list(avisos_semanticos) + [edicion_incremental.aviso_perdidas(perdidas)]
+
+        if (not errores and not errores_semanticos and correccion_m
+                and edicion_incremental.misma_logica("maletin", prev_cfg, candidato)):
+            if intento < intentos and not misma_pedida:
+                log.warning(f"Correccion maletin {intento}/{intentos}: devolvio la misma logica")
+                misma_pedida = True
+                metricas_lavo.sumar("misma_logica", 1)
+                msgs_iter = list(messages)
+                msgs_iter.append({"role": "assistant", "content": json.dumps(candidato, ensure_ascii=False)})
+                msgs_iter.append({"role": "user", "content": edicion_incremental.mensaje_misma_logica([])})
+                continue
+            if "falla" not in _acl(req):
+                return LogicaResponse(
+                    logic={}, name="", outputs=0, device="maletin", status="needs_clarification",
+                    questions=[edicion_incremental.pregunta_que_falla("maletin")], assumptions=[],
+                    analysis={"equipo": "maletin", "correccion": True})
 
         # Orden de las etapas: como un problema semantico (se revisa y, si
         # insiste, el candidato se acepta con el aviso).
