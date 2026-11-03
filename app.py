@@ -29,6 +29,9 @@ log = logging.getLogger(__name__)
 
 MODELO        = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 MODELO_STT    = os.environ.get("GROQ_STT_MODEL",    "whisper-large-v3")
+# Temperatura de la generacion de logica. Baja = la misma instruccion da el
+# mismo JSON (con 1 una peticion de varias etapas salia bien y luego mal).
+TEMPERATURA   = float(os.environ.get("GROQ_TEMPERATURE", "0.2"))
 
 # gpt-oss-120b es un modelo razonador: sus tokens de razonamiento interno
 # cuentan dentro de max_tokens. Con 1300 el razonamiento agotaba el
@@ -122,6 +125,7 @@ import metricas_lavo
 import edicion_incremental
 import aclaraciones
 import preguntas_banda
+import etapas_orden
 import enlace_lentes
 try:
     import memoria_validada
@@ -333,8 +337,10 @@ se encienden EN ORDEN, una tras otra, con transiciones por TIEMPO automaticas
 salida: usa el bloque de nivel superior "sequence" y deja "outputs": [].
 
 Reconoce una secuencia cuando el usuario diga: secuencia, semaforo, "uno tras otro",
-"luego/despues se enciende otra", "primero ... despues ... despues ...", etapas con
-tiempos, "nunca al mismo tiempo", "se ejecuta una sola vez al presionar".
+"luego/despues se enciende otra", "primero ... despues ... despues ...", "cuando termine",
+"al final", "por ultimo", "para cerrar", etapas con tiempos, "nunca al mismo tiempo",
+"se ejecuta una sola vez al presionar". Un paso por etapa, en el MISMO orden del texto; una
+lampara que debe SEGUIR encendida en la etapa siguiente se repite en ese paso.
 
 Esquema de "sequence":
   {
@@ -764,7 +770,9 @@ BLOQUES (cada uno produce la senal de su id; define todo lo que uses)
   cuando = cualquier senal (S1, I1, CT1, C1...). banda acepta una accion o una lista (["avanzar","derecha"]);
   derecha / izquierda tambien la mueven. pausar = se detiene duracion_s y continua sola; detener = sin
   reanudar. Plumas y luces: el estado dura
-  hasta que OTRO evento pide lo contrario del mismo recurso; con duracion_s dura N s. El sistema arma timers,
+  hasta que OTRO evento pide lo contrario del mismo recurso; con duracion_s dura N s. Una accion con su propio
+  tiempo: {"pluma1":{"estado":"subir","duracion_s":3}}. detener + otras acciones con duracion_s: la banda NO
+  reanuda (el tiempo es de las otras). El sistema arma timers,
   resets y condiciones: no los armes a mano ni repitas esas salidas o campos del motor.
 - secuencias (hasta 2, SQ1 y SQ2, independientes; 16 pasos c/u):
   {"id":"SQ1","inicio":senal,"paro":senal|null,"reset":senal|null,"pausa":senal|null,
@@ -772,9 +780,22 @@ BLOQUES (cada uno produce la senal de su id; define todo lo que uses)
    "pasos":[{"salidas":["Q3"],"motor":["marcha"],"avanza":"tiempo"|"flanco"|"senal"|"tiempo_y_senal"|"senal_o_tiempo",
              "senal":senal|null,"segundos":N|null,"siguiente":null|N|"fin","alternativa":{"senal":S,"ir_a":N|"fin"}|null}]}
   Cada paso enciende SOLO sus salidas mientras esta activo (las del paso anterior se apagan). Varias salidas
-  juntas = varias en el mismo paso. motor del paso: marcha, paro, dir_1, dir_2, invertir (al entrar).
+  juntas = varias en el mismo paso; una luz que debe SEGUIR encendida se repite en los pasos siguientes.
+  motor del paso: marcha, paro, dir_1, dir_2, invertir. Mientras la secuencia corre, la banda SOLO avanza en
+  los pasos que llevan "marcha" (ponla en cada paso en que deba moverse). Al terminar, el motor vuelve a lo
+  que diga el bloque "motor": si la secuencia mueve la banda NO pongas motor.arranque (la volveria a arrancar
+  sola); para que siga avanzando al terminar usa motor.arranque = "SQ1_FIN".
   inicio por flanco; paro detiene; reset la reinicia; pausa congela el paso. exclusiva = manda sola sobre las
   salidas/motor que usa. "alternativa" = rama: si esa senal se activa, salta a ir_a.
+
+VARIAS ACCIONES EN ORDEN ("primero A, cuando termine B, para cerrar C", luego, despues, al final, por ultimo)
+- Es UNA secuencia: un paso por accion, en el MISMO orden del texto. Nunca eventos ni timers sueltos para
+  encadenarlas (los eventos no tienen orden). Acciones de la misma etapa ("baja la pluma y prende la roja") van
+  en el mismo paso.
+- "cuando termine" = el paso avanza al acabar su accion: "tiempo" si dura N s; "senal" si dice "hasta que S1
+  detecte". "cuando S2 detecte <accion>" = el paso ANTERIOR avanza con senal S2.
+- Pluma sin tiempo dicho: 2 s de recorrido (anotalo en conservado). inicio = la senal que diga el usuario (si no
+  dice, I1). modo una_vez salvo que pida repetir, N veces o siempre.
 
 GUIA RAPIDA
 "durante N s" -> PULSO o un paso de N s · "despues de N s" -> RETARDO o TON · "parpadea" -> INTERMITENTE ·
@@ -784,7 +805,7 @@ Luces una tras otra / banda que avanza, para y repite -> secuencia. Torreta y ba
 distintos -> SQ1 y SQ2. Reglas sueltas (Q4 con I1 Y S2) -> condiciones + salidas.
 Si la banda se mueve y no dicen los Hz, frecuencia_hz = null (se preguntara). Si se mueve y la instruccion no
 dice como arranca, motor.arranque = "I1" SIEMPRE (no uses SIEMPRE, PRIMER_CICLO, CFG_LISTA ni botones que no
-existen). Si piden Q10/Q11/Q12 (no existen aqui) usa Q3/Q4/Q5 en el mismo orden y reportalo.
+existen); si la mueve una secuencia, ese "I1" va en el inicio de la secuencia y NO en motor.arranque. Si piden Q10/Q11/Q12 (no existen aqui) usa Q3/Q4/Q5 en el mismo orden y reportalo.
 Plumas, luces o la banda que cambian cuando una senal ocurre (con o sin espera) -> eventos, nunca timers a mano:
 "se detiene N s y vuelve a avanzar / continua" -> banda pausar con duracion_s N · "detén la banda" (sin reanudar)
 -> banda detener · "cuando S1 detecte se mueve (a la derecha)" -> banda avanzar (derecha) · "espera N s y cambia el sentido" -> banda
@@ -815,6 +836,15 @@ EJEMPLOS
  "salidas":{"Q3":"BANDA_CORRIENDO"},
  "analisis":{"intencion":"ciclos de marcha y paro","compatibilidad":"total","conservado":["5 s / 3 s, 4 ciclos","verde en marcha"],
              "modificado":[],"simplificado":[],"no_soportado":[],"requiere_confirmacion":false},"preguntas":[]}
+
+"Con I1: primero la banda avanza a 30 Hz hasta que S1 detecte, cuando termine sube la pluma 1 y para cerrar prende la roja 5 s."
+{"name":"Avanza, pluma 1, roja","banda":{"mover":true,"direccion":"derecha","frecuencia_hz":30},
+ "secuencias":[{"id":"SQ1","inicio":"I1","modo":"una_vez","exclusiva":true,"pasos":[
+  {"motor":["marcha"],"avanza":"senal","senal":"S1"},{"salidas":["Q8"],"avanza":"tiempo","segundos":2},
+  {"salidas":["Q5"],"avanza":"tiempo","segundos":5}]}],
+ "analisis":{"intencion":"tres acciones en orden","compatibilidad":"total","conservado":["orden: banda hasta S1, pluma 1, roja 5 s",
+             "pluma 1: 2 s de recorrido (no se dijo)"],"modificado":[],"simplificado":[],"no_soportado":[],
+             "requiere_confirmacion":false},"preguntas":[]}
 
 "I1 arranca la banda a 25 Hz y S1 cuenta cajas; a la 3a caja para la banda y prende la roja; I2 reinicia la cuenta."
 {"name":"3 cajas y para","banda":{"mover":true,"direccion":"derecha","frecuencia_hz":25},
@@ -1932,7 +1962,7 @@ def _crear_completion(messages: list, max_tokens: int, con_formato: bool = True)
                    "habla con el PLC.",
         )
     kwargs = dict(messages=messages, model=MODELO,
-                  temperature=1, max_tokens=max_tokens)
+                  temperature=TEMPERATURA, max_tokens=max_tokens)
     if con_formato:
         kwargs["response_format"] = {"type": "json_object"}
     return groq_client.chat.completions.create(**kwargs)
@@ -2781,10 +2811,25 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
             if r is not None:
                 return r
 
+    # Varias acciones en orden ("primero A, cuando termine B, para cerrar C"):
+    # las etapas se detectan aqui, se pregunta cuando termina la que no lo dice
+    # y despues se comprueba que la secuencia las respete en ese orden.
+    etapas = etapas_orden.detectar(texto, "banda", acl)
+    if etapas["aplica"]:
+        faltan = etapas_orden.preguntas(etapas, "banda")
+        if faltan:
+            log.info(f"/generar-logica banda v7: etapas sin fin — {[q['campo'] for q in faltan]}")
+            return LogicaResponse(
+                logic={}, name="", outputs=0, device="banda", status="needs_clarification",
+                questions=faltan, assumptions=[],
+                analysis={"equipo": "banda", "motor_v7": True, "etapas": etapas["etapas"]})
+    metricas_lavo.poner("etapas_orden", len(etapas["etapas"]))
+
     if CONTEXTO_RAMIFICADO:
         if _pide_ampliar_catalogo(texto) or aclaraciones.autoriza_catalogo(acl):
             return _respuesta_ampliar_catalogo(texto)
-        sistema, plan = contexto_ramificado.mensajes_sistema_banda_v7(SYSTEM_PROMPT_BANDA_V7, texto, similares)
+        sistema, plan = contexto_ramificado.mensajes_sistema_banda_v7(
+            SYSTEM_PROMPT_BANDA_V7, texto, similares, en_orden=etapas["aplica"])
         # Si ya respondio como seguir con ese proceso, no se vuelve a preguntar.
         if plan["proceso_desconocido"] and "proceso" not in acl:
             log.info(f"/generar-logica banda v7: proceso fuera del catalogo ({plan['proceso_desconocido']})")
@@ -2810,6 +2855,8 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         previas = "\n".join(f"- {p}" for p in historial[-4:])
         messages.append({"role": "user", "content": f"Peticiones anteriores del usuario:\n{previas}"})
         messages.append({"role": "assistant", "content": "Entendido. Devolvere el JSON completo del motor v7."})
+    if etapas["aplica"]:
+        messages.append({"role": "system", "content": etapas_orden.bloque_modelo(etapas, "banda")})
     messages.append({"role": "user", "content": aclaraciones.mensaje_usuario(texto, _acl(req))})
 
     # Edicion: si la version nueva pierde piezas que no se pidio quitar, se le
@@ -2817,6 +2864,9 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     # usuario debe confirmar (la logica activa no se reemplaza sola).
     vigilar_perdidas = bool(prev) and not edicion_incremental.pide_quitar(texto)
     perdidas, restauracion_pedida = [], False
+    # Orden de las etapas: si no se respeta se pide corregir; si insiste, queda
+    # como alternativa por confirmar (con el ultimo candidato cargable).
+    orden, sin_orden = [], None
     cfg, errores, candidato = None, [], {}
     intentos = max(1, MAX_AUTOREVISIONES)
     msgs_iter = list(messages)
@@ -2875,6 +2925,17 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                 msgs_iter.append({"role": "assistant", "content": json.dumps(candidato, ensure_ascii=False)})
                 msgs_iter.append({"role": "user", "content": edicion_incremental.mensaje_restaurar(perdidas)})
                 continue
+        if not errores and etapas["aplica"]:
+            orden = etapas_orden.verificar(cand, etapas, "banda")
+            if orden:
+                sin_orden = (cand, candidato)
+                if intento < intentos:
+                    log.warning(f"Banda v7 orden {intento}/{intentos}: {orden}")
+                    metricas_lavo.sumar("errores_orden", 1)
+                    msgs_iter = list(messages)
+                    msgs_iter.append({"role": "assistant", "content": json.dumps(candidato, ensure_ascii=False)})
+                    msgs_iter.append({"role": "user", "content": etapas_orden.mensaje_corregir(orden)})
+                    continue
         if not errores:
             cfg = cand
             break
@@ -2889,7 +2950,14 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                   "alternativa segura mas cercana y explicala en 'analisis' con requiere_confirmacion = "
                   "true. Devuelve el JSON COMPLETO, sin texto extra.")})
 
+    if cfg is None and sin_orden is not None:
+        # La revision del orden dejo un JSON que ya no carga: vale el anterior.
+        (cfg, candidato), orden = sin_orden, etapas_orden.verificar(sin_orden[0], etapas, "banda")
     analisis_llm = candidato.get("analisis") if isinstance(candidato, dict) else {}
+    if cfg is not None and orden:
+        analisis_llm = dict(analisis_llm or {})
+        analisis_llm["modificado"] = list(analisis_llm.get("modificado") or []) + [etapas_orden.aviso(orden)]
+        analisis_llm["requiere_confirmacion"] = True
     if cfg is None:
         compat = lavo_motor.analizar_compatibilidad(texto, {"enable": False, "engine": {}}, analisis_llm)
         compat["no_soportado"] = compat["no_soportado"] + errores
@@ -3336,6 +3404,17 @@ async def _generar_logica(req: LogicaRequest):
     # esos ejemplos estan en el esquema VIEJO (logica_ladder/filas/XIC/OTE) y
     # contaminan el contrato engine-config (el modelo intenta imitarlos y rompe
     # el enclavamiento). El contexto va solo en SYSTEM_PROMPT_LOGICA.
+    # Varias acciones en orden: un paso de "sequence" por etapa (ver etapas_orden).
+    etapas = etapas_orden.detectar(texto, "maletin", _acl(req))
+    if etapas["aplica"]:
+        faltan = etapas_orden.preguntas(etapas, "maletin")
+        if faltan:
+            log.info(f"/generar-logica maletin: etapas sin duracion — {[q['campo'] for q in faltan]}")
+            return LogicaResponse(
+                logic={}, name="", outputs=0, device="maletin", status="needs_clarification",
+                questions=faltan, assumptions=[], analysis={"equipo": "maletin", "etapas": etapas["etapas"]})
+        metricas_lavo.poner("etapas_orden", len(etapas["etapas"]))
+
     messages = [{"role": "system", "content": SYSTEM_PROMPT_LOGICA}]
     contexto_usado = ["prompt_maletin"]
     # Niveles 1 y 2 (contexto por ramificaciones): memorias validadas parecidas
@@ -3344,9 +3423,10 @@ async def _generar_logica(req: LogicaRequest):
     # manda el programa actual.
     if CONTEXTO_RAMIFICADO and not tiene_cfg_previo:
         if similares_m:
-            messages.append({"role": "system",
-                             "content": contexto_ramificado.bloque_memorias("maletin", similares_m)})
-            contexto_usado.append(f"memorias_validadas({len(similares_m)})")
+            refs = similares_m[:1] if etapas["aplica"] else similares_m
+            messages.append({"role": "system", "content": contexto_ramificado.bloque_memorias(
+                "maletin", refs, solo_referencia=etapas["aplica"])})
+            contexto_usado.append(f"memorias_validadas({len(refs)})")
             metricas_lavo.poner("memorias_usadas", [r["id"] for _, r in similares_m])
         else:
             bloque, nombres = contexto_ramificado.contexto_tecnico_maletin(texto)
@@ -3373,6 +3453,8 @@ async def _generar_logica(req: LogicaRequest):
             messages.append({"role": "assistant", "content":
                              "Entendido. Aplicare la siguiente instruccion sobre ese "
                              "programa y devolvere el JSON completo actualizado."})
+    if etapas["aplica"]:
+        messages.append({"role": "system", "content": etapas_orden.bloque_modelo(etapas, "maletin")})
     messages.append({"role": "user", "content":
                      aclaraciones.mensaje_usuario(texto, _acl(req))})
 
@@ -3471,6 +3553,14 @@ async def _generar_logica(req: LogicaRequest):
                 continue
             if perdidas:
                 avisos_semanticos = list(avisos_semanticos) + [edicion_incremental.aviso_perdidas(perdidas)]
+
+        # Orden de las etapas: como un problema semantico (se revisa y, si
+        # insiste, el candidato se acepta con el aviso).
+        if not errores and not errores_semanticos and etapas["aplica"]:
+            errores_semanticos = etapas_orden.verificar(
+                normalizar_logica_config(json.loads(json.dumps(candidato))), etapas, "maletin")
+            if errores_semanticos:
+                metricas_lavo.sumar("errores_orden", 1)
 
         if not errores and not errores_semanticos:
             cfg = candidato

@@ -109,7 +109,8 @@ _ETIQUETAS = {
     "temporizador": r"\b\d+(\.\d+)? s\b|durante|despues de|tras \d|retardo|temporiz|timer|esper",
     "intermitente": r"parpade|intermit|destell",
     "contador": r"cuent|contar|conteo|contador|\bcajas?\b|\bpiezas?\b|\bpulsos?\b",
-    "secuencia": r"luego|despues|secuencia|tras otr|ciclo|repit|repet|en orden|paso",
+    "secuencia": r"luego|despues|secuencia|tras otr|ciclo|repit|repet|en orden|paso|primero|termine|"
+                 r"por ultimo|finalmente|al final|para cerrar|a continuacion|enseguida",
     "enclavamiento": r"enclav|se queda|se mantiene|mantener|retenc|latch|hasta que",
     "motor": r"\bbanda\b|avanz|muev|mover|motor|\bhz\b|hertz|arranc",
     "direccion": r"derecha|izquierda|invier|revers|sentido|direccion",

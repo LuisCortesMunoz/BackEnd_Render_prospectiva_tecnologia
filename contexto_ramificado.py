@@ -258,11 +258,18 @@ def contexto_tecnico_maletin(texto: str, maximo: int = 2) -> tuple:
 # ---------------------------------------------------------------------------
 # NIVEL 1: memorias en el prompt
 # ---------------------------------------------------------------------------
-def bloque_memorias(dispositivo: str, memorias: list) -> str:
-    """memorias: [(puntaje, registro completo)]."""
+def bloque_memorias(dispositivo: str, memorias: list, solo_referencia: bool = False) -> str:
+    """memorias: [(puntaje, registro completo)].
+
+    solo_referencia: la instruccion pide acciones en orden; la memoria muestra
+    bloques que ya funcionaron, pero no se copia su estructura."""
     if not memorias:
         return ""
-    if dispositivo == "banda":
+    if solo_referencia:
+        cab = ["MEMORIA VALIDADA DE REFERENCIA (solo para ver bloques que ya funcionaron en este equipo).",
+               "NO copies su estructura: la instruccion pide acciones EN ORDEN y manda la lista de etapas.",
+               "Las reglas de hardware y seguridad de arriba siguen mandando."]
+    elif dispositivo == "banda":
         cab = ["MEMORIAS VALIDADAS POR EL USUARIO (nivel 1: configuraciones que ya aprobo en ESTA banda).",
                "Si la instruccion es igual o parecida, reutiliza la MISMA estructura de bloques y cambia SOLO lo",
                "que la instruccion pida distinto (tiempos, conteos, Hz, entradas, salidas). No agregues lo que no se",
@@ -284,15 +291,27 @@ def bloque_memorias(dispositivo: str, memorias: list) -> str:
 # ---------------------------------------------------------------------------
 # CONSTRUCCION DEL PROMPT DE LA BANDA (v7)
 # ---------------------------------------------------------------------------
-def mensajes_sistema_banda_v7(prompt_v7: str, texto: str, memorias: list) -> tuple:
+def mensajes_sistema_banda_v7(prompt_v7: str, texto: str, memorias: list, en_orden: bool = False) -> tuple:
     """(mensajes de sistema, plan) segun la ramificacion de la banda.
+
+    en_orden = la instruccion trae varias acciones en orden (etapas_orden): la
+    guia y los ejemplos de secuencia van SIEMPRE, y de las memorias parecidas
+    solo la mejor, como referencia (una memoria "parecida" por palabras suele
+    tener otra estructura y el modelo la copiaba en vez de armar la secuencia).
 
     plan = {"contexto": [...partes usadas...], "procesos": [ids], "proceso_desconocido": str|None}"""
     partes = partir_prompt_v7(prompt_v7)
     msgs = [{"role": "system", "content": partes["nucleo"]}]
     plan = {"contexto": ["nucleo_v7"], "procesos": [], "proceso_desconocido": None}
 
-    if memorias:
+    if memorias and en_orden:
+        extra = [x for x in (partes["guia"], partes["ejemplos"]) if x]
+        if extra:
+            msgs.append({"role": "system", "content": "\n\n".join(extra)})
+            plan["contexto"].append("contexto_tecnico_local(guia+ejemplos)")
+        msgs.append({"role": "system", "content": bloque_memorias("banda", memorias[:1], solo_referencia=True)})
+        plan["contexto"].append("memorias_validadas(1, referencia)")
+    elif memorias:
         msgs.append({"role": "system", "content": bloque_memorias("banda", memorias)})
         plan["contexto"].append(f"memorias_validadas({len(memorias)})")
     else:

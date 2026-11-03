@@ -37,6 +37,7 @@ El backend cumple **dos roles** según dónde corra:
 | `GROQ_CHAT_MODEL` | Modelo del chat (default `llama-3.3-70b-versatile`). Usa solo modelos de **producción** de Groq: los de preview se retiran sin aviso. Si el configurado no existe, el chat responde con el primero disponible de `llama-3.3-70b-versatile`, `openai/gpt-oss-20b`, `llama-3.1-8b-instant` y lo avisa en el log. | No |
 | `GROQ_CHAT_MODEL_APRENDIZAJE` | Modelo **solo** del modo Aprendizaje (default `llama-3.3-70b-versatile`). Los demás modos del copiloto siguen con `GROQ_CHAT_MODEL`. | No |
 | `GROQ_STT_MODEL` | Modelo de voz (default `whisper-large-v3`) | No |
+| `GROQ_TEMPERATURE` | Temperatura de la generación de lógica (default `0.2`; antes era `1` y la misma instrucción daba JSON distintos) | No |
 | `ADMIN_TOKEN` | Protege los endpoints `/admin/*` | Recomendada |
 | `BANDA_MOTOR_CONFIGURABLE` | `1` = la banda usa el motor configurable (requiere el ST v6 en el PLC) | No (default `0`) |
 | `ALLOWED_ORIGINS` | Dominios del frontend (CORS) | No |
@@ -233,6 +234,34 @@ movimiento incompleto de la banda ("Quiero mover la banda") pregunta solo lo que
 dirección, frecuencia y paro, con opciones del hardware real (`lavo_motor.HW_BANDA`; I3 nunca se
 ofrece). Con todo respondido el JSON se arma sin llamar al modelo, sobre la lógica activa si la hay.
 Las preguntas del modelo que lleguen sin opciones se completan. Pruebas: `python test_preguntas_banda.py`.
+
+## Varias acciones en orden ("primero A, cuando termine B, para cerrar C")
+
+`etapas_orden.py` detecta, sin modelo, las instrucciones con marcadores de orden (primero, cuando termine,
+al terminar, a continuación, por último, finalmente, al final, para cerrar... o tres etapas con
+luego/después) y saca de cada etapa lo que nombra (banda, plumas, luces), su tiempo y la señal que la cierra
+("hasta que S1 detecte", "cuando S2 detecte..."). Banda v7 y maletín:
+
+- Si una etapa no dice cuándo termina, se pregunta con opciones (`etapa_N_fin`: "A los 5 s", "Cuando S1
+  detecte"...). Una pluma sin tiempo usa 2 s de recorrido.
+- El modelo recibe las etapas numeradas y la regla: **una secuencia, un paso por etapa, en ese orden**
+  (nunca eventos, que no tienen orden). Con memorias parecidas se siguen mandando la guía y los ejemplos de
+  secuencia, y solo la mejor memoria, como referencia.
+- El JSON compilado se verifica: secuencia presente, cada etapa en un paso posterior a la anterior, tiempos y
+  señales iguales (SQ2 encadenada con `SQ1_FIN` cuenta). Si falla, se pide corregir; si insiste, queda como
+  alternativa por confirmar (`needs_confirmation`) en la banda o como aviso en el maletín.
+
+Motor y secuencias (comprobado en el ST v7): mientras una secuencia corre, la banda solo avanza en los pasos
+con `marcha`; al terminar vuelve a lo que diga el bloque `motor`. Por eso, si la secuencia mueve la banda y
+`motor.arranque` es su misma señal de inicio, el arranque se quita al compilar (antes la banda **volvía a
+arrancar sola** al terminar la secuencia) y con otra señal se avisa. Para seguir avanzando al terminar:
+`motor.arranque = "SQ1_FIN"`.
+
+Eventos: `detener` con otras acciones y `duracion_s` ya no reanuda la banda (el tiempo es de las otras
+acciones; `detener` sola con `duracion_s` sigue siendo pausa) y cada acción puede llevar su propio tiempo:
+`{"pluma1": {"estado": "subir", "duracion_s": 3}}`.
+
+Pruebas: `python test_etapas_orden.py`.
 
 ## Simular en lentes y cargar en el PLC (enlace lentes → PC)
 

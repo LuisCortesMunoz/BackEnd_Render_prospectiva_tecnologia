@@ -883,6 +883,16 @@ def validar_motor(band, hw=HW_BANDA) -> tuple:
         errores.append("El motor tiene senales de arranque/paro/direccion pero la banda no se mueve (banda.mover=false).")
     if motor.get("paro_inversion_s") is not None:
         _decimas(motor["paro_inversion_s"], "motor.paro_inversion_s", errores, minimo=REV_TIME_MIN)
+    if not _vacio(motor.get("arranque")):
+        for s in seqs:
+            if not (isinstance(s, dict) and _mueve_motor(s)):
+                continue
+            sid = s.get("id")
+            if not any(_misma_senal(motor["arranque"], f"{sid}_{x}") for x in
+                       ["FIN", "CICLO"] + [f"PASO{i}" for i in range(1, N_STEPS + 1)]):
+                avisos.append(f"{sid} mueve la banda y el bloque motor tambien arranca con "
+                              f"{motor['arranque']}: al terminar {sid} el motor vuelve a seguir a "
+                              f"{motor['arranque']} y la banda puede volver a avanzar sola.")
 
     # --- seguridad: el paro de emergencia no se reasigna -----------------------
     emerg = {SENALES[EMERGENCIA], SENALES[EMERGENCIA] + NOT_OFFSET}
@@ -1645,6 +1655,30 @@ def _o_logico(eng, senales):
     return c["id"]
 
 
+def _separar_tiempos_propios(eventos) -> list:
+    """{"cuando": "S1", "acciones": {"banda": "detener", "pluma1": {"estado": "subir", "duracion_s": 3}}}
+    -> el evento con las acciones comunes + uno por cada accion con tiempo propio."""
+    out = []
+    for ev in _lista(eventos):
+        acciones = ev.get("acciones") if isinstance(ev, dict) else None
+        if not isinstance(acciones, dict) or not any(isinstance(v, dict) for v in acciones.values()):
+            out.append(ev)
+            continue
+        comunes = {r: v for r, v in acciones.items() if not isinstance(v, dict)}
+        if comunes:
+            out.append(dict(ev, acciones=comunes))
+        for r, v in acciones.items():
+            if not isinstance(v, dict):
+                continue
+            sub = {k: x for k, x in ev.items() if k != "acciones"}
+            for k in ("espera_s", "duracion_s"):
+                if k in v:
+                    sub[k] = v[k]
+            sub["acciones"] = {r: v.get("estado", v.get("accion"))}
+            out.append(sub)
+    return out
+
+
 def expandir_eventos(eventos, eng) -> dict:
     """eventos del LLM -> timers / memorias / condiciones / salidas en 'eng'.
 
@@ -1656,10 +1690,12 @@ def expandir_eventos(eventos, eng) -> dict:
     - duracion_s -> la salida dura N s (PULSO; tras un RETARDO si hay espera);
     - banda: pausar (requiere duracion_s: se detiene N s y continua), detener
       (sin reanudar; con duracion_s es pausar), avanzar, invertir, derecha,
-      izquierda -> campos del motor, con OR si varios eventos los usan."""
+      izquierda -> campos del motor, con OR si varios eventos los usan.
+    - una accion con su propio tiempo ({"pluma1": {"estado": "subir",
+      "duracion_s": 3}}) se arma como un evento aparte con la misma senal."""
     eng = copy.deepcopy(eng)
     evs = []
-    for i, ev in enumerate(_lista(eventos), 1):
+    for i, ev in enumerate(_separar_tiempos_propios(eventos), 1):
         tag = f"eventos[{i}]"
         if not isinstance(ev, dict):
             raise ValueError(f"{tag}: debe ser un objeto.")
@@ -1699,8 +1735,10 @@ def expandir_eventos(eventos, eng) -> dict:
         if espera < 0 or (dur is not None and dur <= 0):
             raise ValueError(f"{tag}: espera_s debe ser >= 0 y duracion_s > 0.")
         banda = acciones.get("banda") or []
-        if "detener" in banda and dur:
-            banda[banda.index("detener")] = "pausar"  # "detente N s" = pausa, no paro
+        if "detener" in banda and dur and len(acciones) == 1:
+            # "detente N s" = pausa, no paro. Con otras acciones el tiempo es de
+            # ellas ("detén la banda y sube la pluma 3 s"): la banda no reanuda.
+            banda[banda.index("detener")] = "pausar"
         if "pausar" in banda and not dur:
             raise ValueError(f"{tag}: pausar necesita duracion_s (cuanto tiempo se detiene); "
                              f"para detenerla sin reanudar usa 'detener'.")
@@ -1777,6 +1815,37 @@ def expandir_eventos(eventos, eng) -> dict:
     return eng
 
 
+def _mueve_motor(seq) -> bool:
+    return any(isinstance(p, dict) and not _vacio(p.get("motor")) for p in _lista(seq.get("pasos")))
+
+
+def _misma_senal(a, b) -> bool:
+    try:
+        return codigo_senal(a) == codigo_senal(b)
+    except (ValueError, TypeError):
+        return False
+
+
+def _motor_de_la_secuencia(eng) -> dict:
+    """Si una secuencia mueve la banda y motor.arranque es su misma senal de
+    inicio, el arranque sobra y es peligroso: el bloque motor queda enclavado
+    desde ese flanco y, al terminar la secuencia, la banda vuelve a avanzar
+    sola. Mientras la secuencia corre, la banda solo avanza en sus pasos con
+    "marcha"; para seguir al terminar se usa motor.arranque = "SQ1_FIN"."""
+    motor = eng.get("motor")
+    if not isinstance(motor, dict) or _vacio(motor.get("arranque")):
+        return eng
+    for s in _lista(eng.get("secuencias")):
+        if isinstance(s, dict) and _mueve_motor(s) and _misma_senal(motor["arranque"], s.get("inicio")):
+            eng = copy.deepcopy(eng)
+            eng["motor"].pop("arranque")
+            eng["motor"].pop("modo", None)
+            if not any(not _vacio(v) for k, v in eng["motor"].items() if k != "paro_inversion_s"):
+                eng.pop("motor")
+            break
+    return eng
+
+
 def cfg_desde_respuesta(resp) -> dict:
     """JSON del LLM (SYSTEM_PROMPT_BANDA_V7) -> engine_config de la banda."""
     if not isinstance(resp, dict):
@@ -1806,6 +1875,7 @@ def cfg_desde_respuesta(resp) -> dict:
         eng, proceso = plantillas_proceso.expandir_proceso(resp["proceso"], eng, mover)
     if resp.get("eventos") not in (None, [], {}):
         eng = expandir_eventos(resp["eventos"], eng)
+    eng = _motor_de_la_secuencia(eng)
     band["engine"] = normalizar_motor(eng)
     cfg = {"name": str(resp.get("name") or "Programa banda")[:80], "device": "banda",
            "band": band, "outputs": [],

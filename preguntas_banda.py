@@ -88,6 +88,7 @@ _RX_BANDA = re.compile(r"\b(banda|transportadora|cinta)\b")
 _RX_OTRO = re.compile(r"\b(torreta|luz|luces|lampara|verde|amarill\w*|roj[ao]s?|pluma\w*|cuent\w*|contador\w*|"
                       r"caja\w*|pieza\w*|producto\w*|secuencia\w*|paso\w*|luego|despues|repit\w*|veces|"
                       r"parpade\w*|pausa\w*|espera\w*|cuando|invierte|invertir|vuelve|proceso|"
+                      r"primero|termin\w*|final\w*|ultimo|cerrar|continuacion|enseguida|"
                       r"empaquet\w*|clasific\w*|llenad\w*|etiquet\w*)\b")
 _RX_HZ = re.compile(r"\b\d+(?:[.,]\d+)?\s*(?:hz|hertz)\b")
 _RX_DIR = re.compile(r"\b(derecha|izquierda)\b")
