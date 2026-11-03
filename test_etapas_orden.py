@@ -434,4 +434,51 @@ app.llamar_modelo_json = _llm
 check(st == 422 and "sin espacio" in det and len(llamadas) == 1,
       f"la auto-revision no repite la misma llamada ({st}, {len(llamadas)} llamadas)")
 
+escenario("13. Dos secuencias independientes en la misma instruccion")
+DOS = ("Quiero que al presionar I1 se encienda la luz amarilla durante 5 segundos, luego la roja durante 2 "
+       "segundos y luego la verde durante 1 segundo y se repita el ciclo. Quiero que cuando el sensor 2 "
+       "detecte, levante la pluma 1 y la pluma 2 y haga la secuencia de que se encienda la luz roja durante "
+       "3 segundos, luego la verde durante 1 y luego la amarilla durante 5 hasta que yo detenga todo. Con el "
+       "boton I2 se detiene todo.")
+d = eo.detectar(DOS, "banda", {})
+check(d["aplica"] and [g["etapas"] for g in d["grupos"]] == [[1, 2, 3], [4, 5, 6, 7]],
+      f"se separan en dos secuencias: {[g['etapas'] for g in d['grupos']]}")
+check(d["grupos"][0]["repite"] and not d["grupos"][1]["repite"], "el ciclo se repite solo en la primera")
+check(eo.preguntas(d, "banda") == [], f"no pregunta lo que ya se dijo: {eo.preguntas(d, 'banda')}")
+e6, e7 = d["etapas"][5], d["etapas"][6]
+check(e6["tiempos"] == [1.0], f"'durante 1' sin unidad = 1 s ({e6['tiempos']})")
+check(e7["hasta_paro"] and all(r["tipo"] != "motor" for r in e7["requisitos"]),
+      "'hasta que yo detenga todo' = sigue hasta el paro, no es un paso con la banda detenida")
+check(reqs(d["etapas"][3]) == [["Q8"], ["Q6"]], f"las dos plumas suben ({reqs(d['etapas'][3])})")
+check("SQ2" in eo.bloque_modelo(d, "banda") and "INDEPENDIENTES" in eo.bloque_modelo(d, "banda"),
+      "el modelo recibe una secuencia por bloque")
+dos_band = {"enable": False, "engine": {"version": 7,
+    "memorias": [{"id": "M1", "set": "S2", "reset": "I2", "prioridad": "reset"}],
+    "condiciones": [{"id": "C1", "op": "OR", "entradas": ["M1", "I2"], "flanco": "nivel"}],
+    "timers": [{"id": "T1", "tipo": "PULSO", "entrada": "S2", "reset": None, "segundos": 2.0}],
+    "salidas": {"Q6": "T1", "Q8": "T1"},
+    "secuencias": [
+        {"id": "SQ1", "inicio": "I1", "paro": "C1", "modo": "infinita", "pasos": [
+            {"salidas": ["Q4"], "avanza": "tiempo", "segundos": 5},
+            {"salidas": ["Q5"], "avanza": "tiempo", "segundos": 2},
+            {"salidas": ["Q3"], "avanza": "tiempo", "segundos": 1}]},
+        {"id": "SQ2", "inicio": "M1", "paro": "I2", "modo": "infinita", "pasos": [
+            {"salidas": ["Q5"], "avanza": "tiempo", "segundos": 3},
+            {"salidas": ["Q3"], "avanza": "tiempo", "segundos": 1},
+            {"salidas": ["Q4"], "avanza": "tiempo", "segundos": 5}]}]}}
+check(eo.verificar({"band": dos_band}, d, "banda") == [],
+      f"cada secuencia se compara con la suya: {eo.verificar({'band': dos_band}, d, 'banda')}")
+mal = copy.deepcopy(dos_band)
+mal["engine"]["secuencias"][1]["pasos"][0]["segundos"] = 9
+check(len(eo.verificar({"band": mal}, d, "banda")) == 1, "un tiempo mal en SQ2 se detecta")
+
+escenario("14. Regresar = invertir; 'cuando termine el ciclo' no parte la secuencia")
+d = eo.detectar("Primero avanza la banda a la derecha a 30 Hz, cuando el sensor 1 detecte se detiene "
+                "3 segundos y luego regresa a la izquierda", "banda", {})
+check(len(d["etapas"]) == 3 and d["etapas"][2]["requisitos"][0]["accion"] == "invertir",
+      "la tercera etapa (regresa) no se pierde")
+d = eo.detectar("Primero avanza la banda, cuando termine el ciclo sube la pluma 1 y al final prende la roja 5 s",
+                "banda", {})
+check(len(d["grupos"]) == 1, "una sola secuencia")
+
 print(f"\nTODAS LAS PRUEBAS DE ACCIONES EN ORDEN PASARON ({OK} comprobaciones).")

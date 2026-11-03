@@ -114,13 +114,6 @@ def equipo(acl: dict):
     return None
 
 
-def id_de_opcion(acl: dict, k: str):
-    """'Q10 (verde)' -> 'Q10' para entradas y salidas del maletin."""
-    v = (acl.get(k) or {}).get("respuesta")
-    m = re.match(r"\s*([A-Za-z]+\d+)", str(v or ""))
-    return m.group(1).upper() if m else None
-
-
 def aplicar_banda_v7(candidato: dict, acl: dict) -> dict:
     """Frecuencia y direccion elegidas mandan sobre lo que haya puesto el modelo
     (solo si la banda se mueve). Lo demas lo integra el modelo."""

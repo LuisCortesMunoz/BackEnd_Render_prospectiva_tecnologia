@@ -1122,11 +1122,6 @@ class BandaPLC:
         cambiar su configuracion."""
         self.comando_v7(lavo_motor.CMD_RESET)
 
-    def boton_app_v7(self, n, activo: bool):
-        if not 1 <= int(n) <= lavo_motor.N_APP:
-            raise ValueError(f"Boton de la app no valido: usa 1..{lavo_motor.N_APP}.")
-        self._w(R(lavo_motor.CMD_BASE + lavo_motor.C_APP + int(n) - 1), 1 if activo else 0)
-
     def paro_software_v7(self, activo: bool):
         self._w(R(lavo_motor.CMD_BASE + lavo_motor.C_SOFTSTOP), 1 if activo else 0)
 

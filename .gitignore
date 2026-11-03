@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .env
 memoria_validada/
+# historial local de respuestas y accesos directos de Windows
+respuestas/
+*.lnk

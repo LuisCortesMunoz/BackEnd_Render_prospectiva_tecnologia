@@ -6,8 +6,8 @@ rem ============================================================
 rem  Levanta el backend LOCAL que carga programas al PLC fisico
 rem  y que ademas sirve el editor web:
 rem      http://localhost:8000/web/ladder.html
-rem  Es lo UNICO que hay que abrir en la PC del PLC (ya no hace
-rem  falta iniciar_pagina_local.bat). Abre el navegador solo.
+rem  Es lo UNICO que hay que abrir en la PC del PLC.
+rem  Abre el navegador solo.
 rem  Debe correr en una PC de la MISMA red del PLC (Modbus TCP).
 rem  No necesita GROQ_API_KEY: el chat y la generacion viven en
 rem  Render. Esto sirve para "Cargar" y "Simular en lentes".

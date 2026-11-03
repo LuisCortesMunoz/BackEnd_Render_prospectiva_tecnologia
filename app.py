@@ -5036,36 +5036,6 @@ def banda_paros(req: BandaParosRequest):
             "avisos": avisos, "notas": notas, "estado": estado}
 
 
-class BandaBotonAppRequest(BandaRequestBase):
-    boton: int                          # 1 = APP1 · 2 = APP2
-    activo: bool = True
-
-
-@app.post("/banda/boton-app")
-def banda_boton_app(req: BandaBotonAppRequest):
-    """Botones virtuales de la app: APP1 / APP2 en el motor configurable v6,
-    APP1..APP4 en el motor LAVO v7. El programa los usa como cualquier otra
-    senal (arranque, paso, reset...)."""
-    plc, ip, port, notas = _banda_plc(req)
-    try:
-        if plc.version_programa() == 7:
-            plc.boton_app_v7(req.boton, req.activo)
-        else:
-            plc.verificar_st_v6()
-            plc.boton_app(req.boton, req.activo)
-        estado = _banda_estado(plc)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, f"Error con el PLC de la banda: {e}")
-    finally:
-        plc.close()
-    return {"status": "ok", "plc": f"{ip}:{port}", "boton": req.boton,
-            "activo": req.activo, "notas": notas, "estado": estado}
-
-
 # ─── MOTOR LAVO v7: catalogo, registros y mandos en vivo ──────────
 @app.get("/banda/capacidades")
 def banda_capacidades():

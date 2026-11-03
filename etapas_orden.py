@@ -57,7 +57,10 @@ _FUERTES = [
 ]
 _DEBILES = [r"(?:y )?luego(?! de (?:" + _NUM_RX + r"))", r"(?:y )?despues de (?:eso|esto|lo anterior)",
             r"(?:y )?despues(?! de)", r"y entonces", r"tras (?:eso|esto)",
-            rf"una vez que(?! {_TERMINA})"]           # "una vez que S2 acumula 3 ..." abre etapa
+            rf"una vez que(?! {_TERMINA})",           # "una vez que S2 acumula 3 ..." abre etapa
+            # "... levante las plumas y haga la secuencia de que se encienda la roja"
+            r"(?:y )?(?:haga|hace|inicie|inicia|arranque|empiece|empieza|comience|comienza) "
+            r"(?:la |una |otra )?secuencia(?: de(?: que)?)?"]
 _RX_FUERTE = re.compile(r"\b(?:" + "|".join(_FUERTES) + r")\b")
 _RX_DEBIL = re.compile(r"\b(?:" + "|".join(_DEBILES) + r")\b")
 
@@ -76,8 +79,16 @@ _RX_BANDA = re.compile(r"\b(banda|cinta|motor)\b")
 _RX_PARO = re.compile(r"\b(deten\w*|detien\w*|deteng\w*|fren\w*|paro(?! de emergencia))\b|"
                       r"\bpar(?:a|e|ar)\s+(?:la\s+)?(?:banda|motor|cinta)\b|"
                       r"\b(?:banda|motor|cinta)\s+(?:se\s+)?(?:para|pare|parar)\b")
-_RX_INVIERTE = re.compile(r"\b(invier\w*|invert\w*|revers\w*|cambi\w* (?:de |el )?(?:sentido|direccion))\b")
+_RX_INVIERTE = re.compile(r"\b(invier\w*|invert\w*|revers\w*|regres\w*|retroced\w*|al reves|sentido contrario|"
+                         r"cambi\w* (?:de |el )?(?:sentido|direccion))\b")
 _RX_TIEMPO = re.compile(rf"\b({_NUM_RX})\s*(s|seg|segs|segundos?|min|minutos?)\b")
+# "luego la verde durante 1": sin unidad, en una secuencia son segundos
+_RX_TIEMPO_SOLO = re.compile(rf"\b(?:durante|por) ({_NUM_RX})\b(?!\s*(?:[.,]\d|s\b|seg|min|hz|veces|%))")
+# "... hasta que yo detenga todo": la etapa sigue hasta el paro (no hay que preguntar)
+_RX_HASTA_PARO = re.compile(r"\bhasta que (?:yo |lo |la |el usuario |se )?(?:detenga\w*|deteng\w+|pare|pares|apague|"
+                            r"presione (?:el )?(?:boton de )?paro)\b(?: todo\b)?|\bhasta (?:el|un) paro\b")
+_RX_PARO_GENERAL = re.compile(r"\b(?:y )?con (?:el )?(?:boton )?(?:i ?\d|s ?\d|rojo|verde|paro)\b[^.]*?"
+                              r"\b(?:se )?(?:detiene|detenga|para|apaga) todo\b")
 _SENAL = r"(?:el |la )?(?:sensor |boton )?(s ?1|s ?2|i ?[1245]|sensor (?:1|2|uno|dos)|primer sensor|segundo sensor|verde|rojo)"
 _RX_HASTA = re.compile(rf"\bhasta que {_SENAL}\b|\bhasta que (?:se )?(?:presione|pulse|oprima|detecte) {_SENAL}\b")
 _DISPARO = r"(?:detecte |detectar |presione |presionar |pulse |pulsar |se active |activarse |se activa )?"
@@ -86,6 +97,8 @@ _RX_CUANDO = re.compile(rf"^\W*(?:y )?(?:cuando|en cuanto|al) {_DISPARO}{_SENAL}
 _RX_CUANDO_SENAL = re.compile(rf"\b(?:y )?(?:cuando|en cuanto|al) {_DISPARO}{_SENAL}\b")
 _RX_CONTEO = re.compile(rf"\b(acumul\w*|cuent\w*|conteo|contador\w*|({_NUM_RX}) (?:detecciones|cajas|piezas|objetos|veces))\b")
 _RX_REPITE = re.compile(r"\b(repit\w*|repet\w*|ciclo\w*|infinit\w*|una y otra vez|siempre|indefinid\w*)\b")
+# Cierra una secuencia ("... y se repita el ciclo"); "cuando termine el ciclo" no.
+_RX_CIERRA_CICLO = re.compile(r"\b(repit\w*|repet\w*|ciclic\w*|infinit\w*|una y otra vez|indefinid\w*)\b")
 _RX_VECES = re.compile(rf"\b({_NUM_RX}) veces\b")
 
 # luces por dispositivo (Q10..Q12 en la banda se mapean a la torreta)
@@ -154,6 +167,7 @@ def _recursos(t: str, dispositivo: str, plumas_previas):
     if dispositivo != "banda":
         return req, plumas
     menciones = list(_RX_PLUMA.finditer(t))
+    sentido_previo = None
     for k, m in enumerate(menciones):
         txt = m.group(0)
         if "ambas" in txt or "dos plumas" in txt or re.search(r"\bplumas\b", txt):
@@ -166,6 +180,9 @@ def _recursos(t: str, dispositivo: str, plumas_previas):
         plumas += [n for n in nums if n and n not in plumas]
         sentido = _verbo_pluma(t, m, menciones[k + 1].start() if k + 1 < len(menciones) else len(t),
                                menciones[k - 1].end() if k else 0)
+        # "levante la pluma 1 y la pluma 2": la segunda hereda el verbo de la primera
+        sentido = sentido or sentido_previo
+        sentido_previo = sentido
         for n in nums:
             sentidos = ["sube", "baja"] if sentido is None else ["sube" if sentido == "a" else "baja"]
             alts = {_PLUMA_Q[(k, s)] for k in ([1, 2] if n == 0 else [n]) for s in sentidos}
@@ -195,6 +212,8 @@ def _tiempos(t: str) -> list:
     for m in _RX_TIEMPO.finditer(t):
         n = _numero(m.group(1))
         out.append(n * 60 if m.group(2).startswith("min") else n)
+    if not out:
+        out = [_numero(m.group(1)) for m in _RX_TIEMPO_SOLO.finditer(t)]
     return out
 
 
@@ -225,29 +244,62 @@ def detectar(texto: str, dispositivo: str = "banda", acl: dict = None) -> dict:
         ini = marcas.get(a, a)
         trozos.append((original[ini:b], t[ini:b]))
 
-    etapas, plumas_previas = [], []
+    # Una etapa que cierra un ciclo ("... y se repita el ciclo", "hasta que yo
+    # detenga todo") termina su secuencia: lo que sigue es OTRA secuencia
+    # independiente ("cuando el sensor 2 detecte ... haga la secuencia ...").
+    etapas, plumas_previas, grupo, cierra = [], [], 1, False
     for orig, frag in trozos:
-        req, plumas = _recursos(frag, dispositivo, plumas_previas)
+        # "hasta que yo detenga todo" y "Con I2 se detiene todo" son el paro
+        # general, no una etapa con la banda detenida.
+        limpio = _RX_PARO_GENERAL.sub(lambda m: " " * len(m.group(0)), _RX_HASTA_PARO.sub(
+            lambda m: " " * len(m.group(0)), frag))
+        req, plumas = _recursos(limpio, dispositivo, plumas_previas)
         hasta = _RX_HASTA.search(frag)
         cuando = _RX_CUANDO.search(frag)
-        e = {"texto": re.sub(r"^(?:[\s,;:.]|y\b)+|(?:[\s,;:.]|\by)+$", "", orig), "requisitos": req,
+        # Lo que sigue al punto final es otra oracion ("... el ciclo. Quiero que")
+        texto_e = re.sub(r"^(?:[\s,;:.]|y\b)+|(?:[\s,;:.]|\by)+$", "", orig)
+        texto_e = re.sub(r"\.\s+[^.]*$", "", texto_e) or texto_e
+        e = {"texto": texto_e, "requisitos": req,
              "tiempos": _tiempos(frag),
              "hasta": _senal(next(g for g in hasta.groups() if g)) if hasta else None,
+             "hasta_paro": bool(_RX_HASTA_PARO.search(frag)),
              "entra_con": _senal(cuando.group(1)) if cuando else None}
         if req or e["tiempos"] or e["hasta"]:       # sin contenido = preambulo ("Con I1:", "A 30 Hz,")
+            if cierra and etapas:
+                grupo += 1
+                plumas_previas = []
+            e["grupo"] = grupo
             etapas.append(e)
             plumas_previas = plumas or plumas_previas
+            cierra = bool(_RX_CIERRA_CICLO.search(frag) or e["hasta_paro"])
     for i, e in enumerate(etapas, 1):
         e["n"] = i
     _aplicar_aclaraciones(etapas, acl or {})
-    if dispositivo == "banda":
-        _banda_sigue_en_marcha(etapas)
+    grupos = []
+    for g in range(1, grupo + 1):
+        de_g = [e for e in etapas if e.get("grupo") == g]
+        if not de_g:
+            continue
+        txt = _fold(" ".join(e["texto"] for e in de_g))
+        veces_g = _RX_VECES.search(txt)
+        grupos.append({"n": len(grupos) + 1, "etapas": [e["n"] for e in de_g],
+                       "repite": bool(_RX_REPITE.search(txt) or veces_g),
+                       "veces": int(_numero(veces_g.group(1))) if veces_g else None})
+        for e in de_g:
+            e["grupo"] = len(grupos)
+        if dispositivo == "banda":
+            _banda_sigue_en_marcha(de_g)
     aplica = len(etapas) >= 2 and (fuerte or (len(etapas) >= 3 and orden >= 2))
     veces = _RX_VECES.search(t)
-    return {"aplica": aplica, "etapas": etapas if aplica else [],
+    return {"aplica": aplica, "etapas": etapas if aplica else [], "grupos": grupos if aplica else [],
             "conteo": bool(_RX_CONTEO.search(t)),
             "repite": bool(_RX_REPITE.search(t)) or bool(veces),
             "veces": int(_numero(veces.group(1))) if veces else None}
+
+
+def _grupo(etapas, e) -> list:
+    """Las etapas de la misma secuencia que e (sin grupo = todas)."""
+    return [x for x in etapas if x.get("grupo", 1) == e.get("grupo", 1)]
 
 
 def _banda_sigue_en_marcha(etapas):
@@ -300,9 +352,10 @@ def _solo_paro(e) -> bool:
 
 def _sabe_cuando_termina(etapas, i) -> bool:
     e = etapas[i]
-    if e["tiempos"] or e["hasta"] or _solo_plumas(e) or _solo_paro(e):
+    if e["tiempos"] or e["hasta"] or e.get("hasta_paro") or _solo_plumas(e) or _solo_paro(e):
         return True
-    return i + 1 < len(etapas) and bool(etapas[i + 1]["entra_con"])
+    sig = etapas[i + 1] if i + 1 < len(etapas) else None
+    return bool(sig and sig.get("grupo", 1) == e.get("grupo", 1) and sig["entra_con"])
 
 
 def preguntas(det: dict, dispositivo: str = "banda") -> list:
@@ -314,7 +367,7 @@ def preguntas(det: dict, dispositivo: str = "banda") -> list:
     for i, e in enumerate(etapas):
         if _sabe_cuando_termina(etapas, i):
             continue
-        ultima = i == len(etapas) - 1
+        ultima = e is _grupo(etapas, e)[-1]
         if dispositivo == "banda":
             ops = ["A los 3 s", "A los 5 s", "A los 10 s", "Cuando S1 detecte", "Cuando S2 detecte"]
             if ultima:
@@ -331,6 +384,9 @@ def bloque_modelo(det: dict, dispositivo: str = "banda") -> str:
     """Las etapas numeradas y como armarlas, para el prompt."""
     if not det.get("aplica"):
         return ""
+    grupos = det.get("grupos") or []
+    if dispositivo == "banda" and len(grupos) > 1:
+        return _bloque_varias(det)
     filas = []
     for e in det["etapas"]:
         fin = []
@@ -338,6 +394,8 @@ def bloque_modelo(det: dict, dispositivo: str = "banda") -> str:
             fin.append(f"dura {', '.join(_fmt(x) for x in e['tiempos'])} s")
         if e["hasta"]:
             fin.append(f"termina cuando {e['hasta']} se activa")
+        if e.get("hasta_paro"):
+            fin.append("sigue hasta el paro")
         if e["entra_con"]:
             fin.append(f"empieza cuando {e['entra_con']} se activa (el paso anterior avanza con esa senal)")
         if not fin and _solo_plumas(e) and dispositivo == "banda":
@@ -373,13 +431,48 @@ def bloque_modelo(det: dict, dispositivo: str = "banda") -> str:
             + "\n".join(filas) + "\n" + reglas)
 
 
+def _fila(e) -> str:
+    fin = []
+    if e["tiempos"]:
+        fin.append(f"dura {', '.join(_fmt(x) for x in e['tiempos'])} s")
+    if e["hasta"]:
+        fin.append(f"termina cuando {e['hasta']} se activa")
+    if e.get("hasta_paro"):
+        fin.append("sigue hasta el paro")
+    if e["entra_con"]:
+        fin.append(f"empieza cuando {e['entra_con']} se activa")
+    if not fin and _solo_plumas(e):
+        fin.append(f"sin tiempo dicho: {PLUMA_S} s de recorrido de la pluma")
+    req = "; ".join(r["desc"] for r in e["requisitos"]) or "sin salidas (espera)"
+    return f"{e['n']}) «{e['texto']}» -> {req}" + (f" [{'; '.join(fin)}]" if fin else "")
+
+
+def _bloque_varias(det: dict) -> str:
+    """Varias secuencias INDEPENDIENTES en la misma instruccion (banda)."""
+    partes = []
+    for g in det["grupos"]:
+        de_g = [e for e in det["etapas"] if e["n"] in g["etapas"]]
+        modo = (f"se repite {g['veces']} veces: modo repetir" if g["veces"] else
+                "se repite: modo infinita con su paro" if g["repite"] else
+                "modo una_vez (o infinita si sigue hasta el paro)")
+        partes.append(f"SECUENCIA SQ{g['n']} ({modo}):\n" + "\n".join(_fila(e) for e in de_g))
+    reglas = ("Son secuencias INDEPENDIENTES: arma una secuencia por bloque (SQ1, SQ2...), cada una con su "
+              "inicio y su paro, con un paso por etapa en ese orden. No las juntes en una sola. Si dos usan las "
+              "mismas luces, la que arranca despues detiene a la otra (su inicio va en el paro de la otra). Un "
+              "movimiento de plumas al arrancar una secuencia puede ir como evento o timer de su senal en vez "
+              "de paso. Cada paso lleva TODAS las salidas encendidas en esa etapa y \"marcha\" si la banda "
+              "avanza. Si una secuencia mueve la banda, NO pongas motor.arranque.")
+    return ("ACCIONES EN ORDEN (el usuario pidio estas secuencias):\n" + "\n\n".join(partes) + "\n" + reglas)
+
+
 def _fmt(x) -> str:
     return str(int(x)) if float(x).is_integer() else str(x)
 
 
 # ── Verificacion ────────────────────────────────────────────────────────────
-def _pasos_banda(eng: dict) -> list:
-    """Pasos en orden de ejecucion: SQ1 y, si SQ2 arranca con SQ1_FIN, los de SQ2 despues."""
+def _cadenas_banda(eng: dict) -> list:
+    """Pasos de cada secuencia en orden de ejecucion (SQ2 que arranca con
+    SQ1_FIN va detras de los de SQ1)."""
     seqs = {s.get("id"): s for s in lm._lista(eng.get("secuencias")) if isinstance(s, dict)}
     if not seqs:
         return []
@@ -396,7 +489,7 @@ def _pasos_banda(eng: dict) -> list:
         if any(cod(s.get("inicio")) == cod(f"{oid}_FIN") for oid in seqs if oid != sid):
             continue                                       # va encadenada detras de otra
         cadenas.append(lm._lista(s.get("pasos")) + (lm._lista(otra.get("pasos")) if otra else []))
-    return max(cadenas, key=len) if cadenas else []
+    return cadenas
 
 
 def _cumple_banda(paso, req) -> bool:
@@ -422,24 +515,38 @@ def verificar(cfg: dict, det: dict, dispositivo: str = "banda") -> list:
     if not det.get("aplica"):
         return []
     etapas = det["etapas"]
-    if dispositivo == "banda":
-        eng = ((cfg or {}).get("band") or {}).get("engine") or {}
-        pasos = _pasos_banda(eng)
-        cumple = _cumple_banda
-        seg = lambda p: p.get("segundos")
-        if not pasos:
-            return [f"Pediste {len(etapas)} acciones en orden y el JSON no tiene una secuencia: arma SQ1 con un "
-                    f"paso por etapa en ese orden (no las encadenes con eventos ni timers sueltos)."]
-    else:
+    if dispositivo != "banda":
         sq = (cfg or {}).get("sequence") or {}
         pasos = [{"salidas": p.get("outputs") or [], "segundos": p.get("duration_s")}
                  for p in lm._lista(sq.get("steps")) if isinstance(p, dict)]
-        cumple = lambda p, r: bool(set(p["salidas"]) & r["q"]) if r["tipo"] == "salida" else True
-        seg = lambda p: p.get("segundos")
         if not pasos:
             return [f"Pediste {len(etapas)} acciones en orden y el JSON no tiene \"sequence\": arma un paso por "
                     f"etapa en ese orden y deja \"outputs\": []."]
+        cumple = lambda p, r: bool(set(p["salidas"]) & r["q"]) if r["tipo"] == "salida" else True
+        return _verificar_cadena(etapas, pasos, cumple, dispositivo)
 
+    eng = ((cfg or {}).get("band") or {}).get("engine") or {}
+    cadenas = _cadenas_banda(eng)
+    if not cadenas:
+        return [f"Pediste {len(etapas)} acciones en orden y el JSON no tiene una secuencia: arma SQ1 con un "
+                f"paso por etapa en ese orden (no las encadenes con eventos ni timers sueltos)."]
+    # Salidas que el programa maneja FUERA de las secuencias (timers, eventos).
+    fuera = set((eng.get("salidas") or {}).keys()) if isinstance(eng.get("salidas"), dict) else set()
+    problemas = []
+    for g in det.get("grupos") or [{"etapas": [e["n"] for e in etapas]}]:
+        de_g = [e for e in etapas if e["n"] in g["etapas"]]
+        # "cuando S2 detecte, sube las plumas y haga la secuencia...": las plumas
+        # del arranque pueden ir como timer/evento de la senal, fuera de la secuencia.
+        if (len(de_g) > 1 and de_g[0]["entra_con"] and _solo_plumas(de_g[0])
+                and all(r["q"] & fuera for r in de_g[0]["requisitos"] if r["tipo"] == "salida")):
+            de_g = de_g[1:]
+        # Cada secuencia pedida se compara con la secuencia del JSON que mejor la cumple.
+        problemas += min((_verificar_cadena(de_g, c, _cumple_banda, "banda") for c in cadenas), key=len)
+    return problemas
+
+
+def _verificar_cadena(etapas, pasos, cumple, dispositivo) -> list:
+    seg = lambda p: p.get("segundos")
     problemas, pos, previo = [], 0, -1
     for e in etapas:
         j = next((k for k in range(pos, len(pasos))

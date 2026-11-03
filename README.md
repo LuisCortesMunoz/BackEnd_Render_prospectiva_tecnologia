@@ -83,8 +83,6 @@ contraseña porque es la propia página la que la pide.
 
 > El **chat** y **generar lógica** puedes seguir usándolos desde la página
 > publicada (van a Render); el servir local es **solo** para cargar al PLC.
-> `iniciar_pagina_local.bat` (frontend, puerto 5500) sigue funcionando, pero
-> ya no hace falta.
 
 Para detenerlo: `Ctrl + C` en su ventana (se cierra sola).
 
@@ -117,7 +115,6 @@ motor (marcha, paro, pausa, dirección e inversión segura), la torreta y las pl
 - `BANDA_MOTOR_CONFIGURABLE=1` en Render: las instrucciones de la banda se generan
   para el motor configurable. Con `0` (por defecto) se mantiene el esquema v5.
 - La carga verifica `%R460 = 6`: si el PLC aún tiene el ST v5, se rechaza con un mensaje claro.
-- `POST /banda/boton-app` `{boton: 1|2, activo}` → botones virtuales APP1/APP2.
 - `GET /banda/estado` incluye `motor_configurable` (motor, dirección, paso, timers, contadores).
 
 ## Banda: programa maestro general (ST v7, motor LAVO)
@@ -154,7 +151,7 @@ una configuración a medias.
   y `/banda/config` responden **409** hasta que el usuario acepta la alternativa.
   Sin alternativa segura responde `not_supported`.
 - `GET /banda/capacidades`, `POST /banda/v7/registros` (registros exactos sin tocar el PLC),
-  `POST /banda/v7/paro`, `/banda/v7/reset`, `/banda/v7/descargar`; `/banda/boton-app` acepta APP1..APP4.
+  `POST /banda/v7/paro`, `/banda/v7/reset`, `/banda/v7/descargar`.
 - Si cambias `lavo_motor.py`: `python cscape/generar_st_v7.py --destino "<Archivos Cscape>"`
   y vuelve a descargar el ST.
 - Pruebas: `python test_lavo_v7.py` (backend) y, en el frontend, `node tests/test_motor_v7.mjs`.

@@ -57,16 +57,8 @@ def modos_secuencia(perfil: dict) -> set:
     return {str(m).lower() for m in seq.get("modes", [])}
 
 
-def secuencia_habilitada(perfil: dict) -> bool:
-    return bool((perfil.get("capabilities", {}).get("sequence") or {}).get("enabled"))
-
-
 def max_pasos_secuencia(perfil: dict) -> int:
     return int((perfil.get("capabilities", {}).get("sequence") or {}).get("max_steps", 0))
-
-
-def max_entradas_por_salida(perfil: dict) -> int:
-    return int((perfil.get("limits") or {}).get("max_inputs_per_output", 2))
 
 
 # ─── Canonicalizacion y rangos ────────────────────────────────────
