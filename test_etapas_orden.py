@@ -49,6 +49,7 @@ def escenario(nombre):
 
 
 respuestas, llamadas = [], []
+_llamar_real = app.llamar_modelo_json
 
 
 def _llm(msgs):
@@ -300,5 +301,137 @@ try:
 finally:
     app.groq_client = original
 check(g.kw["temperature"] == app.TEMPERATURA == 0.2, "generacion con temperatura 0.2 (GROQ_TEMPERATURE)")
+check(g.kw.get("reasoning_effort") == "medium", "gpt-oss con reasoning_effort acotado")
+
+# ---------------------------------------------------------------------------
+escenario("11. Caso real: S1 / S2 con plumas, conteo de 3, 5 s y paro")
+TR = ("Al presionar el pulsador I1, la banda transportadora se pone en marcha a una frecuencia de 20 Hz. "
+      "Cuando el Sensor 1 detecta un objeto, la pluma 1 se eleva y la pluma 2 desciende. Posteriormente, al "
+      "activarse el Sensor 2, la pluma 2 se eleva y la pluma 1 desciende, registrando un conteo. Una vez que el "
+      "Sensor 2 acumula 3 detecciones, la banda continúa avanzando durante 5 segundos y luego se detiene "
+      "automáticamente; a continuación, la pluma 1 se eleva, la pluma 2 desciende y el contador se reinicia a "
+      "cero en ese orden.")
+d = eo.detectar(TR, "banda")
+E = d["etapas"]
+check(len(E) == 6 and d["conteo"], f"seis etapas y un conteo ({len(E)})")
+check(reqs(E[1]) == [["Q8"], ["Q7"], "marcha"] and E[1]["entra_con"] == "S1",
+      f"2: con S1 pluma 1 SUBE (Q8) y pluma 2 baja (Q7), la banda sigue ({reqs(E[1])})")
+check(reqs(E[2]) == [["Q6"], ["Q9"], "marcha"] and E[2]["entra_con"] == "S2",
+      f"3: con S2 pluma 2 sube (Q6) y pluma 1 baja (Q9) ({reqs(E[2])})")
+check(reqs(E[3]) == ["marcha"] and E[3]["tiempos"] == [5.0], "4: sigue avanzando 5 s")
+check(reqs(E[4]) == ["paro"] and reqs(E[5]) == [["Q8"], ["Q7"]], "5: se detiene; 6: pluma 1 sube, pluma 2 baja")
+check(not eo.preguntas(d, "banda"), "no pregunta nada (paro inmediato, plumas con su recorrido)")
+check("CONTEO" in eo.bloque_modelo(d, "banda"), "el modelo recibe como armar el ciclo con el contador")
+
+# La secuencia que pide la instruccion, ejecutada en el ST real.
+CICLO = {"name": "Plumas S1/S2, 3 cajas", "banda": {"mover": True, "direccion": "derecha", "frecuencia_hz": 20},
+         "contadores": [{"id": "CT1", "entrada": "S2", "reset": "SQ1_FIN", "preset": 3, "modo": "una_vez"}],
+         "secuencias": [{"id": "SQ1", "inicio": "I1", "modo": "una_vez", "exclusiva": True, "pasos": [
+             {"motor": ["marcha"], "avanza": "senal", "senal": "S1", "alternativa": {"senal": "CT1", "ir_a": 5}},
+             {"motor": ["marcha"], "salidas": ["Q8", "Q7"], "avanza": "tiempo", "segundos": 2},
+             {"motor": ["marcha"], "avanza": "senal", "senal": "S2"},
+             {"motor": ["marcha"], "salidas": ["Q6", "Q9"], "avanza": "tiempo", "segundos": 2, "siguiente": 1},
+             {"motor": ["marcha"], "avanza": "tiempo", "segundos": 5},
+             {"salidas": ["Q8", "Q7"], "avanza": "tiempo", "segundos": 2}]}]}
+c = cfg(CICLO)
+check(not app.validar_logica_banda(c), f"cargable ({app.validar_logica_banda(c)})")
+check(eo.verificar(c, d, "banda") == [], f"respeta el orden ({eo.verificar(c, d, 'banda')})")
+sim = cargar(c["band"])
+sim.pulsar("I1")
+sim.correr(1.5)
+check(sim.motor() == "dir1", "I1: la banda avanza")
+for caja in (1, 2, 3):
+    sim.pulsar("S1")
+    sim.correr(0.5)
+    check(sim.q("Q8") and sim.q("Q7") and sim.motor() == "dir1", f"caja {caja}, S1: pluma 1 sube, pluma 2 baja, sigue")
+    sim.correr(2)
+    sim.pulsar("S2")
+    sim.correr(0.5)
+    check(sim.q("Q6") and sim.q("Q9") and sim.motor() == "dir1", f"caja {caja}, S2: pluma 2 sube, pluma 1 baja")
+    sim.correr(2.5)
+check(sim.motor() == "dir1" and sim.estado()["secuencias"][0]["paso"] == 5, "tras 3 detecciones: 5 s mas de banda")
+sim.correr(5)
+check(sim.motor() == "paro" and sim.q("Q8") and sim.q("Q7"), "se detiene; pluma 1 sube y pluma 2 baja")
+sim.correr(3)
+check(not sim.salidas() and sim.motor() == "paro", "termina: banda detenida, plumas quietas")
+est = sim.estado()
+check(est["contadores_acc"][0] == 0 and not est["contadores"][0], f"el contador vuelve a cero ({est['contadores_acc'][0]})")
+
+# ---------------------------------------------------------------------------
+escenario("12. Respuesta vacia de gpt-oss (se gasto los tokens razonando)")
+
+
+class _Resp:
+    def __init__(self, texto, fin, ts):
+        self.choices = [type("C", (), {"message": type("M", (), {"content": texto})(), "finish_reason": fin})()]
+        self.usage = type("U", (), {"prompt_tokens": 5000, "completion_tokens": ts})()
+
+
+class _GroqVacio:
+    def __init__(self, salidas):
+        self.salidas, self.kws = list(salidas), []
+        self.chat = self
+        self.completions = self
+
+    def create(self, **kw):
+        self.kws.append(kw)
+        x = self.salidas.pop(0)
+        if isinstance(x, Exception):
+            raise x
+        return x
+
+
+import json as _json
+import httpx
+from groq import APIStatusError
+
+
+def _429(segundos):
+    r = httpx.Response(429, headers={"retry-after": str(segundos)}, request=httpx.Request("POST", "https://x"))
+    return APIStatusError("rate limit", response=r, body=None)
+
+
+app.groq_client = _GroqVacio([_Resp("", "length", 2400), _Resp(_json.dumps(BIEN), "stop", 900)])
+try:
+    out = _llamar_real([{"role": "user", "content": "x"}])
+    gq = app.groq_client
+finally:
+    app.groq_client = original
+check(out["name"] == BIEN["name"], "la segunda llamada devuelve el JSON")
+check([k.get("reasoning_effort") for k in gq.kws] == ["medium", "low"], "reintenta con reasoning_effort=low")
+
+app.groq_client = _GroqVacio([_Resp("", "length", 2400), _429(0.01), _Resp(_json.dumps(BIEN), "stop", 900)])
+try:
+    out = _llamar_real([{"role": "user", "content": "x"}])
+finally:
+    app.groq_client = original
+check(out["name"] == BIEN["name"], "si Groq pide esperar (429 con retry-after corto), espera y reintenta")
+
+app.groq_client = _GroqVacio([_Resp("", "length", 2400), _Resp("", "length", 2400)])
+try:
+    _llamar_real([{"role": "user", "content": "x"}])
+    msg = ""
+except app.SinRespuesta as e:
+    msg = str(e)
+finally:
+    app.groq_client = original
+check("sin espacio" in msg, "dos vacias: error claro (no 'JSON invalido' sin detalle)")
+
+
+def _sin_respuesta(msgs):
+    llamadas.append(msgs)
+    raise app.SinRespuesta("El modelo se quedo sin espacio para responder.")
+
+
+app.llamar_modelo_json = _sin_respuesta
+llamadas.clear()
+try:
+    asyncio.run(app.generar_logica(app.LogicaRequest(texto=TEXTO, device="banda")))
+    st = None
+except app.HTTPException as e:
+    st, det = e.status_code, e.detail
+app.llamar_modelo_json = _llm
+check(st == 422 and "sin espacio" in det and len(llamadas) == 1,
+      f"la auto-revision no repite la misma llamada ({st}, {len(llamadas)} llamadas)")
 
 print(f"\nTODAS LAS PRUEBAS DE ACCIONES EN ORDEN PASARON ({OK} comprobaciones).")

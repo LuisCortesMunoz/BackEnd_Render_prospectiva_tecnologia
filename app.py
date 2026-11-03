@@ -32,6 +32,14 @@ MODELO_STT    = os.environ.get("GROQ_STT_MODEL",    "whisper-large-v3")
 # Temperatura de la generacion de logica. Baja = la misma instruccion da el
 # mismo JSON (con 1 una peticion de varias etapas salia bien y luego mal).
 TEMPERATURA   = float(os.environ.get("GROQ_TEMPERATURE", "0.2"))
+# gpt-oss razona antes de responder y ese razonamiento sale del mismo
+# max_tokens: con una instruccion larga podia gastarlo todo y devolver el JSON
+# vacio. Se le pide un esfuerzo acotado y, si aun asi sale vacio, "low".
+ES_RAZONADOR  = MODELO.startswith("openai/gpt-oss")
+ESFUERZO      = os.environ.get("GROQ_REASONING_EFFORT", "medium")
+# 429 (tokens por minuto): se espera lo que pide Groq si es poco, en vez de
+# reintentar en el acto con menos espacio (que volvia a fallar).
+ESPERA_429_MAX_S = float(os.environ.get("GROQ_ESPERA_429_MAX_S", "20"))
 
 # gpt-oss-120b es un modelo razonador: sus tokens de razonamiento interno
 # cuentan dentro de max_tokens. Con 1300 el razonamiento agotaba el
@@ -1953,7 +1961,7 @@ def _presupuesto_completion(messages: list) -> int:
     return presupuesto
 
 
-def _crear_completion(messages: list, max_tokens: int, con_formato: bool = True):
+def _crear_completion(messages: list, max_tokens: int, con_formato: bool = True, esfuerzo: str = None):
     if groq_client is None:
         raise HTTPException(
             status_code=503,
@@ -1965,7 +1973,34 @@ def _crear_completion(messages: list, max_tokens: int, con_formato: bool = True)
                   temperature=TEMPERATURA, max_tokens=max_tokens)
     if con_formato:
         kwargs["response_format"] = {"type": "json_object"}
+    if ES_RAZONADOR and (esfuerzo or ESFUERZO):
+        try:
+            return groq_client.chat.completions.create(reasoning_effort=esfuerzo or ESFUERZO, **kwargs)
+        except APIStatusError as e:
+            if not _sin_reasoning_effort(e):
+                raise
+            log.warning(f"{MODELO} no acepta reasoning_effort: se llama sin el.")
     return groq_client.chat.completions.create(**kwargs)
+
+
+class SinRespuesta(ValueError):
+    """Groq no dejo responder (sin espacio tras razonar o limite por minuto):
+    repetir la misma llamada en el acto solo gasta cuota, no se reintenta."""
+
+
+def _espera_429(e) -> float:
+    """Segundos que pide Groq antes de reintentar (cabecera retry-after), o None."""
+    try:
+        v = float(e.response.headers.get("retry-after"))
+        return v if 0 < v <= ESPERA_429_MAX_S else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _texto_respuesta(resp) -> tuple:
+    """(contenido, finish_reason) de la respuesta de Groq."""
+    ch = resp.choices[0]
+    return (ch.message.content or ""), getattr(ch, "finish_reason", None)
 
 
 def llamar_modelo_json(messages: list) -> dict:
@@ -1994,24 +2029,58 @@ def llamar_modelo_json(messages: list) -> dict:
                 raise ValueError(
                     f"Groq rechazo la peticion tambien sin modo JSON: {e2}")
         elif e.status_code in (413, 429):
-            log.warning(f"Groq {e.status_code} (limite de tokens); reintentando "
-                        f"con max_tokens={MIN_COMPLETION_TOKENS}...")
+            espera = _espera_429(e) if e.status_code == 429 else None
             try:
-                resp = _crear_completion(messages, MIN_COMPLETION_TOKENS)
+                if espera is not None:
+                    # Lo que pide Groq es poco: se espera y se reintenta con el
+                    # mismo espacio (con menos, el modelo razonador no alcanza).
+                    log.warning(f"Groq 429 (tokens por minuto): esperando {espera:.1f} s y reintentando...")
+                    time.sleep(espera)
+                    resp = _crear_completion(messages, presupuesto)
+                else:
+                    log.warning(f"Groq {e.status_code} (limite de tokens); reintentando "
+                                f"con max_tokens={MIN_COMPLETION_TOKENS}...")
+                    resp = _crear_completion(messages, MIN_COMPLETION_TOKENS)
             except APIStatusError:
-                raise ValueError(
+                raise SinRespuesta(
                     "Groq rechazo la peticion por el limite de tokens por "
                     "minuto del plan gratuito. Espera un minuto y vuelve a intentar."
                 )
         else:
             raise
 
-    texto_raw = resp.choices[0].message.content or ""
+    texto_raw, fin = _texto_respuesta(resp)
     ti = resp.usage.prompt_tokens
     ts = resp.usage.completion_tokens
-    log.info(f"Tokens — entrada: {ti}  salida: {ts}  total: {ti+ts}")
+    log.info(f"Tokens — entrada: {ti}  salida: {ts}  total: {ti+ts}  (fin: {fin})")
     metricas_lavo.sumar("tokens_prompt_reales", ti or 0)
     metricas_lavo.sumar("tokens_respuesta", ts or 0)
+
+    if not texto_raw.strip() and ES_RAZONADOR:
+        # Se gasto el max_tokens razonando (finish_reason "length") y no escribio
+        # el JSON. Una vez mas con razonamiento corto; si Groq pide esperar por
+        # el limite por minuto, se espera.
+        log.warning(f"Respuesta vacia de {MODELO} (fin: {fin}, {ts} tokens): reintentando con "
+                    f"reasoning_effort=low.")
+        metricas_lavo.sumar("respuestas_vacias", 1)
+        try:
+            resp = _crear_completion(messages, presupuesto, esfuerzo="low")
+        except APIStatusError as e:
+            espera = _espera_429(e) if e.status_code == 429 else None
+            if espera is None:
+                raise SinRespuesta(
+                    "El modelo se quedo sin espacio para responder (razono demasiado) y Groq no permite "
+                    "reintentar todavia por el limite de tokens por minuto. Espera un minuto y vuelve a "
+                    "intentar, o divide la instruccion en partes.")
+            log.warning(f"Groq 429 tras respuesta vacia: esperando {espera:.1f} s...")
+            time.sleep(espera)
+            resp = _crear_completion(messages, presupuesto, esfuerzo="low")
+        texto_raw, fin = _texto_respuesta(resp)
+        metricas_lavo.sumar("tokens_respuesta", resp.usage.completion_tokens or 0)
+        if not texto_raw.strip():
+            raise SinRespuesta(
+                "El modelo se quedo sin espacio para responder (razono demasiado con una instruccion tan "
+                "larga). Vuelve a intentar o divide la instruccion en partes.")
 
     try:
         return extraer_json_de_texto(texto_raw)
@@ -2669,7 +2738,7 @@ def _generar_logica_banda_motor(texto: str, req: "LogicaRequest") -> "LogicaResp
         try:
             candidato = _llamar_modelo(msgs_iter)
         except ValueError as e:
-            if intento < intentos:
+            if intento < intentos and not isinstance(e, SinRespuesta):
                 log.warning(f"Motor banda auto-revision {intento}/{intentos}: JSON ilegible — {e}")
                 continue
             raise HTTPException(422, str(e))
@@ -2874,7 +2943,7 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         try:
             candidato = _llamar_modelo(msgs_iter)
         except ValueError as e:
-            if intento < intentos:
+            if intento < intentos and not isinstance(e, SinRespuesta):
                 log.warning(f"Banda v7 auto-revision {intento}/{intentos}: JSON ilegible — {e}")
                 continue
             raise HTTPException(422, str(e))
@@ -3204,7 +3273,7 @@ def _generar_logica_banda(texto: str, req: "LogicaRequest") -> "LogicaResponse":
         try:
             candidato = _llamar_modelo(msgs_iter)
         except ValueError as e:
-            if intento < intentos:
+            if intento < intentos and not isinstance(e, SinRespuesta):
                 log.warning(f"Banda auto-revision {intento}/{intentos}: JSON ilegible — {e}")
                 continue
             raise HTTPException(422, str(e))
@@ -3523,7 +3592,7 @@ async def _generar_logica(req: LogicaRequest):
             candidato = _llamar_modelo(msgs_iter)
         except ValueError as e:
             # JSON ilegible (no parseable). Reintenta si quedan vueltas.
-            if intento < intentos:
+            if intento < intentos and not isinstance(e, SinRespuesta):
                 log.warning(f"Auto-revision {intento}/{intentos}: JSON ilegible, reintentando — {e}")
                 continue
             raise HTTPException(422, str(e))

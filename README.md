@@ -38,6 +38,8 @@ El backend cumple **dos roles** según dónde corra:
 | `GROQ_CHAT_MODEL_APRENDIZAJE` | Modelo **solo** del modo Aprendizaje (default `llama-3.3-70b-versatile`). Los demás modos del copiloto siguen con `GROQ_CHAT_MODEL`. | No |
 | `GROQ_STT_MODEL` | Modelo de voz (default `whisper-large-v3`) | No |
 | `GROQ_TEMPERATURE` | Temperatura de la generación de lógica (default `0.2`; antes era `1` y la misma instrucción daba JSON distintos) | No |
+| `GROQ_REASONING_EFFORT` | Esfuerzo de razonamiento de `gpt-oss` (default `medium`). Si el modelo gasta el espacio razonando y responde vacío, se reintenta una vez con `low` | No |
+| `GROQ_ESPERA_429_MAX_S` | Segundos máximos que se espera cuando Groq responde 429 con `retry-after` (default `20`); más que eso, error claro | No |
 | `ADMIN_TOKEN` | Protege los endpoints `/admin/*` | Recomendada |
 | `BANDA_MOTOR_CONFIGURABLE` | `1` = la banda usa el motor configurable (requiere el ST v6 en el PLC) | No (default `0`) |
 | `ALLOWED_ORIGINS` | Dominios del frontend (CORS) | No |

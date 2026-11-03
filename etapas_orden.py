@@ -56,7 +56,8 @@ _FUERTES = [
     r"por ultimo", r"finalmente", r"al final", r"(?:y )?para (?:cerrar|terminar|finalizar|acabar)",
 ]
 _DEBILES = [r"(?:y )?luego(?! de (?:" + _NUM_RX + r"))", r"(?:y )?despues de (?:eso|esto|lo anterior)",
-            r"(?:y )?despues(?! de)", r"y entonces", r"tras (?:eso|esto)"]
+            r"(?:y )?despues(?! de)", r"y entonces", r"tras (?:eso|esto)",
+            rf"una vez que(?! {_TERMINA})"]           # "una vez que S2 acumula 3 ..." abre etapa
 _RX_FUERTE = re.compile(r"\b(?:" + "|".join(_FUERTES) + r")\b")
 _RX_DEBIL = re.compile(r"\b(?:" + "|".join(_DEBILES) + r")\b")
 
@@ -66,8 +67,9 @@ _RX_LUZ = re.compile(r"\b(verde|amarill[ao]s?|roj[ao]s?|q(?:3|4|5|10|11|12))\b")
 _RX_ON = re.compile(r"\b(enciend\w*|encend\w*|prend\w*|ilumin\w*|activ\w*|pon\w*)\b")
 _RX_OFF = re.compile(r"\b(apag\w*|desactiv\w*|quita\w*)\b")
 _RX_PLUMA = re.compile(r"\b(?:(primera|segunda) )?plumas?(?:\s?(1|2|uno|dos)\b)?|\bambas plumas\b|\blas dos plumas\b")
-_RX_SUBE = re.compile(r"\b(sub\w*|levant\w*|alz\w*|abr\w*|arriba)\b")
-_RX_BAJA = re.compile(r"\b(baj\w*|cierr\w*|desciend\w*|abajo)\b")
+_RX_SUBE = re.compile(r"\b(sub\w*|levant\w*|elev\w*|alz\w*|ascien\w*|abr\w*|arriba)\b")
+_RX_BAJA = re.compile(r"\b(baj\w*|cierr\w*|desciend\w*|descend\w*|abajo)\b")
+_RX_FIN_CLAUSULA = re.compile(r"[,;.:]| y | e ")
 _RX_MARCHA = re.compile(r"\b(avanz\w*|marcha)\b")
 _RX_MARCHA_BANDA = re.compile(r"\b(muev\w*|mover|arranc\w*|corr(?:e|a|er|iendo)|gir\w*)\b")   # solo con "banda"
 _RX_BANDA = re.compile(r"\b(banda|cinta|motor)\b")
@@ -78,9 +80,11 @@ _RX_INVIERTE = re.compile(r"\b(invier\w*|invert\w*|revers\w*|cambi\w* (?:de |el 
 _RX_TIEMPO = re.compile(rf"\b({_NUM_RX})\s*(s|seg|segs|segundos?|min|minutos?)\b")
 _SENAL = r"(?:el |la )?(?:sensor |boton )?(s ?1|s ?2|i ?[1245]|sensor (?:1|2|uno|dos)|primer sensor|segundo sensor|verde|rojo)"
 _RX_HASTA = re.compile(rf"\bhasta que {_SENAL}\b|\bhasta que (?:se )?(?:presione|pulse|oprima|detecte) {_SENAL}\b")
-_RX_CUANDO = re.compile(rf"^\W*(?:y )?(?:cuando|en cuanto|al) (?:detecte |presione |pulse )?{_SENAL}\b")
+_DISPARO = r"(?:detecte |detectar |presione |presionar |pulse |pulsar |se active |activarse |se activa )?"
+_RX_CUANDO = re.compile(rf"^\W*(?:y )?(?:cuando|en cuanto|al) {_DISPARO}{_SENAL}\b")
 # "cuando S1 detecte ..." tambien abre una etapa (sin ser marcador de orden por si sola)
-_RX_CUANDO_SENAL = re.compile(rf"\b(?:y )?(?:cuando|en cuanto) (?:detecte |presione |pulse |se active )?{_SENAL}\b")
+_RX_CUANDO_SENAL = re.compile(rf"\b(?:y )?(?:cuando|en cuanto|al) {_DISPARO}{_SENAL}\b")
+_RX_CONTEO = re.compile(rf"\b(acumul\w*|cuent\w*|conteo|contador\w*|({_NUM_RX}) (?:detecciones|cajas|piezas|objetos|veces))\b")
 _RX_REPITE = re.compile(r"\b(repit\w*|repet\w*|ciclo\w*|infinit\w*|una y otra vez|siempre|indefinid\w*)\b")
 _RX_VECES = re.compile(rf"\b({_NUM_RX}) veces\b")
 
@@ -118,6 +122,22 @@ def _verbo_cercano(t: str, pos: int, rx_a, rx_b):
     return min(despues, key=lambda x: x[1])[0] if despues else None
 
 
+def _verbo_pluma(t: str, m, hasta: int, desde: int):
+    """'a' (sube) / 'b' (baja) para una mencion de pluma: el verbo que la sigue
+    en la misma clausula ("la pluma 1 se eleva y la pluma 2 desciende") o, si
+    no hay, el que la precede desde la mencion anterior ("baja las plumas")."""
+    fin = _RX_FIN_CLAUSULA.search(t, m.end(), hasta)
+    tramo = t[m.end():fin.start() if fin else hasta]
+    s, b = _RX_SUBE.search(tramo), _RX_BAJA.search(tramo)
+    if s or b:
+        return "a" if s and (not b or s.start() < b.start()) else "b"
+    antes = t[desde:m.start()]
+    s, b = list(_RX_SUBE.finditer(antes)), list(_RX_BAJA.finditer(antes))
+    if s or b:
+        return "a" if s and (not b or s[-1].end() > b[-1].end()) else "b"
+    return None
+
+
 def _recursos(t: str, dispositivo: str, plumas_previas):
     """Requisitos de una etapa: [{"tipo": "salida", "q": {..alternativas..}} | {"tipo": "motor", ...}]."""
     req, plumas = [], []
@@ -134,7 +154,7 @@ def _recursos(t: str, dispositivo: str, plumas_previas):
     if dispositivo != "banda":
         return req, plumas
     menciones = list(_RX_PLUMA.finditer(t))
-    for m in menciones:
+    for k, m in enumerate(menciones):
         txt = m.group(0)
         if "ambas" in txt or "dos plumas" in txt or re.search(r"\bplumas\b", txt):
             nums = [1, 2]
@@ -144,7 +164,8 @@ def _recursos(t: str, dispositivo: str, plumas_previas):
             nums = [1, 2] if not plumas_previas else list(plumas_previas)
             nums = nums if len(nums) == 1 else [0]                 # "la pluma": cualquiera de las dos
         plumas += [n for n in nums if n and n not in plumas]
-        sentido = _verbo_cercano(t, m.start(), _RX_SUBE, _RX_BAJA)
+        sentido = _verbo_pluma(t, m, menciones[k + 1].start() if k + 1 < len(menciones) else len(t),
+                               menciones[k - 1].end() if k else 0)
         for n in nums:
             sentidos = ["sube", "baja"] if sentido is None else ["sube" if sentido == "a" else "baja"]
             alts = {_PLUMA_Q[(k, s)] for k in ([1, 2] if n == 0 else [n]) for s in sentidos}
@@ -181,7 +202,7 @@ def _tiempos(t: str) -> list:
 def detectar(texto: str, dispositivo: str = "banda", acl: dict = None) -> dict:
     """{"aplica", "etapas": [{"n", "texto", "requisitos", "tiempos", "hasta", "entra_con"}],
         "repite", "veces"}."""
-    vacio = {"aplica": False, "etapas": [], "repite": False, "veces": None}
+    vacio = {"aplica": False, "etapas": [], "conteo": False, "repite": False, "veces": None}
     if dispositivo not in _LUCES:
         return vacio
     original = str(texto or "")
@@ -219,11 +240,28 @@ def detectar(texto: str, dispositivo: str = "banda", acl: dict = None) -> dict:
     for i, e in enumerate(etapas, 1):
         e["n"] = i
     _aplicar_aclaraciones(etapas, acl or {})
+    if dispositivo == "banda":
+        _banda_sigue_en_marcha(etapas)
     aplica = len(etapas) >= 2 and (fuerte or (len(etapas) >= 3 and orden >= 2))
     veces = _RX_VECES.search(t)
     return {"aplica": aplica, "etapas": etapas if aplica else [],
+            "conteo": bool(_RX_CONTEO.search(t)),
             "repite": bool(_RX_REPITE.search(t)) or bool(veces),
             "veces": int(_numero(veces.group(1))) if veces else None}
+
+
+def _banda_sigue_en_marcha(etapas):
+    """"Se pone en marcha" sin fin: la banda sigue avanzando en las etapas
+    siguientes (plumas, luces) hasta una que la detenga. En una secuencia la
+    banda solo avanza en los pasos con "marcha", asi que esas etapas la piden.
+    "Avanza hasta que S1 detecte" o "avanza 5 s" terminan con la etapa."""
+    en_marcha = False
+    for e in etapas:
+        mot = [r["accion"] for r in e["requisitos"] if r["tipo"] == "motor"]
+        if mot:
+            en_marcha = mot[0] in ("marcha", "invertir") and not (e["hasta"] or e["tiempos"])
+        elif en_marcha:
+            e["requisitos"].append({"tipo": "motor", "accion": "marcha", "desc": "la banda sigue en marcha"})
 
 
 def _clave_fin(n: int) -> str:
@@ -249,15 +287,20 @@ def _aplicar_aclaraciones(etapas, acl):
 
 
 def _solo_plumas(e) -> bool:
-    """La etapa mueve plumas (y a lo mas detiene la banda): dura el recorrido de la pluma."""
+    """La etapa mueve plumas (con la banda detenida o en marcha, sin luces): dura el recorrido de la pluma."""
     plumas = [r for r in e["requisitos"] if r["tipo"] == "salida" and r["q"] <= {"Q6", "Q7", "Q8", "Q9"}]
-    otros = [r for r in e["requisitos"] if r not in plumas and not (r["tipo"] == "motor" and r["accion"] == "paro")]
+    otros = [r for r in e["requisitos"] if r not in plumas and r["tipo"] != "motor"]
     return bool(plumas) and not otros
+
+
+def _solo_paro(e) -> bool:
+    """'luego se detiene': inmediato, puede ir en el mismo paso que la etapa siguiente."""
+    return bool(e["requisitos"]) and all(r["tipo"] == "motor" and r["accion"] == "paro" for r in e["requisitos"])
 
 
 def _sabe_cuando_termina(etapas, i) -> bool:
     e = etapas[i]
-    if e["tiempos"] or e["hasta"] or _solo_plumas(e):
+    if e["tiempos"] or e["hasta"] or _solo_plumas(e) or _solo_paro(e):
         return True
     return i + 1 < len(etapas) and bool(etapas[i + 1]["entra_con"])
 
@@ -299,6 +342,8 @@ def bloque_modelo(det: dict, dispositivo: str = "banda") -> str:
             fin.append(f"empieza cuando {e['entra_con']} se activa (el paso anterior avanza con esa senal)")
         if not fin and _solo_plumas(e) and dispositivo == "banda":
             fin.append(f"sin tiempo dicho: {PLUMA_S} s de recorrido de la pluma")
+        if not fin and _solo_paro(e):
+            fin.append("inmediato: puede ir en el mismo paso que la etapa siguiente")
         req = "; ".join(r["desc"] for r in e["requisitos"]) or "sin salidas (espera)"
         filas.append(f"{e['n']}) «{e['texto']}» -> {req}" + (f" [{'; '.join(fin)}]" if fin else ""))
     if dispositivo == "banda":
@@ -307,7 +352,13 @@ def bloque_modelo(det: dict, dispositivo: str = "banda") -> str:
                   "lleva TODAS las salidas que deben estar encendidas en esa etapa (una luz que sigue encendida "
                   "se repite en los pasos siguientes) y \"marcha\" en cada paso en que la banda deba avanzar. "
                   "Si la secuencia mueve la banda, NO pongas motor.arranque.")
-        if det["veces"]:
+        if det.get("conteo"):
+            reglas += (" Hay un CONTEO: las etapas que se repiten con cada objeto hasta llegar a N forman un ciclo "
+                       "dentro de la secuencia (el ultimo paso del ciclo vuelve con \"siguiente\" al primero) y un "
+                       "contador CTn de esa senal (p. ej. S2, modo una_vez) sale del ciclo con \"alternativa\" "
+                       "{\"senal\":\"CTn\",\"ir_a\":<paso siguiente al ciclo>}; reinicia el contador con "
+                       "reset = SQ1_FIN (o el paso que lo pida). Modo una_vez.")
+        elif det["veces"]:
             reglas += f" Se repite {det['veces']} veces: modo repetir."
         elif det["repite"]:
             reglas += " Se repite: modo infinita con su paro."
@@ -411,7 +462,8 @@ def verificar(cfg: dict, det: dict, dispositivo: str = "banda") -> list:
             if not any(_mismo(p.get("senal"), e["entra_con"]) for p in pasos[previo:j] if isinstance(p, dict)):
                 problemas.append(f"La etapa {e['n']} empieza cuando {e['entra_con']} se activa: el paso anterior "
                                  f"({previo + 1}) debe avanzar por senal {e['entra_con']}.")
-        pos, previo = j + 1, j
+        # "se detiene" no ocupa paso propio: la etapa siguiente puede ir en el mismo
+        pos, previo = (j, j - 1) if dispositivo == "banda" and _solo_paro(e) else (j + 1, j)
     return problemas
 
 
