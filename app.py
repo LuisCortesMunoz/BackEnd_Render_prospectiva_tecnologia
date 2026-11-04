@@ -2558,7 +2558,10 @@ async def _transcribir(archivo: UploadFile) -> STTResponse:
         raise HTTPException(413, f"El audio supera {MAX_AUDIO_MB} MB.")
     nombre = _nombre_audio(archivo.content_type, archivo.filename)
     log.info(f"Transcribiendo '{nombre}' ({len(audio)} bytes) con {MODELO_STT}")
-    t = groq_client_stt.audio.transcriptions.create(
+    # En un hilo aparte: la llamada a Groq es sincrona y bloquearia el event
+    # loop (ver _en_hilo_de_generacion).
+    t = await asyncio.to_thread(
+        groq_client_stt.audio.transcriptions.create,
         file=(nombre, audio), model=MODELO_STT,
         language=IDIOMA_STT, response_format="json",
     )
@@ -2566,6 +2569,29 @@ async def _transcribir(archivo: UploadFile) -> STTResponse:
         texto=(getattr(t, "text", "") or "").strip(),
         modelo=MODELO_STT, idioma=IDIOMA_STT, archivo=nombre,
     )
+
+
+# ─── Generacion fuera del event loop ─────────────────────────────
+# Las rutas de generacion son async, pero la llamada a Groq es sincrona y, si
+# Groq responde 429, se espera con time.sleep. Corridas en el event loop
+# congelaban TODO el servidor mientras tanto: /banda/estado, paros, resets y
+# el long-poll de los lentes. Por eso el trabajo pesado va a un hilo aparte.
+#
+# El candado mantiene las generaciones en fila, una a la vez, como antes: asi
+# no compiten por el limite de tokens por minuto de Groq ni escriben a la vez
+# la memoria de feedback ni el historial. Solo esperan entre ellas; el resto
+# de los endpoints responde mientras tanto. asyncio.to_thread copia el
+# contexto, asi que metricas_lavo sigue viendo la medicion de la peticion.
+_CANDADO_GENERACION = threading.RLock()
+
+
+def _en_serie(fn, *args):
+    with _CANDADO_GENERACION:
+        return fn(*args)
+
+
+async def _en_hilo_de_generacion(fn, *args):
+    return await asyncio.to_thread(_en_serie, fn, *args)
 
 
 def _seleccionar_audio(audio: Optional[UploadFile], file: Optional[UploadFile]) -> UploadFile:
@@ -2658,7 +2684,7 @@ async def voz_a_ladder(
             raise HTTPException(422, "Transcripcion vacia. Habla mas claro o graba de nuevo.")
         if len(prompt) > 2000:
             raise HTTPException(400, "Transcripcion demasiado larga, maximo 2000 caracteres.")
-        _, schema, js_string, ejemplo_id = consultar_retorna_schema(prompt)
+        _, schema, js_string, ejemplo_id = await _en_hilo_de_generacion(consultar_retorna_schema, prompt)
         return VozLadderResponse(
             texto=prompt, stt=stt,
             ladder=crear_ladder_response(prompt, schema, js_string, ejemplo_id),
@@ -2680,7 +2706,8 @@ async def generar_ladder(req: PromptRequest):
     if len(req.prompt) > 2000:
         raise HTTPException(400, "Prompt demasiado largo, maximo 2000 caracteres.")
     try:
-        _, schema, js_string, ejemplo_id = consultar_retorna_schema(req.prompt.strip(), req.contexto)
+        _, schema, js_string, ejemplo_id = await _en_hilo_de_generacion(
+            consultar_retorna_schema, req.prompt.strip(), req.contexto)
         return crear_ladder_response(req.prompt.strip(), schema, js_string, ejemplo_id)
     except ValueError as e:
         raise HTTPException(422, str(e))
@@ -3481,7 +3508,7 @@ async def generar_logica(req: LogicaRequest):
     modelo, fuente memoria/modelo y contexto usado)."""
     metricas_lavo.iniciar(req.device or "")
     try:
-        resp = await _generar_logica(req)
+        resp = await _en_hilo_de_generacion(_generar_logica, req)
     except HTTPException as e:
         if e.status_code == 422:
             metricas_lavo.sumar("errores_validacion", 1)
@@ -3491,7 +3518,8 @@ async def generar_logica(req: LogicaRequest):
     return resp
 
 
-async def _generar_logica(req: LogicaRequest):
+def _generar_logica(req: LogicaRequest):
+    """Sincrona a proposito: corre en un hilo (_en_hilo_de_generacion)."""
     texto = (req.texto or "").strip()
     if not texto:
         raise HTTPException(400, "El campo 'texto' no puede estar vacio.")
