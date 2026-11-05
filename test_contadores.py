@@ -117,10 +117,11 @@ escenario("1. Lectura: contar N en un sensor y si se reinicia solo")
 r = co.requisitos([TEXTO])
 check({"tipo": "conteo", "conteo": 3, "senal": "S2", "reinicia": True}.items()
       <= next(x for x in r if x["tipo"] == "conteo").items(), "contar 3 en S2, se reinicia solo")
-check(co.conteo_en("Cada 3 piezas en el sensor 1 sube la pluma 1") == {"conteo": 3, "senal": "S1", "reinicia": True},
+check(co.conteo_en("Cada 3 piezas en el sensor 1 sube la pluma 1")
+      == {"conteo": 3, "senal": "S1", "reinicia": True, "boton": None},
       "'cada 3 piezas' = se repite (se reinicia solo)")
 check(co.conteo_en("Al llegar a 4 detecciones en S2 la banda se detiene y el contador se reinicia con I2")
-      == {"conteo": 4, "senal": "S2", "reinicia": False}, "'se reinicia con I2' es manual")
+      == {"conteo": 4, "senal": "S2", "reinicia": False, "boton": "I2"}, "'se reinicia con I2' es manual (boton I2)")
 check(co.conteo_en("Al llegar a 5 en S2 enciende la verde. Despues el contador vuelve a cero")["reinicia"],
       "'vuelve a cero' en otra oracion")
 for t in ("Prende la verde durante 5 segundos", "La banda avanza a 30 Hz con I1",
@@ -207,5 +208,62 @@ def vueltas(modo, reset):
 check(vueltas("infinita", "SQ1_FIN") == [[3], [1, 2, 3]], "con SQ1_FIN la 2a vuelta sale con cada caja (el error)")
 check(vueltas("infinita", "SQ1_CICLO") == [[3], [3]], "con SQ1_CICLO sale en la 3a caja de cada vuelta")
 check(vueltas("repetir", "SQ1_CICLO") == [[3], [3]], "tambien en modo repetir")
+
+# ---------------------------------------------------------------------------
+escenario("6. Reset con boton, solo, o ambos: lectura")
+c = co.conteo_en
+check(c("Cuando S2 cuente 3 cajas prende la roja y el contador se reinicia con I2")
+      == {"conteo": 3, "senal": "S2", "reinicia": False, "boton": "I2"}, "'se reinicia con I2' = boton I2, no solo")
+check(c("Cuando S2 cuente 3 cajas prende la roja. Con I1 se resetea el contador")["boton"] == "I1",
+      "'con I1 se resetea el contador' (boton antes del verbo)")
+check(c("Cuando S2 cuente 3 cajas prende la roja. Al presionar el boton rojo se borra la cuenta")["boton"] == "I2",
+      "'boton rojo' = I2")
+x = c("Cuando S2 cuente 3 cajas prende la roja 5 s; el contador se reinicia solo y tambien con el boton verde")
+check(x["reinicia"] and x["boton"] == "I1", "solo Y con el boton verde (I1)")
+x = c("Cuando S2 cuente 3 cajas prende la roja y se reinicia con I3")
+check(not x["reinicia"] and x["boton"] is None and x["boton_invalido"] == "I3",
+      "I3 (paro de emergencia) no se toma como reinicio automatico ni como boton")
+check(c(TEXTO)["boton"] is None, "'se reinicie solo' no tiene boton")
+
+escenario("7. Reset con boton: la receta usa ESE boton (antes decia 'la senal de arranque')")
+TXT_I2 = ("Con I1 la banda avanza. Cuando S2 cuente 3 cajas prende la roja 5 segundos y el contador se reinicia "
+          "con I2")
+TXT_AMB = ("Con I1 la banda avanza. Cuando S2 cuente 3 cajas prende la roja 5 segundos; el contador se reinicia "
+           "solo y tambien con I1")
+b = co.bloque_modelo(co.requisitos([TXT_I2]))
+check("\"reset\":\"I2\"" in b and "senal de arranque (al arrancar" not in b and "detiene Y se borra" in b,
+      "reset = I2 y avisa que I2 tambien para la banda")
+b = co.bloque_modelo(co.requisitos([TXT_AMB]))
+check("\"modo\":\"ciclico\",\"reset\":\"I1\"" in b, "ambos: ciclico con reset = I1")
+b = co.bloque_modelo(co.requisitos(["Cuando S2 cuente 3 cajas prende la roja y se reinicia con I3"]))
+check("PARO DE EMERGENCIA" in b, "I3: se le dice al modelo que no puede ser")
+
+escenario("8. Reset con boton: simulando el PLC")
+T5 = {"timers": [{"id": "T1", "tipo": "PULSO", "entrada": "CT1", "segundos": 5}], "salidas": {"Q5": "T1"}}
+
+
+def ct(**kw):
+    return prog(contadores=[{"id": "CT1", "entrada": "S2", "preset": 3, **kw}], **copy.deepcopy(T5))
+
+
+TXT_I1 = TXT_I2.replace("con I2", "con I1")
+check(verif(ct(modo="una_vez", reset="I1"), TXT_I1) == [], "reset I1 pedido y armado: pasa")
+check(verif(ct(modo="una_vez", reset="I2"), TXT_I2) == [], "reset I2 (que tambien para la banda): pasa")
+f = verif(ct(modo="una_vez"), TXT_I1)
+check(f and "con I1" in f[0], f"sin reset: el boton no lo reinicia ({f})")
+f = verif(ct(modo="una_vez", reset="I2"), TXT_I1)
+check(f and "I1" in f[0], f"reset con OTRO boton: se detecta ({f})")
+check(verif(ct(modo="ciclico", reset="I1"), TXT_AMB) == [], "ambos con ciclico + reset I1: pasa")
+f = verif(ct(modo="ciclico"), TXT_AMB)
+check(f and "no borra la cuenta" in f[0], f"ambos sin reset: el boton no borra la cuenta a medias ({f})")
+f = verif(ct(modo="una_vez", reset="I1"), TXT_AMB)
+check(f and "no vuelve a cero solo" in f[0], f"ambos con una_vez reset I1: no se reinicia solo ({f})")
+
+escenario("9. De punta a punta: el modelo cambia el boton pedido y la simulacion lo devuelve")
+r = generar(TXT_I2, ct(modo="una_vez", reset="I1"), ct(modo="una_vez", reset="I2"))
+check("\"reset\":\"I2\"" in sistema(0), "la receta pide I2")
+check(len(llamadas) == 2 and "I2" in ultimo_usuario(1), "segunda vuelta con la falla del boton")
+check(r.status == "ok" and r.logic["band"]["engine"]["contadores"][0]["reset"] in ("I2",),
+      f"queda con reset I2 ({r.logic['band']['engine']['contadores'][0].get('reset')})")
 
 print(f"\nTODAS LAS PRUEBAS DE CONTADORES PASARON ({OK} comprobaciones).")
