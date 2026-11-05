@@ -194,9 +194,11 @@ check("PASO DE DECISION" in contenido(llamadas[0]), "la receta del ciclo va desd
 check(r.status == "ok" and r.analysis["comportamiento"]["fallas"] == []
       and "etapas (historia completa)" in r.analysis["comportamiento"]["probado"], "la version entregada cumple")
 
-escenario("6. Si nunca cumple, no se presenta como si funcionara")
+escenario("6. Si nunca cumple, se entrega con un aviso corto (sin pedir confirmar)")
 r = generar(TEXTO, REARRANCA, REARRANCA, REARRANCA, acl=ACL)
-check(r.status == "needs_confirmation" and r.analysis["comportamiento"]["fallas"], "queda por confirmar con la falla")
+check(r.status == "ok" and r.analysis["comportamiento"]["fallas"], "se entrega y la falla queda registrada")
+check(any(w.startswith("Al simularlo") and "pide corregirlo" in w for w in r.warnings),
+      f"aviso corto: {r.warnings}")
 
 escenario("7. Correccion: 'la secuencia esta mal' se revisa contra la instruccion original")
 hist = [TEXTO + " [etapa_5_fin: 4 s]"]

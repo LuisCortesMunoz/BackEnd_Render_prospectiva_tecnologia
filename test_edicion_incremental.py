@@ -162,14 +162,15 @@ check(motor_v7(r)["salidas"] == {"Q3": "BANDA_CORRIENDO"}, "con la verde nueva")
 activa = copy.deepcopy(s.logic)
 
 # ---------------------------------------------------------------------------
-escenario("6. Si el modelo insiste en perder piezas, NO reemplaza la logica activa")
+escenario("6. Si el modelo insiste en perder piezas, se entrega avisando que piezas se quitaron")
 r = s.enviar("Agrega que la roja encienda cuando la banda este detenida",
              j([S1], salidas={"Q5": "BANDA_DETENIDA"}),
              j([S1], salidas={"Q5": "BANDA_DETENIDA"}))
-check(r.status == "needs_confirmation", "queda como alternativa que el usuario debe confirmar")
-check(any("no pedia quitar" in x for x in r.analysis["compatibilidad"]["modificado"]),
-      "explica que se quitaron piezas")
-check(s.logic == activa, "la logica activa no cambio")
+check(r.status == "ok", f"se entrega sin pedir confirmar ({r.status})")
+check(any("no pedia quitar" in x for x in r.warnings), f"avisa que se quitaron piezas: {r.warnings}")
+check(s.logic != activa, "pasa a ser la logica activa (si no es lo pedido, el usuario pide corregirlo)")
+s.logic = activa                    # los escenarios siguientes parten de la logica anterior
+s.instrucciones.pop()
 
 # ---------------------------------------------------------------------------
 escenario("7. Eliminar una pieza especifica")

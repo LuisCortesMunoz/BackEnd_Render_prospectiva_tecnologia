@@ -250,10 +250,13 @@ respuestas[:] = [{"name": "Q10-Q11-Q12 en torreta", "banda": {"mover": False},
                                "modificado": ["Q10, Q11 y Q12 no existen: se usan Q3, Q4 y Q5"],
                                "requiere_confirmacion": True}}]
 r = generar(texto3)
-check(r.status == "needs_confirmation" and r.questions[0]["id"] == "confirmar_alternativa",
-      "pide confirmacion antes de usar la alternativa")
-check(r.logic["requiere_confirmacion"] and r.logic["confirmado"] is False, "la alternativa viaja marcada")
+check(r.status == "ok" and not r.questions, "se entrega sin pedir confirmacion")
+check(r.logic["requiere_confirmacion"] is False and r.logic["band"]["engine"]["requiere_confirmacion"] is False,
+      "no viaja marcada como alternativa")
 check(any("Q10" in x for x in r.analysis["compatibilidad"]["modificado"]), "explica que se modifico")
+check(any(w.startswith("Cambios respecto a lo pedido") and "Q10" in w for w in r.warnings),
+      "el cambio va como aviso")
+check(not any("alternativa" in w.lower() for w in r.warnings), "sin la palabra alternativa")
 check(r.analysis["registros"]["campos_activos"] > 0, "registros calculados para revision")
 # (b) el modelo cambia las salidas SIN decirlo: el backend lo detecta
 respuestas[:] = [{"name": "x", "banda": {"mover": False},
@@ -261,22 +264,18 @@ respuestas[:] = [{"name": "x", "banda": {"mover": False},
                       {"salidas": ["Q3"], "segundos": 2}, {"salidas": ["Q4"], "segundos": 3},
                       {"salidas": ["Q5"], "segundos": 4}]}]}]
 r2 = generar(texto3)
-check(r2.status == "needs_confirmation"
-      and any("Q10" in x for x in r2.analysis["compatibilidad"]["modificado"]),
-      "deteccion determinista: Q10..Q12 nombradas pero no usadas -> confirmacion")
-# (c) /aplicar-plc rechaza la alternativa sin confirmar
-try:
-    app.aplicar_plc(app.AplicarPLCRequest(logic=r.logic, device="banda", ip="127.0.0.1"))
-    check(False, "no debe cargar una alternativa sin confirmar")
-except app.HTTPException as e:
-    check(e.status_code == 409, "409: falta la confirmacion humana")
-check(r.logic["band"]["engine"]["confirmado"] is False, "la marca viaja tambien dentro de band.engine")
-try:
-    app.banda_config(app.BandaConfigRequest(band=r.logic["band"], ip="127.0.0.1"))
-    check(False, "el panel de la banda tampoco debe cargarla sin confirmar")
-except app.HTTPException as e:
-    check(e.status_code == 409, "409 tambien por /banda/config (el panel solo manda 'band')")
-# (d) comportamiento real en el ST (con la alternativa aceptada)
+check(r2.status == "ok"
+      and any("Q10" in x for x in r2.analysis["compatibilidad"]["modificado"])
+      and any("Q10" in w for w in r2.warnings),
+      "deteccion determinista: Q10..Q12 nombradas pero no usadas -> aviso")
+# (c) /aplicar-plc y /banda/config ya no la bloquean (sin 409 por confirmacion)
+d = app.aplicar_plc(app.AplicarPLCRequest(logic=r.logic, device="banda", dry_run=True))
+check(d["status"] == "dry-run", "/aplicar-plc la acepta sin confirmar")
+viejo = {**r.logic["band"], "engine": {**r.logic["band"]["engine"], "requiere_confirmacion": True,
+                                       "confirmado": False}}
+d = app.banda_config(app.BandaConfigRequest(band=viejo, dry_run=True))
+check(d["status"] == "dry-run", "/banda/config tampoco bloquea un programa viejo marcado sin confirmar")
+# (d) comportamiento real en el ST
 sim = cargar(r.logic["band"])
 sim.pulsar("I1", 0.1)
 t1 = tiempo_hasta(sim, lambda s: s.q("Q4"))
@@ -471,8 +470,8 @@ respuestas[:] = [{"name": "30 Hz con pausa", "banda": {"mover": True, "direccion
                                                 "la banda se detiene 5 s"],
                                "requiere_confirmacion": True}}]
 r = generar("A 30 Hz con I1; cuando S1 detecte baja a 10 Hz durante 5 s y vuelve a 30; I2 para")
-check(r.status == "needs_confirmation" and r.analysis["compatibilidad"]["compatibilidad"] == "parcial",
-      "alternativa con confirmacion")
+check(r.status == "ok" and r.analysis["compatibilidad"]["compatibilidad"] == "parcial",
+      "compatibilidad parcial, entregada sin pedir confirmacion")
 check(r.analysis["compatibilidad"]["simplificado"], "explica que se simplifico")
 logic = dict(r.logic, confirmado=True)
 d = app.aplicar_plc(app.AplicarPLCRequest(logic=logic, device="banda", dry_run=True))
@@ -1110,8 +1109,8 @@ def caso_general(texto, proceso):
                                    "modificado": ["valores tipicos"], "simplificado": [], "no_soportado": [],
                                    "requiere_confirmacion": True}}]
     r = generar(texto)
-    check(r.status == "needs_confirmation" and r.analysis["proceso"]["id"] == proceso["id"],
-          f"'{texto}' -> plantilla {proceso['id']} con confirmacion")
+    check(r.status == "ok" and r.analysis["proceso"]["id"] == proceso["id"],
+          f"'{texto}' -> plantilla {proceso['id']}")
     band = r.logic["band"]
     band["engine"]["confirmado"] = True
     return r, cargar(band)

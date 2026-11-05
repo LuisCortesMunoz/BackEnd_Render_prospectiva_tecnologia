@@ -139,10 +139,12 @@ r = generar("haz que la banda se detenga por sí sola", SOLA_MAL, SOLA_10, prev=
 check(len(llamadas) == 2 and "NO hace lo pedido" in contenido(llamadas[1]), "segunda vuelta con la falla simulada")
 check(r.status == "ok" and r.analysis["comportamiento"]["fallas"] == [], "la version final si cumple")
 
-escenario("6. Si nunca cumple, NO se presenta como si funcionara")
+escenario("6. Si nunca cumple, se entrega con un aviso corto (sin pedir confirmar)")
 r = generar("haz que la banda se detenga por sí sola", SOLA_MAL, SOLA_MAL, SOLA_MAL, prev=BASE, historial=HIST, acl=acl)
-check(r.status == "needs_confirmation" and r.analysis["comportamiento"]["fallas"],
-      f"queda por confirmar con la falla explicada ({r.status})")
+check(r.status == "ok" and r.analysis["comportamiento"]["fallas"],
+      f"se entrega y la falla queda registrada ({r.status})")
+check(any("pide corregirlo" in w for w in r.warnings), f"aviso corto para pedir la correccion: {r.warnings}")
+check(not any("alternativa" in w.lower() for w in r.warnings), "no se presenta como alternativa")
 
 # ─────────────────────────────────────────────────────────────────────────
 escenario("7. Correccion: 'no esta funcionando' cambia las reglas y lleva el diagnostico de la simulacion")

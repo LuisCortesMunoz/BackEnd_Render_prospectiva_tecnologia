@@ -2875,11 +2875,11 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
       3. el modelo genera y se valida igual que siempre.
 
     Estados de la respuesta:
-      ok                  -> programa compatible: el editor lo carga y el
-                             usuario decide cuando mandarlo al PLC.
-      needs_confirmation  -> alternativa que CAMBIA algo de lo pedido: se
-                             explica que se conservo / modifico / simplifico y
-                             el PLC no la acepta sin confirmacion explicita.
+      ok                  -> el editor lo carga y el usuario decide cuando
+                             mandarlo al PLC. Si el modelo cambio algo de lo
+                             pedido, o el orden / la simulacion no quedaron
+                             exactos, va como aviso corto (sin pedir confirmar):
+                             si no es lo pedido, el usuario pide corregirlo.
       needs_clarification -> falta un dato imprescindible.
       not_supported       -> no hay alternativa segura: se informa por que."""
     import lavo_motor
@@ -3066,6 +3066,22 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         if not errores and etapas["aplica"]:
             orden = etapas_orden.verificar(cand, etapas, "banda")
             if orden:
+                # Error tipico: la espera del sensor quedo un paso corrida. Se
+                # repara sin llamar al modelo y solo se usa si la copia valida y
+                # respeta el orden (la simulacion de la historia viene despues).
+                rep = etapas_orden.reparar_esperas(candidato, etapas)
+                if rep is not None:
+                    try:
+                        cand_r = lavo_motor.cfg_desde_respuesta(rep)
+                        cand_r["respuesta_llm"] = {k: v for k, v in rep.items()
+                                                   if k not in ("analisis", "preguntas", "no_soportado")}
+                        if not validar_logica_banda(cand_r) and not etapas_orden.verificar(cand_r, etapas, "banda"):
+                            log.info(f"Banda v7 orden reparado sin el modelo: {orden}")
+                            metricas_lavo.sumar("orden_reparado", 1)
+                            candidato, cand, orden = rep, cand_r, []
+                    except (ValueError, TypeError) as e:
+                        log.warning(f"No se pudo reparar el orden: {e}")
+            if orden:
                 sin_orden = (cand, candidato)
                 if intento < intentos:
                     log.warning(f"Banda v7 orden {intento}/{intentos}: {orden}")
@@ -3130,15 +3146,13 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         cfg, candidato = sin_comportamiento
         fallas = comportamiento.verificar(cfg, reqs) or simulacion_etapas.verificar(cfg, etapas)
     analisis_llm = candidato.get("analisis") if isinstance(candidato, dict) else {}
-    if cfg is not None and fallas:
-        # No se presenta como si funcionara: se dice que falla y se pide confirmar.
-        analisis_llm = dict(analisis_llm or {})
-        analisis_llm["modificado"] = list(analisis_llm.get("modificado") or []) + [
-            "Al simular el PLC la logica todavia NO cumple: " + " ".join(fallas)]
-        analisis_llm["requiere_confirmacion"] = True
-    # Avisos informativos (no obligan a confirmar): diagnostico de la correccion
-    # y piezas que se reemplazaron para corregirla.
+    # Avisos informativos: el programa se entrega igual (sin pedir confirmar);
+    # si no hace lo pedido, el usuario pide corregirlo. El detalle tecnico de
+    # las fallas queda en analysis.comportamiento y en el log.
     avisos_extra = []
+    if cfg is not None and fallas:
+        log.warning(f"Banda v7: la simulacion aun no cumple: {fallas}")
+        avisos_extra.append(_aviso_simulacion(fallas))
     if cfg is not None and correccion:
         diag = (analisis_llm or {}).get("diagnostico") or "; ".join(diagnostico)
         if diag:
@@ -3146,10 +3160,9 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         quitadas = edicion_incremental.piezas_perdidas("banda", prev, cfg.get("respuesta_llm") or {})
         if quitadas:
             avisos_extra.append("Para corregir la falla se reemplazaron: " + ", ".join(quitadas) + ".")
-    if cfg is not None and orden:
-        analisis_llm = dict(analisis_llm or {})
-        analisis_llm["modificado"] = list(analisis_llm.get("modificado") or []) + [etapas_orden.aviso(orden)]
-        analisis_llm["requiere_confirmacion"] = True
+    if cfg is not None and orden and not fallas:
+        log.warning(f"Banda v7: el orden no quedo exacto: {orden}")
+        avisos_extra.append(etapas_orden.aviso(orden))
     if cfg is None:
         compat = lavo_motor.analizar_compatibilidad(texto, {"enable": False, "engine": {}}, analisis_llm)
         compat["no_soportado"] = compat["no_soportado"] + errores
@@ -3161,10 +3174,7 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
             analysis={"equipo": "banda", "motor_v7": True, "compatibilidad": compat, "contexto": plan})
 
     if perdidas:
-        analisis_llm = dict(analisis_llm or {})
-        analisis_llm["modificado"] = list(analisis_llm.get("modificado") or []) + [
-            edicion_incremental.aviso_perdidas(perdidas)]
-        analisis_llm["requiere_confirmacion"] = True
+        avisos_extra.append(edicion_incremental.aviso_perdidas(perdidas))
 
     return _respuesta_banda_v7(texto, cfg, analisis_llm, extra={
         "fuente": "modelo", "contexto": plan, "edicion": bool(prev),
@@ -3227,6 +3237,14 @@ def _reusar_banda_v7(texto: str, reg: dict):
         confirmada_antes=bool(cfg.get("confirmado")))
 
 
+def _aviso_simulacion(fallas: list) -> str:
+    """Nota corta cuando la simulacion del PLC muestra que algo no cumple."""
+    etapas = sorted({int(n) for f in fallas for n in re.findall(r"\betapa (\d+)", f, re.I)})
+    cuales = f" (etapa{'s' if len(etapas) > 1 else ''} {', '.join(map(str, etapas))})" if etapas else ""
+    return (f"Al simularlo, algo no salió como lo pediste{cuales}. Pruébalo y, si no hace lo que "
+            "pediste, pide corregirlo.")
+
+
 def _respuesta_banda_v7(texto: str, cfg: dict, analisis_llm: dict, extra: dict = None,
                         confirmada_antes: bool = False) -> "LogicaResponse":
     """Compatibilidad, registros, historial y estado final (modelo o memoria)."""
@@ -3267,21 +3285,15 @@ def _respuesta_banda_v7(texto: str, cfg: dict, analisis_llm: dict, extra: dict =
     except Exception as e:
         log.warning(f"No se pudo guardar ejemplo (banda v7): {e}")
 
+    # Sin "alternativa" que confirmar: el programa se entrega y se puede cargar.
+    # Lo que el modelo cambio o simplifico va como aviso; si no es lo pedido,
+    # el usuario pide corregirlo.
     status, questions = "ok", []
-    if compat["requiere_confirmacion"] and confirmada_antes:
-        # El usuario ya confirmo ESTA alternativa para ESTA instruccion al guardarla.
-        cfg["requiere_confirmacion"] = cfg["band"]["engine"]["requiere_confirmacion"] = True
-        cfg["confirmado"] = cfg["band"]["engine"]["confirmado"] = True
-        warnings.append("Alternativa confirmada antes por el usuario al guardarla en la memoria validada.")
-    elif compat["requiere_confirmacion"]:
-        status = "needs_confirmation"
-        cfg["requiere_confirmacion"] = True
-        cfg["confirmado"] = False
-        cfg["band"]["engine"]["requiere_confirmacion"] = True
-        cfg["band"]["engine"]["confirmado"] = False
-        questions = [{"id": "confirmar_alternativa", "campo": "confirmar_alternativa",
-                      "pregunta": "La instruccion no se puede cumplir exactamente. ¿Usar esta alternativa?",
-                      "opciones": ["Usar la alternativa", "Cancelar"]}]
+    cfg["requiere_confirmacion"] = cfg["band"]["engine"]["requiere_confirmacion"] = False
+    cfg["confirmado"] = cfg["band"]["engine"]["confirmado"] = True
+    cambios = [str(x) for x in compat["modificado"] + compat["simplificado"]]
+    if cambios:
+        warnings.append("Cambios respecto a lo pedido: " + "; ".join(cambios))
     log.info(f"/generar-logica OK (BANDA v7, {status}) — {nombre_prog}")
     return LogicaResponse(
         logic=cfg, name=nombre_prog, outputs=0, device="banda", status=status, questions=questions,
@@ -4606,21 +4618,6 @@ def _aplicar_plc_maletin(cfg: dict, req: AplicarPLCRequest):
             "notas": notas}
 
 
-def _guardia_confirmacion(cfg: dict):
-    """Motor v7: una ALTERNATIVA (algo distinto de lo pedido) no llega al PLC
-    sin que el usuario la haya aceptado expresamente. La marca viaja dentro de
-    band.engine porque el panel de la banda solo reenvia el bloque 'band'."""
-    band = (cfg or {}).get("band") or {}
-    eng = band.get("engine") if isinstance(band.get("engine"), dict) else {}
-    pide = bool(cfg.get("requiere_confirmacion") or eng.get("requiere_confirmacion"))
-    ok = cfg.get("confirmado") is True or eng.get("confirmado") is True
-    if pide and not ok:
-        cambios = ((cfg.get("compatibilidad") or {}).get("modificado") or [])
-        raise HTTPException(409, "Este programa es una alternativa que cambia lo pedido"
-                            + (": " + "; ".join(cambios) if cambios else "")
-                            + ". Acepta la alternativa en el editor antes de cargarla al PLC.")
-
-
 def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
     """MODO BANDA: PLC independiente (plc_banda / clase BandaPLC).
 
@@ -4650,8 +4647,6 @@ def _aplicar_plc_banda(cfg: dict, req: AplicarPLCRequest):
                 "requiere_start": plc_banda.requiere_start(cfg),
                 "boton_start": plc_banda.boton_start(cfg),
                 "arranque_texto": plc_banda.texto_arranque(cfg)}
-
-    _guardia_confirmacion(cfg)
 
     # El PLC destino lo elige el USUARIO: el backend no adivina cual es la
     # banda (sin autodeteccion) ni decide que IP pertenece a que equipo.
@@ -4872,8 +4867,6 @@ def banda_config(req: BandaConfigRequest):
     ]
     avisos = plc_banda.avisos_config(cfg)
 
-    if not req.dry_run:
-        _guardia_confirmacion(cfg)
     if req.dry_run:
         return {"status": "dry-run", "enviado": False, "device": "banda",
                 "plan": plan_legible, "avisos": avisos,
@@ -5318,13 +5311,7 @@ def _errores_enlace(cfg: dict, device: str) -> list:
             errores = _errores_banda(cfg)
         except Exception as e:
             return [f"No se pudo validar la configuracion de la banda: {e}"]
-        if errores:
-            return errores
-        try:
-            _guardia_confirmacion(cfg)
-        except HTTPException as e:
-            return [e.detail]
-        return []
+        return errores
     if isinstance(cfg.get("band"), dict):
         return ["El programa trae el bloque 'band' (banda) y va al PLC del maletin."]
     try:

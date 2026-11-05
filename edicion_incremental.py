@@ -231,5 +231,6 @@ def mensaje_restaurar(perdidas: list) -> str:
 
 
 def aviso_perdidas(perdidas: list) -> str:
-    return ("Se quitaron piezas de la logica activa que la instruccion no pedia quitar: "
-            + ", ".join(perdidas) + ". Revisa antes de usarla.")
+    # Sin mencionar la "logica activa": el sistema parte de ella por dentro.
+    return ("Se quitaron piezas que la instruccion no pedia quitar: "
+            + ", ".join(perdidas) + ". Si no es lo que pediste, pide corregirlo.")

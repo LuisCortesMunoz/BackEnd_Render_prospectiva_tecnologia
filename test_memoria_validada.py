@@ -263,7 +263,8 @@ s = sistema(0)
 check("REFERENCIA DEL CATALOGO" in s and "encajado" in s.lower(), "recibe el proceso de empaquetado")
 check("Línea de embotellado" not in s, "no recibe la referencia de procesos que no se pidieron")
 check(r.analysis["contexto"]["procesos"] == ["empaquetado"], "el plan registra el proceso usado")
-check(r.status == "needs_confirmation", "una propuesta adaptada requiere confirmacion")
+check(r.status == "ok" and any(w.startswith("Cambios respecto a lo pedido") for w in r.warnings),
+      "una propuesta adaptada se entrega con sus cambios como aviso")
 cerrar()
 
 

@@ -761,7 +761,48 @@ def mensaje_corregir(problemas: list) -> str:
 
 
 def aviso(problemas: list) -> str:
-    return "El orden pedido no quedo exacto, revisalo antes de cargar: " + " ".join(problemas)
+    """Nota corta para el usuario (el detalle tecnico se queda en el log)."""
+    etapas = sorted({int(n) for p in problemas for n in re.findall(r"\betapa (\d+)", p)})
+    cuales = (f" (etapa{'s' if len(etapas) > 1 else ''} "
+              + ", ".join(str(n) for n in etapas[:-1]) + (" y " if len(etapas) > 1 else "")
+              + f"{etapas[-1]})") if etapas else ""
+    return (f"Puede que el orden no quede exacto{cuales}. Pruébalo y, si no hace lo que pediste, "
+            "pide corregirlo.")
+
+
+# ── Reparacion sin modelo: la espera del sensor quedo un paso corrida ───────
+def reparar_esperas(resp: dict, det: dict):
+    """El modelo suele poner "cuando S1 detecte" en el MISMO paso que hace la
+    accion (las plumas se mueven de inmediato y LUEGO espera a S1) en vez de
+    en el paso anterior. Aqui, sin llamar otra vez al modelo: el paso anterior
+    a cada etapa que entra con una senal pasa a avanzar con flanco de esa
+    senal. Devuelve una copia reparada, o None si no hubo nada que reparar.
+    Quien llama debe volver a validar y verificar la copia antes de usarla."""
+    import copy
+    if not det.get("aplica") or not isinstance(resp, dict):
+        return None
+    rep = copy.deepcopy(resp)
+    cadenas = [[p for p in c if isinstance(p, dict) and not _es_decision(p)] for c in _cadenas_banda(rep)]
+    if not cadenas:
+        return None
+    cambios = 0
+    for g in det.get("grupos") or [{"etapas": [e["n"] for e in det["etapas"]]}]:
+        de_g = [e for e in det["etapas"] if e["n"] in g["etapas"]]
+        mejor = min(cadenas, key=lambda c: len(_verificar_cadena(de_g, c, _cumple_banda, "banda")))
+        pos, previo = 0, -1
+        for e in de_g:
+            j = next((k for k in range(pos, len(mejor)) if all(_cumple_banda(mejor[k], r) for r in e["requisitos"])),
+                     None)
+            if j is None:
+                break
+            s = e.get("entra_con")
+            if s and previo >= 0 and j > 0 and not any(_mismo(p.get("senal"), s) for p in mejor[previo:j]):
+                ant = mejor[j - 1]
+                ant["avanza"], ant["senal"] = "flanco", s
+                ant.pop("segundos", None)
+                cambios += 1
+            pos, previo = (j, j - 1) if _solo_paro(e) else (j + 1, j)
+    return rep if cambios else None
 
 
 # ── Etapas de la instruccion original (correcciones) ───────────────────────

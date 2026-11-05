@@ -177,8 +177,7 @@ malo = {"device": "banda", "name": "x",
                  "engine": {"version": 7, "motor": {"arranque": "I1", "paro": "I2"}}}}
 check(app._errores_enlace(malo, "banda") != [], "frecuencia imposible: rechazada")
 alt = {**BANDA, "requiere_confirmacion": True, "confirmado": False}
-check(any("alternativa" in x for x in app._errores_enlace(alt, "banda")), "alternativa sin confirmar: rechazada")
-check(app._errores_enlace({**alt, "confirmado": True}, "banda") == [], "alternativa confirmada: pasa")
+check(app._errores_enlace(alt, "banda") == [], "ya no hay alternativas por confirmar: pasa")
 print(f"   OK ({OK})")
 
 # ---------------------------------------------------------------------------

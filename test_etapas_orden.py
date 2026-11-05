@@ -189,12 +189,15 @@ check(sim.q("Q5") and not sim.q("Q8"), "luego la roja")
 sim.correr(5.5)
 check(not sim.salidas() and sim.motor() == "paro", "al final todo queda apagado y la banda detenida")
 
-escenario("5. Si insiste en el orden equivocado: alternativa por confirmar (no se carga sola)")
+escenario("5. Si insiste en el orden equivocado: se entrega con un aviso corto (sin pedir confirmar)")
 mal = copy.deepcopy(BIEN)
 mal["secuencias"][0]["pasos"][1:] = mal["secuencias"][0]["pasos"][2:0:-1]
 r = generar(TEXTO, mal, mal, mal)
-check(r.status == "needs_confirmation", f"needs_confirmation ({r.status})")
-check(any("orden pedido" in x for x in r.analysis["compatibilidad"]["modificado"]), "explica que el orden no quedo")
+check(r.status == "ok", f"se entrega ({r.status})")
+check(any("Puede que el orden no quede exacto" in w and "pide corregirlo" in w for w in r.warnings),
+      f"aviso corto del orden: {r.warnings}")
+check(not any("paso anterior" in w or "alternativa" in w.lower() for w in r.warnings),
+      "sin el texto tecnico ni la palabra alternativa")
 
 # ---------------------------------------------------------------------------
 escenario("6. motor.arranque + secuencia que mueve la banda: no vuelve a arrancar sola")
@@ -536,5 +539,43 @@ check("SECUENCIA SQ2" in "\n".join(m["content"] for m in llamadas[0] if m["role"
       "el prompt (system) lleva la segunda secuencia")
 check(eo.verificar(cfg(SEC12_BIEN), d, "banda") == [], f"verifica: {eo.verificar(cfg(SEC12_BIEN), d, 'banda')}")
 cargar(cfg(SEC12_BIEN)["band"])
+
+escenario("16. La espera del sensor quedo un paso corrida: se repara sin volver a llamar al modelo")
+# Caso real (4 nov): el modelo puso "espera S1" en el MISMO paso que mueve las plumas (se movian
+# antes de que S1 detectara) y la de S2 en el siguiente; salia el aviso de orden y una "alternativa".
+REAL = ("Al presionar el pulsador I1, la banda transportadora se pone en marcha a una frecuencia de 20 Hz. "
+        "Cuando el Sensor 1 detecta un objeto, la pluma 1 se eleva y la pluma 2 desciende. Posteriormente, al "
+        "activarse el Sensor 2, la pluma 2 se eleva y la pluma 1 desciende, registrando un conteo. Una vez que "
+        "el Sensor 2 acumula 3 detecciones, la banda continúa avanzando durante 5 segundos y luego se detiene "
+        "automáticamente; a continuación, la pluma 1 se eleva, la pluma 2 desciende y el contador se reinicia "
+        "a cero en ese orden.")
+ANALISIS = {"intencion": "x", "compatibilidad": "total", "conservado": [], "modificado": [], "simplificado": [],
+            "no_soportado": [], "requiere_confirmacion": False}
+CORRIDA = {"name": "Plumas con conteo", "banda": {"mover": True, "direccion": "derecha", "frecuencia_hz": 20},
+           "contadores": [{"id": "CT1", "entrada": "S2", "preset": 3, "modo": "una_vez", "reset": "SQ1_FIN"}],
+           "secuencias": [{"id": "SQ1", "inicio": "I1", "paro": "I2", "modo": "una_vez", "pasos": [
+               {"motor": ["marcha"], "avanza": "tiempo", "segundos": 0.5},
+               {"salidas": ["Q8", "Q7"], "motor": ["marcha"], "avanza": "flanco", "senal": "S1"},
+               {"salidas": ["Q6", "Q9"], "motor": ["marcha"], "avanza": "tiempo", "segundos": 2},
+               {"salidas": [], "motor": [], "avanza": "tiempo", "segundos": 0, "siguiente": 1,
+                "alternativa": {"senal": "CT1", "ir_a": 5}},
+               {"motor": ["marcha"], "avanza": "tiempo", "segundos": 5},
+               {"salidas": ["Q8", "Q7"], "avanza": "tiempo", "segundos": 2}]}],
+           "analisis": ANALISIS, "preguntas": []}
+d = eo.detectar(REAL, "banda", {})
+check(eo.verificar(cfg(CORRIDA), d, "banda"), "el JSON del modelo tiene el orden corrido")
+rep = eo.reparar_esperas(CORRIDA, d)
+pasos = rep["secuencias"][0]["pasos"]
+check(pasos[0]["senal"] == "S1" and pasos[1]["senal"] == "S2" and "segundos" not in pasos[0],
+      "la espera de S1 pasa al paso anterior a las plumas y la de S2 al de las plumas")
+check(CORRIDA["secuencias"][0]["pasos"][0].get("senal") is None, "no toca el original")
+check(eo.reparar_esperas(BIEN, eo.detectar(TEXTO, "banda")) is None, "un JSON correcto no se repara")
+r = generar(REAL, CORRIDA)                  # una sola respuesta preparada: si llamara otra vez, falla
+check(r.status == "ok" and len(llamadas) == 1, f"se repara sin otra llamada al modelo ({r.status})")
+check(r.analysis["comportamiento"]["fallas"] == [], "la historia completa se cumple al simular")
+check(not any("orden" in w or "alternativa" in w.lower() or "simularlo" in w for w in r.warnings),
+      f"sin avisos de orden ni de alternativa: {r.warnings}")
+eng = r.logic["band"]["engine"]
+check(eng["secuencias"][0]["pasos"][0]["senal"] in ("S1", "I4"), "el programa entregado es el reparado")
 
 print(f"\nTODAS LAS PRUEBAS DE ACCIONES EN ORDEN PASARON ({OK} comprobaciones).")
