@@ -136,6 +136,7 @@ import preguntas_banda
 import etapas_orden
 import comportamiento
 import simulacion_etapas
+import intencion_banda
 import enlace_lentes
 try:
     import memoria_validada
@@ -2892,21 +2893,12 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     historial = (req.contexto.historial if req.contexto else None) or []
     # "revisa", "no esta funcionando", "corrige"...: la logica activa falla.
     correccion = bool(prev) and edicion_incremental.es_correccion(texto)
-    # Acciones en orden pedidas en ESTA instruccion; en una correccion ("la
-    # secuencia esta mal") las de la instruccion original del historial.
-    etapas = etapas_orden.detectar(texto, "banda", acl)
-    etapas_de_historial = False
-    if correccion and not etapas["aplica"]:
-        etapas = etapas_orden.de_historial(historial, "banda", acl)
-        etapas_de_historial = etapas["aplica"]
-    # Comportamientos que se pueden probar simulando el PLC (de toda la sesion).
-    reqs = comportamiento.de_sesion(historial, texto, acl)
-    if etapas["aplica"]:
-        # En una secuencia el paro automatico es una etapa: lo prueba la
-        # simulacion de etapas (con sus tiempos), no la prueba suelta.
-        # El conteo dentro de una secuencia depende de las etapas anteriores
-        # (S1 antes de contar en S2...): tambien lo prueba la simulacion de etapas.
-        reqs = [r for r in reqs if r["tipo"] not in ("para_sola", "conteo")]
+    # Lo que se entendio de la instruccion, en un solo formato (intencion_banda):
+    # movimiento basico, acciones en orden y comportamientos que se prueban simulando.
+    intencion = intencion_banda.analizar(texto, historial, acl, prev, correccion)
+    etapas, etapas_de_historial = intencion["etapas"], intencion["etapas_de_historial"]
+    reqs, mov = intencion["requisitos"], intencion["movimiento"]
+    log.info(f"/generar-logica banda v7: intencion {intencion_banda.resumen(intencion)}")
     if comportamiento.paro_solo_sin_condicion(reqs, acl):
         log.info("/generar-logica banda v7: paro automatico sin condicion — se pregunta")
         return LogicaResponse(
@@ -2932,7 +2924,6 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
 
     # "Quiero mover la banda": arranque, direccion, frecuencia y paro se eligen
     # con opciones del hardware; con todo respondido se arma sin el modelo.
-    mov = preguntas_banda.analizar(texto, prev, acl)
     if mov["aplica"]:
         if mov["preguntas"]:
             log.info(f"/generar-logica banda v7: movimiento incompleto — {[q['campo'] for q in mov['preguntas']]}")
@@ -2989,10 +2980,7 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         previas = "\n".join(f"- {p}" for p in historial[-4:])
         messages.append({"role": "user", "content": f"Peticiones anteriores del usuario:\n{previas}"})
         messages.append({"role": "assistant", "content": "Entendido. Devolvere el JSON completo del motor v7."})
-    if etapas["aplica"]:
-        messages.append({"role": "system", "content": etapas_orden.bloque_modelo(etapas, "banda")})
-    if reqs:
-        messages.append({"role": "system", "content": comportamiento.bloque_modelo(reqs)})
+    messages += intencion_banda.bloques_modelo(intencion)
     messages.append({"role": "user", "content": aclaraciones.mensaje_usuario(texto, _acl(req))})
 
     # Edicion: si la version nueva pierde piezas que no se pidio quitar, se le
@@ -3180,6 +3168,7 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
 
     return _respuesta_banda_v7(texto, cfg, analisis_llm, extra={
         "fuente": "modelo", "contexto": plan, "edicion": bool(prev),
+        "intencion": intencion_banda.resumen(intencion),
         "memorias_referencia": [{"id": r["id"], "similitud": p} for p, r in similares],
         # Validacion final por simulacion: que se probo y si cumple.
         "comportamiento": {"probado": [r["tipo"] + (f" {r['senal']}" if r.get("senal") else "")
