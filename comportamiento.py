@@ -87,12 +87,12 @@ _RX_TOGGLE = re.compile(r"\b(?:presion\w*|puls\w*|oprim\w*|apriet\w*|tocar\w*|to
 _RX_TOGGLE_PARO = re.compile(rf"\b{_VERBO_PARO}|\bapag\w*")
 _RX_BOTON_TEXTO = re.compile(r"\b(i ?[12]|boton verde|boton rojo)\b")
 _RX_PARO_BOTON = re.compile(rf"\b(?:con|al (?:presionar|pulsar|oprimir)|presionando|pulsando|cuando (?:presione|pulse))\s+"
-                            rf"(?:el |la )?(?:boton )?(i ?[12]|boton rojo|boton verde|rojo|verde)\b{_SIN_OTRO}{{0,40}}?\b"
+                            rf"(?:el |la )?(?:boton |pulsador )?(i ?[12]|boton rojo|boton verde|rojo|verde)\b{_SIN_OTRO}{{0,40}}?\b"
                             rf"{_VERBO_PARO}|\b(i ?[12])\s+(?:la |lo )?(?:detiene|para|apaga|frena)\b")
 _RX_ARRANQUE_BOTON = re.compile(rf"\b(?:con|al (?:presionar|pulsar|oprimir)|presionando|pulsando|cuando (?:presione|pulse))\s+"
-                                rf"(?:el |la )?(?:boton )?(i ?[12]|boton verde|boton rojo)\b{_SIN_OTRO}{{0,40}}?\b"
+                                rf"(?:el |la )?(?:boton |pulsador )?(i ?[12]|boton verde|boton rojo)\b{_SIN_OTRO}{{0,40}}?\b"
                                 r"(?:arranc\w*|avanc\w*|avanz\w*|muev\w*|se pone en marcha)|"
-                                r"\barranca\w* con (?:el |la )?(?:boton )?(i ?[12])\b")
+                                r"\barranca\w* con (?:el |la )?(?:boton |pulsador )?(i ?[12])\b")
 
 
 # "Cuando S2 cuente 3 cajas prende la roja 5 s y que el contador se reinicie solo",

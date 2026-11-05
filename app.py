@@ -137,6 +137,7 @@ import etapas_orden
 import comportamiento
 import simulacion_etapas
 import intencion_banda
+import constructores_banda
 import enlace_lentes
 try:
     import memoria_validada
@@ -727,6 +728,8 @@ EJEMPLOS
 # alternativa mas cercana con su analisis; lavo_motor.py valida, compila a
 # %R1010..%R1649 y decide si hace falta confirmacion humana.
 BANDA_MOTOR_V7 = os.environ.get("BANDA_MOTOR_V7", "0").strip() == "1"
+# Etapa 3: armar sin el modelo lo que se entiende sin ambiguedad (LAVO_CONSTRUCTORES=0 lo apaga).
+CONSTRUCTORES_BANDA = os.environ.get("LAVO_CONSTRUCTORES", "1").strip() != "0"
 
 SYSTEM_PROMPT_BANDA_V7 = """Eres el programador del PLC Horner XL4 de una BANDA TRANSPORTADORA con el programa maestro LAVO v7.
 El PLC ejecuta un MOTOR GENERAL: tu trabajo es CONSTRUIR el comportamiento pedido conectando bloques, no elegir
@@ -2949,6 +2952,29 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                 analysis={"equipo": "banda", "motor_v7": True, "etapas": etapas["etapas"]})
     metricas_lavo.poner("etapas_orden", len(etapas["etapas"]))
 
+    # Etapa 3: lo que se entiende sin ambiguedad (motor, alternancia, conteo,
+    # torreta, plumas) se arma SIN el modelo con recetas probadas en el ST; se
+    # valida y se simula antes de entregarlo. Si una frase no se entiende, va al
+    # modelo como siempre, con las piezas ya armadas de las demas frases.
+    piezas_armadas = None
+    if CONSTRUCTORES_BANDA and not prev and not correccion:
+        cons = constructores_banda.construir(texto, intencion, acl)
+        if cons["pregunta"]:
+            log.info(f"/generar-logica banda v7: constructor pregunta {cons['pregunta'].get('campo')}")
+            return LogicaResponse(
+                logic={}, name="", outputs=0, device="banda", status="needs_clarification",
+                questions=[cons["pregunta"]], assumptions=[],
+                analysis={"equipo": "banda", "motor_v7": True, "constructor": True,
+                          "intencion": intencion_banda.resumen(intencion)})
+        if cons["resp"]:
+            r = _respuesta_constructor(texto, cons["resp"], reqs, intencion)
+            if r is not None:
+                return r
+        elif cons["piezas"] and cons["piezas"][0]:
+            piezas_armadas = cons["piezas"]
+        if cons["motivo"]:
+            log.info(f"/generar-logica banda v7: constructor no armo todo ({cons['motivo']})")
+
     if CONTEXTO_RAMIFICADO:
         if _pide_ampliar_catalogo(texto) or aclaraciones.autoriza_catalogo(acl):
             return _respuesta_ampliar_catalogo(texto)
@@ -2981,6 +3007,9 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         messages.append({"role": "user", "content": f"Peticiones anteriores del usuario:\n{previas}"})
         messages.append({"role": "assistant", "content": "Entendido. Devolvere el JSON completo del motor v7."})
     messages += intencion_banda.bloques_modelo(intencion)
+    if piezas_armadas:
+        messages.append({"role": "system", "content": constructores_banda.bloque_piezas(piezas_armadas)})
+        metricas_lavo.poner("piezas_armadas", True)
     messages.append({"role": "user", "content": aclaraciones.mensaje_usuario(texto, _acl(req))})
 
     # Edicion: si la version nueva pierde piezas que no se pidio quitar, se le
@@ -3176,6 +3205,32 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                            "fallas": fallas},
         "avisos": avisos_extra,
         **({"correccion": True, "diagnostico": diagnostico} if correccion else {})})
+
+
+def _respuesta_constructor(texto: str, resp: dict, reqs: list, intencion: dict):
+    """Programa armado sin el modelo (constructores_banda): se valida y se
+    simula; None = algo no cumple y lo resuelve el modelo como siempre."""
+    import lavo_motor
+    try:
+        cand = lavo_motor.cfg_desde_respuesta(resp)
+        cand["respuesta_llm"] = {k: v for k, v in resp.items() if k not in ("analisis", "preguntas", "no_soportado")}
+        errores = validar_logica_banda(cand)
+    except (ValueError, TypeError) as e:
+        errores, cand = [str(e)], None
+    if errores:
+        log.warning(f"Constructor de la banda: no valida ({errores}); lo resuelve el modelo.")
+        return None
+    fallas = comportamiento.verificar(cand, reqs)
+    if fallas:
+        log.warning(f"Constructor de la banda: la simulacion no cumple ({fallas}); lo resuelve el modelo.")
+        return None
+    log.info("/generar-logica banda v7: armado por los constructores, sin llamar al modelo")
+    metricas_lavo.poner("fuente", "constructor")
+    metricas_lavo.poner("contexto", ["constructores"])
+    return _respuesta_banda_v7(texto, cand, resp.get("analisis") or {}, extra={
+        "fuente": "constructor", "edicion": False, "intencion": intencion_banda.resumen(intencion),
+        "comportamiento": {"probado": [r["tipo"] + (f" {r['senal']}" if r.get("senal") else "") for r in reqs],
+                           "fallas": []}})
 
 
 def _movimiento_desde_aclaraciones(texto: str, prev, acl: dict):

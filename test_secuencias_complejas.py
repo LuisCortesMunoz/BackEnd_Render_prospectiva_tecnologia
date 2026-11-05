@@ -30,6 +30,7 @@ import simulacion_etapas as se
 
 app.HISTORIAL_PATH = os.path.join(tempfile.gettempdir(), "test_hist_seqc.json")
 app.BANDA_MOTOR_V7 = True
+app.CONSTRUCTORES_BANDA = False      # estas pruebas son del camino del modelo (los constructores: test_constructores.py)
 
 OK = 0
 

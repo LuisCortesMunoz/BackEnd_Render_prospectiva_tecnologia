@@ -84,6 +84,7 @@ for t in (TOGGLE, CONTEO, LARGA, "Con I1 la banda avanza y se detiene sola a los
     if i["requisitos"]:
         antes.append({"role": "system", "content": co.bloque_modelo(i["requisitos"])})
     check(ib.bloques_modelo(i) == antes, f"mismos bloques: '{t[:40]}...'")
-check(ib.resumen(ib.analizar(LARGA))["pruebas"] == [], "resumen corto para analysis")
+check(ib.resumen(ib.analizar(LARGA))["pruebas"] == ["arranca_con I1"],
+      "resumen corto para analysis ('pulsador I1' ya se prueba como arranque)")
 
 print(f"\nTODAS LAS PRUEBAS DE INTENCION DE LA BANDA PASARON ({OK} comprobaciones).")

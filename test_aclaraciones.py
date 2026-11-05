@@ -30,6 +30,7 @@ import app
 
 app.HISTORIAL_PATH = os.path.join(tempfile.gettempdir(), "test_hist_acl.json")
 app.BANDA_MOTOR_V7 = True
+app.CONSTRUCTORES_BANDA = False      # estas pruebas son del camino del modelo (los constructores: test_constructores.py)
 app.BANDA_MOTOR_CONFIGURABLE = False
 
 OK = 0

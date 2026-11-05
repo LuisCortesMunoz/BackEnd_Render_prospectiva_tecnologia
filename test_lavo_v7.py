@@ -222,6 +222,7 @@ escenario("3. Q10 -> Q11 -> Q12 con intervalos configurables")
 import app
 app.HISTORIAL_PATH = os.path.join(tempfile.gettempdir(), "test_hist_lavo_v7.json")
 app.BANDA_MOTOR_V7 = True
+app.CONSTRUCTORES_BANDA = False      # estas pruebas son del camino del modelo (los constructores: test_constructores.py)
 respuestas = []
 capturado = {}
 
