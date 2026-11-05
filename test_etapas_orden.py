@@ -305,7 +305,7 @@ try:
 finally:
     app.groq_client = original
 check(g.kw["temperature"] == app.TEMPERATURA == 0.2, "generacion con temperatura 0.2 (GROQ_TEMPERATURE)")
-check(g.kw.get("reasoning_effort") == "medium", "gpt-oss con reasoning_effort acotado")
+check(g.kw.get("reasoning_effort") == app.ESFUERZO == "high", "gpt-oss con reasoning_effort alto (plan de pago)")
 
 # ---------------------------------------------------------------------------
 escenario("11. Caso real: S1 / S2 con plumas, conteo de 3, 5 s y paro")
@@ -402,7 +402,7 @@ try:
 finally:
     app.groq_client = original
 check(out["name"] == BIEN["name"], "la segunda llamada devuelve el JSON")
-check([k.get("reasoning_effort") for k in gq.kws] == ["medium", "low"], "reintenta con reasoning_effort=low")
+check([k.get("reasoning_effort") for k in gq.kws] == [app.ESFUERZO, "low"], "reintenta con reasoning_effort=low")
 
 app.groq_client = _GroqVacio([_Resp("", "length", 2400), _429(0.01), _Resp(_json.dumps(BIEN), "stop", 900)])
 try:

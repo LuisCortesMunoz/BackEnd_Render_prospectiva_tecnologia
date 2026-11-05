@@ -52,12 +52,15 @@ def analizar(texto: str, historial=None, acl: dict = None, prev=None, correccion
     """Corre los detectores de siempre y junta lo que entendieron."""
     acl = acl or {}
     historial = list(historial or [])
-    # Acciones en orden pedidas en ESTA instruccion; en una correccion ("la
-    # secuencia esta mal") las de la instruccion original del historial.
+    # Acciones en orden pedidas en ESTA instruccion; en una correccion o edicion
+    # ("la secuencia esta mal", "agrega la roja al final") las de la instruccion
+    # original del historial, con lo que respondan las instrucciones posteriores
+    # (especificacion viva: lo dicho despues pesa sobre lo de antes).
     etapas = etapas_orden.detectar(texto, "banda", acl)
+    etapas = etapas_orden.con_opciones_pegadas(etapas, texto, "banda", acl)   # lentes: "... Pasa directo"
     de_historial = False
-    if correccion and not etapas["aplica"]:
-        etapas = etapas_orden.de_historial(historial, "banda", acl)
+    if (correccion or prev) and not etapas["aplica"] and historial:
+        etapas = etapas_orden.de_historial(historial, "banda", acl, posteriores=[texto])
         de_historial = etapas["aplica"]
     # Comportamientos que se pueden probar simulando el PLC (de toda la sesion).
     reqs = comportamiento.de_sesion(historial, texto, acl)

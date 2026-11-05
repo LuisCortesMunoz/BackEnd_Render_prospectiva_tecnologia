@@ -166,6 +166,85 @@ def pregunta_que_falla(dispositivo: str = "banda") -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Localizar QUE corregir (zona de cambio)
+# ---------------------------------------------------------------------------
+_MODULOS = {
+    "conteo": r"\b(contador\w*|conteo\w*|cuent\w*|reinici\w*|detecciones|cajas|piezas)\b",
+    "plumas": r"\bpluma\w*\b",
+    "torreta": r"\b(luz|luces|lampara\w*|torreta|verde|amarill\w*|roj[ao]s?)\b",
+    "motor": r"\b(banda|motor|deten\w*|detien\w*|(?:se |no )para|paro|arranc\w*|avanz\w*|frecuencia|hz|velocidad|direccion|"
+             r"sentido|pausa\w*|continu\w*|reanud\w*)\b",
+    "tiempos": r"\b(\d+(?:[.,]\d+)?\s*(?:s|seg|segundos?)|tiempo\w*|temporizador\w*)\b",
+}
+
+
+def _desc_etapa(e: dict) -> str:
+    return f"etapa {e['n']} «{e['texto'][:70]}»"
+
+
+def localizar(texto: str, det: dict = None, diagnostico=None, acl: dict = None) -> dict:
+    """Que parte de la logica revisar, segun lo que dice el usuario (y lo que
+    la simulacion de la version vigente encontro). {"modulos", "etapas", "vago"}"""
+    falla = ((acl or {}).get("falla") or {}).get("respuesta") or ""
+    t = _norm(f"{texto} {falla}")
+    modulos = [m for m, rx in _MODULOS.items() if re.search(rx, t)]
+    etapas = set(int(n) for n in re.findall(r"\b(?:etapa|paso)\s+(\d+)", t))
+    for d in diagnostico or []:
+        etapas |= {int(n) for n in re.findall(r"\b[Ee]tapa (\d+)", d)}
+    det = det or {}
+    for e in det.get("etapas") or []:
+        reqs = e.get("requisitos") or []
+        qs = set().union(*[r["q"] for r in reqs if r["tipo"] == "salida"]) if any(
+            r["tipo"] == "salida" for r in reqs) else set()
+        if ("plumas" in modulos and qs & {"Q6", "Q7", "Q8", "Q9"}) or \
+           ("torreta" in modulos and qs & {"Q3", "Q4", "Q5"}) or \
+           ("conteo" in modulos and (e.get("conteo") or e.get("reinicia_contador") or e.get("incrementa"))):
+            etapas.add(e["n"])
+        for s in re.findall(r"\b(?:s|sensor)\s?([12])\b", t):
+            if e.get("entra_con") == f"S{s}" or e.get("hasta") == f"S{s}":
+                etapas.add(e["n"])
+        for n in re.findall(r"\b(\d+(?:[.,]\d+)?)\s*(?:s|seg|segundos?)\b", t):
+            if any(abs(float(n.replace(",", ".")) - x) < 0.05 for x in e.get("tiempos") or []):
+                etapas.add(e["n"])
+    vago = not modulos and not etapas
+    return {"modulos": modulos, "etapas": sorted(etapas), "vago": vago}
+
+
+def bloque_zona(loc: dict, det: dict = None) -> str:
+    """Para el modelo: que parte tocar y que se comprueba despues."""
+    por_n = {e["n"]: e for e in (det or {}).get("etapas") or []}
+    partes = []
+    if loc.get("etapas"):
+        partes.append("etapas: " + "; ".join(_desc_etapa(por_n[n]) if n in por_n else f"etapa {n}"
+                                              for n in loc["etapas"]))
+    if loc.get("modulos"):
+        partes.append("bloques: " + ", ".join(loc["modulos"]))
+    if not partes:
+        return ""
+    return ("ZONA A CORREGIR (lo que el usuario reporta): " + " | ".join(partes) + ".\n"
+            "Cambia SOLO lo necesario en esa zona y deja identico lo demas (ids, pasos, tiempos y senales). "
+            "Despues se simula el programa ANTERIOR y el NUEVO con todas las pruebas de la sesion: si algo que "
+            "funcionaba deja de funcionar, la correccion se rechaza.")
+
+
+MENSAJE_ESTRUCTURAL = (
+    "Con cambios dentro de la zona no se logro. Ahora puedes REHACER la secuencia completa (otra estructura de "
+    "pasos, ramas, contador o timers) mientras cumpla TODAS las instrucciones de la sesion; se vuelve a comprobar "
+    "contra todas las pruebas.")
+
+
+def pregunta_falla_etapas(det: dict, dispositivo: str = "banda") -> dict:
+    """'Revisa' sin decir que: se pregunta con las etapas REALES de la sesion."""
+    etapas = (det or {}).get("etapas") or []
+    if not etapas:
+        q = pregunta_que_falla(dispositivo)
+        q["pregunta"] = "¿Qué es lo que no funciona?"
+        return q
+    ops = [f"Etapa {e['n']}: {e['texto'][:55]}" for e in etapas[:5]] + ["Otra cosa"]
+    return {"id": "falla", "campo": "falla", "pregunta": "¿Qué parte no funciona como pediste?", "opciones": ops}
+
+
+# ---------------------------------------------------------------------------
 # Piezas de una logica (para detectar perdidas no pedidas)
 # ---------------------------------------------------------------------------
 def _piezas_v7(resp: dict) -> collections.Counter:

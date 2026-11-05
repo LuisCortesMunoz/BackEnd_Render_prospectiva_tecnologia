@@ -89,13 +89,21 @@ def _plan(det: dict, g: dict) -> list:
     post = [e for e in de_g if e["n"] >= c["etapa"]]
     plan = [{"e": e, "vuelta": 0, "opcional": False} for e in pre]
     n = max(1, min(int(c["n"]), 6))
+    ultimo = g.get("ultimo")                  # respuesta del usuario: "tambien" | "directo" | None
     for k in range(1, n + 1):
         contada = False
         for e in cic:
-            # En la ultima vuelta, lo que dispara la senal contada puede saltarse
-            # (alternativa directa) o hacerse (paso de decision): las dos valen.
-            contada = contada or (k == n and e["entra_con"] == c.get("senal"))
-            plan.append({"e": e, "vuelta": k, "opcional": contada})
+            es_contada = k == n and e["entra_con"] == c.get("senal")
+            if ultimo == "directo" and (contada or es_contada):
+                if es_contada:
+                    # el objeto N solo dispara la senal; su etapa NO debe ocurrir
+                    plan.append({"e": e, "vuelta": k, "opcional": True, "solo_disparo": True})
+                contada = True
+                continue
+            contada = contada or es_contada
+            # Sin respuesta del usuario, lo que dispara la senal contada en la ultima
+            # vuelta puede saltarse o hacerse: las dos valen. Con respuesta, se exige.
+            plan.append({"e": e, "vuelta": k, "opcional": contada and ultimo is None})
     plan += [{"e": e, "vuelta": 0, "opcional": False} for e in post]
     return plan
 
@@ -123,6 +131,11 @@ def _correr_plan(tr: _Traza, plan: list, inicio: str) -> list:
         sig = plan[i + 1] if i + 1 < len(plan) else None
         t0 = tr.t
         senal = e["entra_con"] if i else (e["entra_con"] or inicio)
+        if paso.get("solo_disparo"):
+            tr.pulsar(senal)
+            tr.correr(0.3)
+            ventanas.append((paso, t0, tr.t))
+            continue
         if senal in _SENALES and not (i == 0 and not e["entra_con"] and senal != inicio):
             tr.pulsar(senal)
         tr.correr(_duracion(paso, sig))
@@ -143,9 +156,18 @@ def _revisar(tr: _Traza, ventanas: list, prefijo: str) -> list:
     cursor = 0
     m = tr.muestras
     t_desde = m[0][0] if m else 0.0
-    for paso, t0, t1 in ventanas:
+    for idx, (paso, t0, t1) in enumerate(ventanas):
         e = paso["e"]
+        sig = ventanas[idx + 1][0] if idx + 1 < len(ventanas) else None
         if not e["requisitos"]:
+            continue
+        if paso.get("solo_disparo"):
+            # "pasa directo": al llegar a N, la etapa que dispara esa senal NO debe ocurrir
+            tramo = [x for x in m if t0 <= x[0] <= t0 + 1.5]
+            if tramo and any(_cumple(x, e["requisitos"]) for x in tramo):
+                problemas.append(f"{prefijo}Etapa {e['n']} (objeto {paso['vuelta']}) «{e['texto']}»: al llegar al "
+                                 f"conteo debia pasar directo y la etapa se repitio.")
+                break
             continue
         limite = t1 + HOLGURA_S
         j = next((k for k in range(cursor, len(m)) if m[k][0] <= limite
@@ -174,7 +196,9 @@ def _revisar(tr: _Traza, ventanas: list, prefijo: str) -> list:
                 problemas.append(f"{prefijo}Etapa {e['n']} «{e['texto']}»: dura {dura:.1f} s y se pidieron "
                                  f"{eo._fmt(pedido)} s.")
                 break
-        if e.get("reanuda"):
+        # Tras la pausa la banda vuelve a avanzar... salvo que lo siguiente sea la etapa del
+        # conteo (el objeto N), que manda sobre el estado de la banda.
+        if e.get("reanuda") and not (sig is not None and sig["e"].get("conteo")):
             despues = [x for x in m if t1 - 1.5 <= x[0] <= t1 + 0.2]
             if despues and not any(x[1] for x in despues) and not paso["opcional"]:
                 problemas.append(f"{prefijo}Etapa {e['n']} «{e['texto']}»: despues de la pausa la banda debia "

@@ -83,7 +83,10 @@ TEXTO = ("Al presionar el pulsador I1, la banda transportadora se pone en marcha
          "detecciones, la banda se detiene durante 5 segundos, después avanza únicamente durante un tiempo "
          "determinado y finalmente se detiene automáticamente. A continuación, la pluma 1 se eleva, la pluma 2 "
          "desciende y el contador se reinicia a cero, respetando ese orden.")
-ACL = {"etapa_5_fin": {"pregunta": "¿Cuánto tiempo?", "respuesta": "4 s"}}
+# BIEN mueve las plumas DURANTE la pausa de S2 y el objeto 3 TAMBIEN hace la pausa (respuestas a las dudas)
+DUDAS = {"acciones_pausa_3": {"pregunta": "", "respuesta": "Al detectar (durante la pausa)"},
+         "conteo_ultimo_1": {"pregunta": "", "respuesta": "También lo hace y luego sigue"}}
+ACL = {**DUDAS, "etapa_5_fin": {"pregunta": "¿Cuánto tiempo?", "respuesta": "4 s"}}
 ANALISIS = {"intencion": "x", "compatibilidad": "total", "conservado": [], "modificado": [],
             "simplificado": [], "no_soportado": [], "requiere_confirmacion": False}
 
@@ -128,7 +131,9 @@ check(e[7]["reinicia_contador"], "etapa 7: el contador vuelve a cero")
 g = d["grupos"][0]
 check(g["ciclo"] == [2, 3] and g["conteo"]["etapa"] == 4, f"ciclo 2-3 que se repite por objeto ({g['ciclo']})")
 q = eo.preguntas(d, "banda")
-check([x["campo"] for x in q] == ["etapa_5_fin"] and q[0]["opciones"], "solo pregunta cuanto avanza (con opciones)")
+check([x["campo"] for x in q] == ["acciones_pausa_3", "conteo_ultimo_1"], "primero las dudas de interpretacion")
+q = eo.preguntas(eo.detectar(TEXTO, "banda", DUDAS), "banda")
+check([x["campo"] for x in q] == ["etapa_5_fin"] and q[0]["opciones"], "luego solo pregunta cuanto avanza (con opciones)")
 d2 = eo.detectar(TEXTO, "banda", ACL)
 check(eo.preguntas(d2, "banda") == [] and d2["etapas"][4]["tiempos"] == [4.0], "con la respuesta ya no pregunta")
 b = eo.bloque_modelo(d2, "banda")
@@ -143,7 +148,11 @@ check(se.verificar(lm.cfg_desde_respuesta(CORRECTA), d2) == [], "la logica corre
 ALT = copy.deepcopy(BIEN)
 del ALT[4]
 ALT[3] = {**ALT[3], "siguiente": 1, "alternativa": {"senal": "CT1", "ir_a": 5}}
-check(se.verificar(lm.cfg_desde_respuesta(resp(ALT)), d2) == [], "la variante con alternativa directa tambien vale")
+D_DIR = eo.detectar(TEXTO, "banda", {**ACL, "conteo_ultimo_1": {"pregunta": "", "respuesta": "Pasa directo"}})
+check(se.verificar(lm.cfg_desde_respuesta(resp(ALT)), D_DIR) == [],
+      "la variante con alternativa directa vale si el objeto 3 pasa directo")
+check(se.verificar(lm.cfg_desde_respuesta(resp(ALT)), d2) != [],
+      "y no vale si el usuario dijo que el objeto 3 tambien hace la pausa")
 for nombre, r, clave in (("contador sin reset", SIN_RESET, "segunda corrida"),
                          ("rearranca sola al final", REARRANCA, "vuelve a arrancar sola"),
                          ("no reanuda tras la pausa", NO_REANUDA, "Etapa 2"),
@@ -183,7 +192,7 @@ for texto, acl, r in casos:
 
 # ─────────────────────────────────────────────────────────────────────────
 escenario("4. Flujo completo: falta un dato critico -> se pregunta antes de generar")
-r = generar(TEXTO)
+r = generar(TEXTO, acl=DUDAS)
 check(r.status == "needs_clarification" and [q["campo"] for q in r.questions] == ["etapa_5_fin"] and not llamadas,
       "pregunta la duracion del avance sin llamar al modelo")
 
@@ -202,7 +211,7 @@ check(any(w.startswith("Al simularlo") and "pide corregirlo" in w for w in r.war
       f"aviso corto: {r.warnings}")
 
 escenario("7. Correccion: 'la secuencia esta mal' se revisa contra la instruccion original")
-hist = [TEXTO + " [etapa_5_fin: 4 s]"]
+hist = [TEXTO + " [acciones_pausa_3: Al detectar (durante la pausa); conteo_ultimo_1: También lo hace y luego sigue; etapa_5_fin: 4 s]"]
 r = generar("la secuencia está mal, revisa", CORRECTA, prev=NO_REANUDA, historial=hist)
 c = contenido(llamadas[0])
 check("ACCIONES EN ORDEN" in c and "PASO DE DECISION" in c, "el modelo recibe las etapas de la instruccion original")

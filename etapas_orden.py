@@ -151,8 +151,10 @@ _RX_REINICIA_CONTADOR = re.compile(r"\b(?:contador|conteo|cuenta)\b[^.;]{0,25}\b
 _RX_CONTEO_N = re.compile(rf"\b(?:acumul\w*|cuent\w*|cont\w*|llegue\w* a|complet\w*|despues de|al pasar|registr\w*)"
                           rf"\s+(?:a\s+)?({_NUM_RX})\s+(?:detecciones|deteccion|cajas|piezas|objetos|productos|veces|"
                           rf"pulsos|conteos)\b")
-_RX_INCREMENTA = re.compile(r"\b(?:se )?(?:increment\w*|aument\w*|sum\w*|cuent\w*)\b[^.;]{0,15}\b(?:un |el )?"
+_RX_INCREMENTA = re.compile(r"\b(?:se )?(?:increment\w*|aument\w*|sum\w*|cuent\w*|registr\w*)\b[^.;]{0,15}\b(?:un |el )?"
                             r"(?:contador|conteo|uno)\b|\bcontador\b[^.;]{0,15}\b(?:increment\w*|aument\w*|sube)\b")
+# "... y despues continua avanzando" justo despues de un paro: la pausa reanuda (no es otra etapa)
+_RX_SIGUE_PAUSA = re.compile(r"\s*(?:continu\w*|sigue\w*|reanud\w*|vuelve a (?:avanzar|moverse|arrancar|andar))")
 # "... hasta que yo detenga todo": la etapa sigue hasta el paro (no hay que preguntar)
 _RX_HASTA_PARO = re.compile(r"\bhasta que (?:yo |lo |la |el usuario |se )?(?:detenga\w*|deteng\w+|pare|pares|apague|"
                             r"presione (?:el )?(?:boton de )?paro)\b(?: todo\b)?|\bhasta (?:el|un) paro\b")
@@ -306,6 +308,9 @@ def detectar(texto: str, dispositivo: str = "banda", acl: dict = None) -> dict:
     marcas = dict(otra_sec)
     for rx, quita in ((_RX_FUERTE, True), (_RX_DEBIL, True), (_RX_CUANDO_SENAL, False)):
         for m in rx.finditer(t):
+            if rx is _RX_DEBIL and _RX_SIGUE_PAUSA.match(t, m.end()) and _RX_PARO.search(t[max(0, m.start() - 60):m.start()]):
+                # "se detiene 3 s y despues continua avanzando": es UNA pausa que reanuda, no otra etapa
+                continue
             if not any(a <= m.start() < fin for a, fin in marcas.items()):
                 marcas[m.start()] = m.end() if quita else m.start()
     fuerte = bool(_RX_FUERTE.search(t)) or sec_explicitas > 0
@@ -347,6 +352,12 @@ def detectar(texto: str, dispositivo: str = "banda", acl: dict = None) -> dict:
              "conteo": _conteo(frag)}
         if e["tiempo_indefinido"] and not _RX_TIEMPO.search(frag):
             e["tiempos"] = []                       # "durante un tiempo determinado": se pregunta
+        # "se detiene 3 s y despues continua; ademas, la pluma 2 se eleva": ¿las plumas van
+        # al detectar (durante la pausa) o al reanudar? Si se nombran DESPUES de "continua", se pregunta.
+        sigue = re.search(r"\b(?:continu\w*|sigue\w*|reanud\w*|vuelve a)\b", frag)
+        salidas_e = [r for r in req if r["tipo"] == "salida"]
+        e["duda_acciones"] = bool(e["reanuda"] and e["tiempos"] and salidas_e and sigue and any(
+            x.start() > sigue.start() for x in list(_RX_PLUMA.finditer(frag)) + list(_RX_LUZ.finditer(frag))))
         if req or e["tiempos"] or e["hasta"] or e["conteo"] or e["reinicia_contador"]:
             # (sin contenido = preambulo: "Con I1:", "A 30 Hz,")
             if (cierra or nueva) and etapas and etapas[-1]["grupo"] == grupo:
@@ -357,6 +368,9 @@ def detectar(texto: str, dispositivo: str = "banda", acl: dict = None) -> dict:
             etapas.append(e)
             plumas_previas = plumas or plumas_previas
             cierra = bool(_RX_CIERRA_CICLO.search(frag) or e["hasta_paro"])
+    for i, e in enumerate(etapas, 1):
+        e["n"] = i
+    etapas = _resolver_acciones_pausa(etapas, acl or {})
     for i, e in enumerate(etapas, 1):
         e["n"] = i
     _aplicar_aclaraciones(etapas, acl or {})
@@ -373,6 +387,7 @@ def detectar(texto: str, dispositivo: str = "banda", acl: dict = None) -> dict:
         for e in de_g:
             e["grupo"] = len(grupos)
         _ciclo(grupos[-1], de_g)
+        _resolver_ultimo(grupos[-1], de_g, acl or {})
         if dispositivo == "banda":
             _banda_sigue_en_marcha(de_g)
     aplica = len(etapas) >= 2 and (fuerte or (len(etapas) >= 3 and orden >= 2))
@@ -381,6 +396,165 @@ def detectar(texto: str, dispositivo: str = "banda", acl: dict = None) -> dict:
             "conteo": bool(_RX_CONTEO.search(t)),
             "repite": bool(_RX_REPITE.search(t)) or bool(veces),
             "veces": int(_numero(veces.group(1))) if veces else None}
+
+
+# ── Dudas de interpretacion (se preguntan con opciones, no se suponen) ──────
+def _clave_acciones(n: int) -> str:
+    return f"acciones_pausa_{n}"
+
+
+def _clave_ultimo(g: int) -> str:
+    return f"conteo_ultimo_{g}"
+
+
+def _resolver_acciones_pausa(etapas: list, acl: dict) -> list:
+    """Con la respuesta a 'acciones_pausa_N': 'al reanudar' parte la etapa en la
+    pausa y una etapa nueva con las acciones; 'al detectar' la deja junta."""
+    out = []
+    for e in etapas:
+        if not e.get("duda_acciones"):
+            out.append(e)
+            continue
+        v = _fold((acl.get(_clave_acciones(e["n"])) or {}).get("respuesta"))
+        if not v:
+            out.append(e)                            # sin respuesta: se pregunta
+            continue
+        e["duda_acciones"] = False
+        if re.search(r"reanud|vuelve|avance|despues|continu", v):
+            salidas = [r for r in e["requisitos"] if r["tipo"] == "salida"]
+            e["requisitos"] = [r for r in e["requisitos"] if r["tipo"] != "salida"]
+            out.append(e)
+            out.append({**e, "texto": e["texto"] + " (al reanudar)", "requisitos": salidas, "tiempos": [],
+                        "hasta": None, "hasta_paro": False, "entra_con": None, "reanuda": False,
+                        "conteo": None, "reinicia_contador": False, "duda_acciones": False})
+        else:
+            out.append(e)                            # durante la pausa: todo en la misma etapa
+    return out
+
+
+def _resolver_ultimo(g: dict, de_g: list, acl: dict):
+    """Ciclo con conteo cuya senal contada TAMBIEN dispara una etapa del ciclo (S2
+    pausa la banda y suma al contador): al llegar a N, ¿esa etapa se hace o se salta?"""
+    c, ciclo = g.get("conteo"), g.get("ciclo") or []
+    if not (c and ciclo and c.get("senal")):
+        return
+    contada = next((e for e in de_g if e["n"] in ciclo and e["entra_con"] == c["senal"]), None)
+    if contada is None:
+        return
+    # Solo hay conflicto si esa etapa (o las que le siguen en el ciclo) DETIENE la banda y la
+    # etapa del conteo dice que sigue avanzando; si solo mueve plumas o luces, no se pregunta.
+    resto = [e for e in de_g if contada["n"] <= e["n"] <= ciclo[-1]]
+    if not any(r["tipo"] == "motor" and r["accion"] == "paro" for e in resto for r in e["requisitos"]):
+        return
+    v = _fold((acl.get(_clave_ultimo(g["n"])) or {}).get("respuesta"))
+    if re.search(r"directo|salta|sin (?:pausa|detener|hacer)|no (?:la )?hace", v):
+        g["ultimo"] = "directo"
+    elif v:
+        g["ultimo"] = "tambien"
+    else:
+        sig = next((e for e in de_g if e["n"] == c["etapa"]), None)
+        g["duda_ultimo"] = {"contada": contada["n"], "texto_contada": contada["texto"],
+                            "texto_sigue": sig["texto"] if sig else f"la etapa {c['etapa']}"}
+    g["contada"] = contada["n"]
+
+
+_RX_AL_DETECTAR = re.compile(r"\b(?:al detectar|en cuanto detect\w*|cuando (?:el sensor \w+ |s\d )?detect\w*|durante la "
+                             r"pausa|mientras (?:esta |este )?(?:detenida|parada)|al mismo tiempo que se detiene|antes de "
+                             r"(?:que )?(?:continu|reanud|avanz)\w*)\b")
+_RX_AL_REANUDAR = re.compile(r"\b(?:al reanudar|cuando (?:la banda )?(?:vuelve a avanzar|reanud\w*|continu\w*|sigue)|despues "
+                             r"de la pausa|al continuar|al volver a avanzar|cuando termine la pausa)\b")
+_RX_DIRECTO = re.compile(r"\b(?:pasa\w* directo|sin (?:la )?pausa|sin detenerse|ya no se (?:detiene|para)|no (?:se )?"
+                         r"(?:detiene|detenga|para|pare|hace la pausa)\w*(?: [a-z]+){0,3} (?:tercer|ultim|cuarta|quinta)\w*)\b")
+_RX_TAMBIEN = re.compile(r"\btambien (?:se detiene|se para|hace la pausa|pausa|debe detenerse|debe pausar)\b")
+
+
+def respuestas_en_textos(textos, det: dict) -> dict:
+    """Respuestas a las dudas de interpretacion que el usuario ya dio en sus
+    instrucciones (p. ej. una correccion: "las plumas deben moverse al detectar
+    S2", "en la tercera pasa directo"). La mas reciente manda."""
+    acl = {}
+    for t in textos or []:
+        f = _fold(t)
+        menciona = bool(_RX_PLUMA.search(f) or _RX_LUZ.search(f))
+        for e in det.get("etapas") or []:
+            if e.get("duda_acciones") and menciona:
+                if _RX_AL_REANUDAR.search(f):
+                    acl[_clave_acciones(e["n"])] = {"pregunta": "", "respuesta": "Al reanudar el avance"}
+                elif _RX_AL_DETECTAR.search(f):
+                    acl[_clave_acciones(e["n"])] = {"pregunta": "", "respuesta": "Al detectar (durante la pausa)"}
+        for g in det.get("grupos") or []:
+            if g.get("duda_ultimo"):
+                if _RX_DIRECTO.search(f):
+                    acl[_clave_ultimo(g["n"])] = {"pregunta": "", "respuesta": "Pasa directo"}
+                elif _RX_TAMBIEN.search(f):
+                    acl[_clave_ultimo(g["n"])] = {"pregunta": "", "respuesta": "También lo hace y luego sigue"}
+    return acl
+
+
+_OPCIONES_LITERALES = {
+    "al detectar (durante la pausa)": ("acciones", "Al detectar (durante la pausa)"),
+    "al reanudar el avance": ("acciones", "Al reanudar el avance"),
+    "tambien lo hace y luego sigue": ("ultimo", "También lo hace y luego sigue"),
+    "pasa directo": ("ultimo", "Pasa directo"),
+}
+
+
+def con_opciones_pegadas(det: dict, texto: str, dispositivo: str, acl: dict) -> dict:
+    """Los lentes PEGAN la opcion elegida al final de la instruccion (no la mandan
+    como aclaracion): si el texto trae literalmente una opcion de estas dudas, es
+    la respuesta (sin esto, la pregunta se repetiria para siempre)."""
+    if not preguntas_dudas(det):
+        return det
+    f = _fold(texto)
+    extra = {}
+    for op, (tipo, resp) in _OPCIONES_LITERALES.items():
+        if op not in f:
+            continue
+        if tipo == "acciones":
+            for e in det["etapas"]:
+                if e.get("duda_acciones"):
+                    extra[_clave_acciones(e["n"])] = {"pregunta": "", "respuesta": resp}
+        else:
+            for g in det["grupos"]:
+                if g.get("duda_ultimo"):
+                    extra[_clave_ultimo(g["n"])] = {"pregunta": "", "respuesta": resp}
+    if not extra:
+        return det
+    return detectar(texto, dispositivo, {**extra, **(acl or {})})
+
+
+def con_respuestas_de_sesion(det: dict, texto: str, dispositivo: str, acl: dict, textos) -> dict:
+    """Si alguna instruccion POSTERIOR responde una duda de interpretacion (o
+    cambia la respuesta que se dio antes), se vuelve a detectar con ella: lo
+    dicho despues pesa sobre lo de antes."""
+    if not textos:
+        return det
+    sin_dudas = {k: v for k, v in (acl or {}).items()
+                 if not str(k).startswith(("acciones_pausa_", "conteo_ultimo_"))}
+    extra = respuestas_en_textos(textos, detectar(texto, dispositivo, sin_dudas))
+    if not extra:
+        return det
+    return detectar(texto, dispositivo, {**(acl or {}), **extra})
+
+
+def preguntas_dudas(det: dict) -> list:
+    """Preguntas de interpretacion (van ANTES que las de 'cuando termina', porque
+    su respuesta puede partir etapas y cambiar la numeracion)."""
+    out = []
+    for e in det.get("etapas") or []:
+        if e.get("duda_acciones"):
+            out.append({"id": _clave_acciones(e["n"]), "campo": _clave_acciones(e["n"]),
+                        "pregunta": (f"En la etapa {e['n']} («{e['texto'][:90]}»), ¿las plumas/luces se mueven al "
+                                     f"detectar (durante la pausa) o cuando la banda vuelve a avanzar?"),
+                        "opciones": ["Al detectar (durante la pausa)", "Al reanudar el avance"]})
+    for g in det.get("grupos") or []:
+        d = g.get("duda_ultimo")
+        if d:
+            out.append({"id": _clave_ultimo(g["n"]), "campo": _clave_ultimo(g["n"]),
+                        "pregunta": (f"Al llegar a {g['conteo']['n']} en {g['conteo']['senal']}, ¿también hace "
+                                     f"«{d['texto_contada'][:70]}» antes de «{d['texto_sigue'][:60]}», o pasa directo?"),
+                        "opciones": ["También lo hace y luego sigue", "Pasa directo"]})
+    return out
 
 
 def _conteo(frag: str):
@@ -480,6 +654,9 @@ def preguntas(det: dict, dispositivo: str = "banda") -> list:
     out = []
     if not det.get("aplica"):
         return out
+    dudas = preguntas_dudas(det)
+    if dudas:
+        return dudas
     etapas = det["etapas"]
     for i, e in enumerate(etapas):
         if _sabe_cuando_termina(etapas, i):
@@ -599,6 +776,18 @@ def _receta_ciclo(det: dict, g: dict) -> str:
         reset, modo = f"{sq}_FIN", "Modo una_vez"
     cuando = ("al terminar cada vuelta, para que la siguiente cuente desde cero" if reset.endswith("_CICLO")
               else "para que la siguiente corrida cuente desde cero")
+    if g.get("ultimo") == "directo" and g.get("contada"):
+        # el objeto N NO hace la etapa que dispara la senal contada: decide ANTES de ella
+        k = g["contada"]
+        return (f" CICLO CON CONTEO: las etapas {ciclo[0]}..{fin_ciclo} se repiten con CADA objeto; al llegar "
+                f"{c.get('senal') or 'el sensor'} a {c['n']} se pasa DIRECTO a la etapa {c['etapa']} (el objeto "
+                f"{c['n']} NO hace la etapa {k}). Receta (probada en el PLC): contador CT1 {{\"entrada\":\""
+                f"{c.get('senal') or 'S2'}\",\"preset\":{c['n']},\"modo\":\"una_vez\",\"reset\":\"{reset}\"}}; "
+                f"justo DESPUES del paso que espera {c.get('senal')} (antes del primer paso de la etapa {k}) un PASO "
+                f"DE DECISION {{\"salidas\":[],\"motor\":[],\"avanza\":\"tiempo\",\"segundos\":0,\"alternativa\":"
+                f"{{\"senal\":\"CT1\",\"ir_a\":<primer paso de la etapa {c['etapa']}>}}}} (si no, sigue a la etapa "
+                f"{k}); el ultimo paso de la etapa {fin_ciclo} vuelve con \"siguiente\" al paso donde empieza la "
+                f"etapa {ciclo[0]} (el que espera su objeto). El contador se reinicia con {reset} {cuando}. {modo}.")
     return (f" CICLO CON CONTEO: las etapas {ciclo[0]}..{fin_ciclo} se repiten con CADA objeto; la etapa "
             f"{c['etapa']} empieza cuando {c.get('senal') or 'el sensor'} llega a {c['n']}. Receta (probada en el "
             f"PLC): contador CT1 {{\"entrada\":\"{c.get('senal') or 'S2'}\",\"preset\":{c['n']},"
@@ -835,12 +1024,16 @@ def separar_aclaraciones(texto: str):
     return texto[:m.start()], acl
 
 
-def de_historial(historial, dispositivo: str = "banda", acl: dict = None) -> dict:
+def de_historial(historial, dispositivo: str = "banda", acl: dict = None, posteriores=None) -> dict:
     """Las etapas de la instruccion MAS RECIENTE del historial que pidio acciones
     en orden ("la secuencia esta mal" se revisa contra lo que se pidio)."""
-    for h in reversed(list(historial or [])):
-        texto, propias = separar_aclaraciones(h)
-        d = detectar(texto, dispositivo, {**propias, **(acl or {})})
+    hist = list(historial or [])
+    for i in range(len(hist) - 1, -1, -1):
+        texto, propias = separar_aclaraciones(hist[i])
+        a = {**propias, **(acl or {})}
+        d = detectar(texto, dispositivo, a)
         if d["aplica"]:
-            return d
+            # las instrucciones posteriores (correcciones) y la actual pueden responder sus dudas
+            despues = [separar_aclaraciones(x)[0] for x in hist[i + 1:]] + list(posteriores or [])
+            return con_respuestas_de_sesion(d, texto, dispositivo, a, despues)
     return detectar("", dispositivo, acl)

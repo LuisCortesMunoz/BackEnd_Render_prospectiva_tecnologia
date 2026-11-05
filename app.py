@@ -5,7 +5,7 @@
 # Historial : respuestas/historial.json   (persistente entre reinicios)
 # Memoria   : memoria/ejemplos.json       (feedback del usuario → mejores respuestas)
 
-import os, re, json, time, logging, datetime, threading
+import os, re, json, time, logging, datetime, threading, copy
 import hmac, hashlib, asyncio
 import socket, ipaddress, subprocess, platform
 from concurrent.futures import ThreadPoolExecutor
@@ -36,7 +36,9 @@ TEMPERATURA   = float(os.environ.get("GROQ_TEMPERATURE", "0.2"))
 # max_tokens: con una instruccion larga podia gastarlo todo y devolver el JSON
 # vacio. Se le pide un esfuerzo acotado y, si aun asi sale vacio, "low".
 ES_RAZONADOR  = MODELO.startswith("openai/gpt-oss")
-ESFUERZO      = os.environ.get("GROQ_REASONING_EFFORT", "medium")
+# Plan de pago (sin el tope de tokens/minuto del gratuito): razonamiento alto por defecto, que
+# mejora las secuencias largas y las correcciones. GROQ_REASONING_EFFORT=medium/low lo baja.
+ESFUERZO      = os.environ.get("GROQ_REASONING_EFFORT", "high")
 # 429 (tokens por minuto): se espera lo que pide Groq si es poco, en vez de
 # reintentar en el acto con menos espacio (que volvia a fallar).
 ESPERA_429_MAX_S = float(os.environ.get("GROQ_ESPERA_429_MAX_S", "20"))
@@ -46,14 +48,17 @@ ESPERA_429_MAX_S = float(os.environ.get("GROQ_ESPERA_429_MAX_S", "20"))
 # presupuesto y el JSON salia vacio -> Groq respondia 400 json_validate_failed
 # con failed_generation: ''. 4096 es el valor probado en plc-llm-assistant
 # (test_con_contexto.py v10) que funciona con este mismo modelo.
-MAX_COMPLETION_TOKENS = int(os.environ.get("MAX_COMPLETION_TOKENS", "4096"))
+# Con plan de pago la respuesta tiene espacio de sobra para razonar y escribir el JSON completo.
+MAX_COMPLETION_TOKENS = int(os.environ.get("MAX_COMPLETION_TOKENS", "16000"))
 
 # Presupuesto de tokens por minuto (TPM) del plan. Groq no cuenta solo el
 # prompt: reserva prompt + max_tokens, asi que una peticion se rechaza ANTES de
 # generar nada si la suma pasa el limite. Con la capa B de la banda el prompt
 # crecio hasta ~8400 tokens y ninguna peticion de banda cabia: Groq respondia
 # 429 siempre y esperar un minuto no servia de nada.
-GROQ_TPM_LIMIT = int(os.environ.get("GROQ_TPM_LIMIT", "8000"))
+# 0 = SIN tope propio (plan de pago): no se recorta max_tokens por el limite del minuto. Con el plan
+# gratuito poner GROQ_TPM_LIMIT=8000 en Render vuelve al ajuste de antes.
+GROQ_TPM_LIMIT = int(os.environ.get("GROQ_TPM_LIMIT", "0"))
 # Colchon para lo que el estimador no ve (plantilla de chat, response_format).
 TOKENS_MARGEN = int(os.environ.get("GROQ_TOKENS_MARGEN", "200"))
 # Piso de la respuesta: por debajo de esto el modelo razonador se queda sin
@@ -140,6 +145,7 @@ import intencion_banda
 import constructores_banda
 import reglas_banda
 import extractor_banda
+import regresion_banda
 import enlace_lentes
 try:
     import memoria_validada
@@ -1963,6 +1969,8 @@ def _presupuesto_completion(messages: list) -> int:
     parte, sigue recibiendo exactamente los 4096 de siempre) y nunca baja de
     MIN_COMPLETION_TOKENS, para no ahogar al modelo razonador."""
     prompt = _estimar_tokens_prompt(messages)
+    if GROQ_TPM_LIMIT <= 0:
+        return MAX_COMPLETION_TOKENS                 # sin tope propio (plan de pago)
     disponible = GROQ_TPM_LIMIT - prompt - TOKENS_MARGEN
     presupuesto = max(MIN_COMPLETION_TOKENS, min(MAX_COMPLETION_TOKENS, disponible))
     if presupuesto < MAX_COMPLETION_TOKENS:
@@ -2943,6 +2951,17 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
             diagnostico = [f"La logica vigente no se pudo simular: {e}"]
         log.info(f"/generar-logica banda v7: correccion — diagnostico {diagnostico}")
         metricas_lavo.poner("correccion", True)
+    # Que parte corregir: lo que dice el usuario + lo que la simulacion encontro.
+    zona = edicion_incremental.localizar(texto, etapas, diagnostico, acl) if correccion else None
+    if zona is not None:
+        metricas_lavo.poner("zona", {k: zona[k] for k in ("modulos", "etapas")})
+        if zona["vago"] and not diagnostico and "falla" not in acl:
+            # "revisa" sin decir que y la simulacion no ve fallas: se pregunta con las etapas reales.
+            log.info("/generar-logica banda v7: correccion vaga — se pregunta que parte falla")
+            return LogicaResponse(
+                logic={}, name="", outputs=0, device="banda", status="needs_clarification",
+                questions=[edicion_incremental.pregunta_falla_etapas(etapas)], assumptions=[],
+                analysis={"equipo": "banda", "motor_v7": True, "correccion": True, "diagnostico": diagnostico})
     identica, similares = _buscar_memoria("banda", texto)
     # Con respuestas de aclaracion la memoria identica (mismo texto) puede tener
     # otros valores: se genera con el modelo usando lo que eligio el usuario.
@@ -3042,6 +3061,8 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         messages.append({"role": "user", "content": f"Peticiones anteriores del usuario:\n{previas}"})
         messages.append({"role": "assistant", "content": "Entendido. Devolvere el JSON completo del motor v7."})
     messages += intencion_banda.bloques_modelo(intencion)
+    if zona is not None and not zona["vago"]:
+        messages.append({"role": "system", "content": edicion_incremental.bloque_zona(zona, etapas)})
     if piezas_armadas:
         messages.append({"role": "system", "content": constructores_banda.bloque_piezas(piezas_armadas)})
         metricas_lavo.poner("piezas_armadas", True)
@@ -3056,6 +3077,20 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     # usuario debe confirmar (la logica activa no se reemplaza sola). En una
     # CORRECCION rehacer la parte que falla puede quitar piezas: se avisa, no
     # se obliga a restaurarlas (la simulacion vigila que lo demas siga igual).
+    # Regresion (con logica activa): la bateria de la sesion corrida sobre la version
+    # VIGENTE es la linea base; la nueva no puede romper lo que ahi pasa.
+    cfg_prev, base_reg = None, None
+    if prev:
+        try:
+            cfg_prev = lavo_motor.cfg_desde_respuesta(prev)
+            cfg_prev["respuesta_llm"] = {k: v for k, v in prev.items()
+                                         if k not in ("analisis", "preguntas", "no_soportado")}
+            if not validar_logica_banda(cfg_prev) and (reqs or etapas["aplica"]):
+                base_reg = regresion_banda.bateria(cfg_prev, reqs, etapas)
+                log.info(f"Banda v7 linea base de regresion: {[k for k, f in base_reg.items() if f]} fallan")
+        except (ValueError, TypeError) as e:
+            log.warning(f"Banda v7: la logica vigente no se puede simular para la regresion ({e}).")
+            cfg_prev, base_reg = None, None
     vigilar_perdidas = bool(prev) and not edicion_incremental.pide_quitar(texto) and not correccion
     perdidas, restauracion_pedida = [], False
     # Correccion: devolver la misma logica no vale (una revision y luego se pregunta).
@@ -3178,12 +3213,20 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                 metricas_lavo.sumar("errores_comportamiento", 1)
                 if intento < intentos:
                     log.warning(f"Banda v7 comportamiento {intento}/{intentos}: {fallas}")
+                    if base_reg is not None:
+                        # Con logica activa: decir que se ROMPIO (pasaba antes) y que sigue sin cumplir.
+                        res_reg = regresion_banda.bateria(cand, reqs, etapas, reglas_guia)
+                        texto_falla = regresion_banda.mensaje(regresion_banda.comparar(base_reg, res_reg), res_reg)
+                    else:
+                        texto_falla = ("Se simulo el programa del PLC con ese JSON y NO hace lo pedido:\n- "
+                                       + "\n- ".join(fallas)
+                                       + "\nCorrige la parte que causa esto (cambia la estructura si hace falta) "
+                                         "sin perder lo demas. Devuelve el JSON COMPLETO, sin texto extra.")
+                    if correccion and intento >= 2:
+                        texto_falla += "\n" + edicion_incremental.MENSAJE_ESTRUCTURAL
                     msgs_iter = list(messages)
                     msgs_iter.append({"role": "assistant", "content": json.dumps(candidato, ensure_ascii=False)})
-                    msgs_iter.append({"role": "user", "content": (
-                        "Se simulo el programa del PLC con ese JSON y NO hace lo pedido:\n- " + "\n- ".join(fallas)
-                        + "\nCorrige la parte que causa esto (cambia la estructura si hace falta) sin perder lo "
-                          "demas. Devuelve el JSON COMPLETO, sin texto extra.")})
+                    msgs_iter.append({"role": "user", "content": texto_falla})
                     continue
         if not errores:
             cfg = cand
@@ -3207,6 +3250,24 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         cfg, candidato = sin_comportamiento
         fallas = (comportamiento.verificar(cfg, reqs) or (reglas_banda.verificar(cfg, reglas_guia) if reglas_guia
                                                           else []) or simulacion_etapas.verificar(cfg, etapas))
+    if base_reg is not None and cfg_prev is not None:
+        # Regresion: la version nueva solo reemplaza a la vigente si no rompe nada que
+        # funcionaba y no queda peor. Si no, se conserva la vigente.
+        cmp_reg = None
+        if cfg is not None:
+            res_reg = regresion_banda.bateria(cfg, reqs, etapas, reglas_guia)
+            cmp_reg = regresion_banda.comparar(base_reg, res_reg)
+            log.info(f"Banda v7 regresion: {cmp_reg}")
+        if cfg is None or not regresion_banda.aceptable(cmp_reg, base_reg, res_reg):
+            metricas_lavo.poner("regresion", "conservada")
+            motivo = regresion_banda.resumen(cmp_reg) if cmp_reg else "no se pudo generar una version valida"
+            log.warning(f"Banda v7: la nueva version no se acepta ({motivo}); se conserva la vigente.")
+            return _respuesta_banda_v7(texto, copy.deepcopy(cfg_prev), {}, extra={
+                "fuente": "conservada", "edicion": True, "intencion": intencion_banda.resumen(intencion),
+                "avisos": [f"No apliqué el cambio porque {motivo}; se conservó la versión anterior. "
+                           "Dime con otras palabras qué debe cambiar."],
+                "comportamiento": {"probado": list(base_reg), "fallas": [k for k, f in base_reg.items() if f]}})
+        metricas_lavo.poner("regresion", {"arregladas": cmp_reg["arregladas"], "siguen": cmp_reg["siguen"]})
     analisis_llm = candidato.get("analisis") if isinstance(candidato, dict) else {}
     # Avisos informativos: el programa se entrega igual (sin pedir confirmar);
     # si no hace lo pedido, el usuario pide corregirlo. El detalle tecnico de
