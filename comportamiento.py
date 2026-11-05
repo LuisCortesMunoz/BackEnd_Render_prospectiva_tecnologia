@@ -85,6 +85,45 @@ _RX_ARRANQUE_BOTON = re.compile(rf"\b(?:con|al (?:presionar|pulsar|oprimir)|pres
                                 r"\barranca\w* con (?:el |la )?(?:boton )?(i ?[12])\b")
 
 
+# "Cuando S2 cuente 3 cajas prende la roja 5 s y que el contador se reinicie solo",
+# "cada 3 piezas en S1 sube la pluma", "al llegar a 4 detecciones ...".
+_NO_TIEMPO = r"(?!\s*(?:[.,]\d|s\b|seg|segundos?|min|minutos?|hz|hertz|%|veces por))"
+_RX_CUENTA_N = re.compile(rf"\b(?:cuente\w*|contar|cuenta|cont[oae]\w*|llegu\w* a|llegar a|lleg[ao] a|acumul\w*|"
+                          rf"complet\w*|registr\w*|cada|despues de|al pasar|pasen)\s+(?:a\s+)?({_NUM_RX})\b{_NO_TIEMPO}"
+                          rf"(?:\s+(cajas|piezas|objetos|productos|detecciones|conteos|pulsos))?")
+_RX_HAY_CONTEO = re.compile(r"\b(contador\w*|conteo\w*|cuent\w*|cont[ae]\w*|acumul\w*|detecciones|cajas|piezas|"
+                            r"objetos|productos)\b")
+# Se reinicia SOLO (vuelve a contar). "se reinicia con I2 / al presionar" es manual.
+_RX_REINICIA_SOLO = re.compile(r"\b(?:reinici\w*|resete\w*|reestable\w*|vuelv\w* a (?:contar|cero|0|empezar|iniciar)|"
+                               r"(?:empie|comien)\w* de nuevo|de nuevo|otra vez|nuevamente|se repit\w*|"
+                               r"vuelv\w* a cont\w*)\b|\bcada (?=\d|un|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)")
+_RX_REINICIA_MANUAL = re.compile(r"\b(?:reinici\w*|resete\w*)\b[^.;]{0,25}\b(?:con|al (?:presionar|pulsar|oprimir)|"
+                                 r"presionando|pulsando|cuando (?:presione|pulse))\b")
+_RX_SIN_CONTEO = re.compile(r"\b(?:quita\w*|elimina\w*|borra\w*|ya no)\b[^.;]{0,20}\b(?:el contador|contador|conteo|"
+                            r"cuente|contar)\b")
+_RX_SENSOR_CUENTA = re.compile(r"\b(s ?1|s ?2|sensor (?:1|2|uno|dos)|primer sensor|segundo sensor)\b")
+
+
+def conteo_en(texto: str) -> dict:
+    """{"conteo": N, "senal": S1|S2, "reinicia": bool} si el texto pide contar
+    N objetos en un sensor (o {} si no lo dice sin ambiguedad)."""
+    t = _fold(texto)
+    m = _RX_CUENTA_N.search(t)
+    if not m or not (m.group(2) or _RX_HAY_CONTEO.search(t)):
+        return {}
+    n = int(_numero(m.group(1)))
+    if not 1 < n <= 20:
+        return {}
+    # El sensor que cuenta: el mas cercano antes de "cuente N" (o, si no, el primero que se nombre).
+    previos = [x for x in _RX_SENSOR_CUENTA.finditer(t[:m.start()])]
+    s = _senal((previos[-1] if previos else _RX_SENSOR_CUENTA.search(t) or m).group(1)) \
+        if (previos or _RX_SENSOR_CUENTA.search(t)) else None
+    if s not in ("S1", "S2"):
+        return {}
+    reinicia = bool(_RX_REINICIA_SOLO.search(t)) and not _RX_REINICIA_MANUAL.search(t)
+    return {"conteo": n, "senal": s, "reinicia": reinicia}
+
+
 _RX_CTX_BANDA = re.compile(r"\b(banda|cinta|transportadora|motor|hz|hertz)\b")
 _RX_CTX_OTRO = re.compile(r"\b(luz|luces|lampara\w*|torreta|verde|amarill\w*|roj[ao]s?|pluma\w*|secuencia\w*|"
                           r"semaforo|q\d+)\b")
@@ -119,6 +158,15 @@ def requisitos(textos) -> list:
     la mas reciente (la mas reciente manda: 'ya no se detenga sola' lo quita)."""
     reqs = []
     for texto in textos or []:
+        # Conteo: se lee de la instruccion completa ("... al contar 3 prende la roja. Que el
+        # contador se reinicie solo" son dos oraciones). La mas reciente manda.
+        if _RX_SIN_CONTEO.search(_fold(texto)):
+            reqs = [r for r in reqs if r["tipo"] != "conteo"]
+        else:
+            c = conteo_en(texto)
+            if c:
+                reqs = [r for r in reqs if r["tipo"] != "conteo"]
+                reqs.append({"tipo": "conteo", **c, "texto": _fold(texto).strip()[:160]})
         for o in _oraciones(texto):
             # Solo oraciones sobre la BANDA: "al presionar I1 enciende la verde"
             # o "que la roja se detenga sola" hablan de luces, no del motor.
@@ -149,7 +197,9 @@ def requisitos(textos) -> list:
                 if s:
                     reqs = [r for r in reqs if r["tipo"] != "arranca_con"]
                     reqs.append({"tipo": "arranca_con", "senal": s, "texto": o.strip()})
-    # El mismo boton no puede arrancar y parar: gana lo ultimo dicho.
+    # "al contar 3 cajas se detenga sola" ya lo prueba para_sola (con su conteo).
+    if any(r["tipo"] == "para_sola" and r.get("conteo") for r in reqs):
+        reqs = [r for r in reqs if r["tipo"] != "conteo"]
     return reqs
 
 
@@ -205,6 +255,22 @@ def bloque_modelo(reqs: list) -> str:
             filas.append(f"- La banda se DETIENE SOLA {c}. Conserva el paro manual que ya hubiera: si motor.paro "
                          f"ya tenia una senal (p. ej. I2), usa una condicion OR con las dos. Si la banda la mueve "
                          f"una secuencia, el paro automatico va en el \"paro\" de la secuencia.")
+        elif r["tipo"] == "conteo":
+            n, s = r["conteo"], r["senal"]
+            if r.get("reinicia"):
+                filas.append(
+                    f"- Al contar {n} en {s} pasa lo pedido y el contador VUELVE A CERO SOLO (la siguiente vez "
+                    f"tambien debe pasar al llegar otra vez a {n}, no antes). Receta probada en el PLC: contador "
+                    f"{{\"entrada\":\"{s}\",\"preset\":{n},\"modo\":\"ciclico\"}} (pulso al llegar a {n} y vuelve "
+                    f"a 0 solo) y la accion disparada por ese CTn: con duracion = timer PULSO de entrada CTn con "
+                    f"esos segundos (o evento \"cuando\": CTn con duracion_s); detener la banda = CTn en el paro. "
+                    f"Otra forma valida: modo una_vez con reset = el timer de la accion. NO uses reset SQ1_FIN si "
+                    f"no hay secuencia, ni I2 salvo que el usuario lo pida.")
+            else:
+                filas.append(
+                    f"- Al contar {n} en {s} pasa lo pedido. Contador {{\"entrada\":\"{s}\",\"preset\":{n},"
+                    f"\"modo\":\"una_vez\"}} con reset = la senal de arranque (al arrancar de nuevo cuenta desde "
+                    f"cero); NO uses reset SQ1_FIN si no hay secuencia.")
         elif r["tipo"] == "para_con":
             filas.append(f"- {r['senal']} detiene la banda.")
         elif r["tipo"] == "arranca_con":
@@ -284,6 +350,13 @@ def verificar(cfg: dict, reqs: list) -> list:
             if time.monotonic() > limite:
                 break                     # sin tiempo: lo que falta no se reporta como falla
             s = _sim(band)
+            if r["tipo"] == "conteo":
+                # No exige que la banda corra (un conteo puede manejar solo luces o plumas).
+                s._band_conteo = band
+                _arrancar(s, arranque)
+                s.correr(_ARRANQUE_S)
+                problemas += _probar_conteo(s, r, arranque)
+                continue
             if r["tipo"] == "arranca_con":
                 _arrancar(s, [r["senal"]])
                 s.correr(_ARRANQUE_S)
@@ -306,6 +379,85 @@ def verificar(cfg: dict, reqs: list) -> list:
     except ValueError as e:
         problemas.append(str(e))
     return problemas
+
+
+_ESPERA_FIN_ACCION_S = 20     # lo maximo que se espera a que termine la accion del conteo
+
+
+def _estado(s) -> set:
+    """Lo observable: salidas encendidas y si la banda corre."""
+    return set(s.salidas()) | {"BANDA_CORRIENDO" if _corre(s) else "BANDA_DETENIDA"}
+
+
+def _ronda(s, sensor, n) -> list:
+    """Pasa n objetos por el sensor; el estado despues de cada uno."""
+    estados = []
+    for _ in range(n):
+        s.poner(**{sensor: True})
+        s.correr(0.3)
+        s.poner(**{sensor: False})
+        s.correr(0.4)
+        estados.append(_estado(s))
+    return estados
+
+
+def _contador_atorado(s, senal) -> bool:
+    """Algun contador de ese sensor sigue activo (salida del contador en LSIG[88 + k])."""
+    band = getattr(s, "_band_conteo", None) or {}
+    eng = lm.normalizar_motor((band or {}).get("engine") or {})
+    for c in lm._lista(eng.get("contadores")):
+        if not isinstance(c, dict):
+            continue
+        try:
+            k = int(str(c.get("id", "")).upper().replace("CT", "")) - 1
+            if lm.codigo_senal(c.get("entrada")) == lm.codigo_senal(senal) and 0 <= k < 16 and s.var("LSIG", 88 + k):
+                return True
+        except (ValueError, TypeError):
+            continue
+    return False
+
+
+def _probar_conteo(s, r, arranque) -> list:
+    """Ronda 1: al objeto N cambia algo que no habia pasado con los anteriores.
+    Ronda 2 (si se reinicia solo): cuando termina esa accion se vuelve a contar
+    y ese cambio aparece OTRA VEZ al objeto N, no antes."""
+    n, sensor = int(r["conteo"]), ("I4" if r["senal"] == "S1" else "I5")
+    antes = [_estado(s)] + _ronda(s, sensor, n - 1)
+    al_n = _ronda(s, sensor, 1)[0]
+    cambio = al_n - set().union(*antes)
+    if "BANDA_DETENIDA" in cambio and "BANDA_CORRIENDO" not in set().union(*antes):
+        cambio.discard("BANDA_DETENIDA")          # nunca corrio: no es un efecto del conteo
+    if not cambio:
+        return [f"Al contar {n} en {r['senal']} no pasa nada (ninguna salida ni la banda cambian)."]
+    if not r.get("reinicia"):
+        return []
+    # Esperar a que termine la accion; si detuvo la banda, se vuelve a arrancar.
+    t = 0.0
+    while cambio & _estado(s) - {"BANDA_DETENIDA"} and t < _ESPERA_FIN_ACCION_S:
+        s.correr(0.5)
+        t += 0.5
+    if cambio & _estado(s) - {"BANDA_DETENIDA"}:
+        # La accion no termina sola ("prende la roja" sin tiempo): no hay 2a vuelta que probar,
+        # pero si el contador sigue ACTIVO (CTn en LSIG[88 + n-1]) es que nunca se reinicio.
+        if _contador_atorado(s, r["senal"]):
+            return [f"El contador no vuelve a cero solo: despues de llegar a {n} se queda activo y lo que "
+                    f"enciende no se apaga (para reiniciarse solo usa modo ciclico, y la accion con su duracion "
+                    f"como timer PULSO del contador)."]
+        return []
+    if "BANDA_DETENIDA" in cambio:
+        _arrancar(s, arranque)
+        s.correr(_ARRANQUE_S)
+    ronda2 = _ronda(s, sensor, n)
+    temprano = next((k + 1 for k, e in enumerate(ronda2[:-1]) if cambio & e - {"BANDA_DETENIDA"}
+                     or ("BANDA_DETENIDA" in cambio and "BANDA_DETENIDA" in e)), None)
+    if temprano:
+        return [f"El contador no vuelve a cero solo: en la segunda vuelta la accion de llegar a {n} ya sale con "
+                f"el objeto {temprano} (el reset del contador no se activa; sin secuencia no uses SQ1_FIN)."]
+    if not cambio & ronda2[-1]:
+        return [f"El contador no vuelve a cero solo: la segunda vez que llegan {n} objetos a {r['senal']} ya no "
+                f"pasa nada (el contador se quedo arriba; para reiniciarse solo usa modo ciclico o reset = el "
+                f"timer de la accion)."]
+    return []
 
 
 def _probar_para_sola(s, r) -> list:

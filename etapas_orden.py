@@ -551,7 +551,10 @@ def bloque_modelo(det: dict, dispositivo: str = "banda") -> str:
                        "dentro de la secuencia (el ultimo paso del ciclo vuelve con \"siguiente\" al primero) y un "
                        "contador CTn de esa senal (p. ej. S2, modo una_vez) sale del ciclo con \"alternativa\" "
                        "{\"senal\":\"CTn\",\"ir_a\":<paso siguiente al ciclo>}; reinicia el contador con "
-                       "reset = SQ1_FIN (o el paso que lo pida). Modo una_vez.")
+                       + ("reset = SQ1_CICLO (la secuencia se repite y nunca llega a SQ1_FIN). Modo "
+                          + (f"repetir con {det['veces']} repeticiones." if det["veces"] else "infinita con su paro.")
+                          if det["veces"] or det["repite"] else
+                          "reset = SQ1_FIN (o el paso que lo pida). Modo una_vez."))
         elif det["veces"]:
             reglas += f" Se repite {det['veces']} veces: modo repetir."
         elif det["repite"]:
@@ -584,7 +587,18 @@ def _receta_ciclo(det: dict, g: dict) -> str:
     ciclo = g["ciclo"]
     fin_ciclo = ciclo[-1]
     sig = next((e for e in det["etapas"] if e["n"] == c["etapa"]), None)
-    reset = "SQ1_FIN"
+    # Una secuencia que se repite NUNCA llega a SQ1_FIN: con ese reset el
+    # contador se quedaba en N y en la 2a vuelta la accion salia con cada
+    # objeto. SQ1_CICLO pulsa al cerrar cada vuelta (probado en el ST v7).
+    sq = f"SQ{g.get('n') or 1}"
+    if g.get("veces"):
+        reset, modo = f"{sq}_CICLO", f"Modo repetir con {g['veces']} repeticiones"
+    elif g.get("repite"):
+        reset, modo = f"{sq}_CICLO", "Modo infinita con su paro"
+    else:
+        reset, modo = f"{sq}_FIN", "Modo una_vez"
+    cuando = ("al terminar cada vuelta, para que la siguiente cuente desde cero" if reset.endswith("_CICLO")
+              else "para que la siguiente corrida cuente desde cero")
     return (f" CICLO CON CONTEO: las etapas {ciclo[0]}..{fin_ciclo} se repiten con CADA objeto; la etapa "
             f"{c['etapa']} empieza cuando {c.get('senal') or 'el sensor'} llega a {c['n']}. Receta (probada en el "
             f"PLC): contador CT1 {{\"entrada\":\"{c.get('senal') or 'S2'}\",\"preset\":{c['n']},"
@@ -594,7 +608,7 @@ def _receta_ciclo(det: dict, g: dict) -> str:
             f"su objeto)>,\"alternativa\":{{\"senal\":\"CT1\",\"ir_a\":<primer paso de la etapa "
             f"{c['etapa']}>}}}}. Asi el objeto {c['n']} tambien hace la etapa {fin_ciclo} y luego sigue la "
             f"{c['etapa']}. No pongas la alternativa en un paso con acciones (las saltaria). El contador se "
-            f"reinicia con SQ1_FIN para que la siguiente corrida cuente desde cero. Modo una_vez.")
+            f"reinicia con {reset} {cuando} (no lo reinicies con I2 salvo que el usuario lo pida). {modo}.")
 
 
 def _fila(e) -> str:

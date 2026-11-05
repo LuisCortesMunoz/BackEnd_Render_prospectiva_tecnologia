@@ -942,7 +942,14 @@ def validar_motor(band, hw=HW_BANDA) -> tuple:
         usados.add(base)
         if re.match(r"^(C|M|T|CT)\d+$", base) or base.startswith("SQ"):
             if base not in definidos:
-                errores.append(f"{tag}: usa {base}, que no esta definido.")
+                pista = ""
+                if re.match(r"^SQ\d_(?:FIN|CICLO|ACTIVA|PAUSADA|PASO\d+)$", base) and ".reset" in tag \
+                        and tag.startswith("contador"):
+                    # Sin esa secuencia el modelo cambiaba el reset a I2 (solo se reiniciaba con el boton).
+                    pista = (" Si no hay secuencia y el contador debe reiniciarse SOLO: usa modo \"ciclico\" "
+                             "(vuelve a 0 al llegar a N) o reset = el timer de la accion; no uses I2 salvo que "
+                             "el usuario lo pida.")
+                errores.append(f"{tag}: usa {base}, que no esta definido.{pista}")
         if re.match(r"^I\d+$", base) and base not in entradas_hw:
             errores.append(f"{tag}: la entrada {base} no existe en este PLC "
                            f"(disponibles: {', '.join(sorted(entradas_hw))}).")

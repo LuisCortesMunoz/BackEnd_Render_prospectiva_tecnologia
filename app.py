@@ -2904,7 +2904,9 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     if etapas["aplica"]:
         # En una secuencia el paro automatico es una etapa: lo prueba la
         # simulacion de etapas (con sus tiempos), no la prueba suelta.
-        reqs = [r for r in reqs if r["tipo"] != "para_sola"]
+        # El conteo dentro de una secuencia depende de las etapas anteriores
+        # (S1 antes de contar en S2...): tambien lo prueba la simulacion de etapas.
+        reqs = [r for r in reqs if r["tipo"] not in ("para_sola", "conteo")]
     if comportamiento.paro_solo_sin_condicion(reqs, acl):
         log.info("/generar-logica banda v7: paro automatico sin condicion — se pregunta")
         return LogicaResponse(
