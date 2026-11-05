@@ -873,6 +873,14 @@ def validar_motor(band, hw=HW_BANDA) -> tuple:
         if len(ss) > 1:
             avisos.append(f"{q} lo manejan dos secuencias exclusivas ({', '.join(sorted(ss))}): "
                           f"si corren a la vez, la salida se enciende con cualquiera de las dos.")
+    # Dueño unico: una salida en 'salidas' y en un paso de una secuencia exclusiva. Simulado en
+    # el ST: mientras la secuencia corre, la regla de 'salidas' deja de actuar sin avisar
+    # ("la verde siempre encendida" se apagaba en los pasos de otras luces).
+    for q, regla in (eng.get("salidas") or {}).items():
+        qc = salida_canonica(q)
+        if qc in excl and regla:
+            avisos.append(f"{qc} esta en 'salidas' y en la secuencia {', '.join(sorted(excl[qc]))}: mientras la "
+                          f"secuencia corre, manda ella y la regla de 'salidas' no actua.")
 
     # --- motor ---------------------------------------------------------------
     motor = eng.get("motor") or {}

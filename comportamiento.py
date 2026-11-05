@@ -75,7 +75,17 @@ _RX_SENSOR = re.compile(r"\b(?:cuando|al|en cuanto|si)\s+(?:el |la )?(?:sensor\s
 _RX_CONTEO = re.compile(rf"\b(?:cuente|contar|cuenta|cont\w*|llegue a|lleguen|despues de|al pasar|pasen)\s+"
                         rf"({_NUM_RX})\s+(?:cajas|piezas|objetos|productos|detecciones)\b")
 # Entre el boton y el verbo no puede haber OTRO boton ("arranca con I1 y con I2 se detiene").
-_SIN_OTRO = r"(?:(?!\b(?:con|i ?\d|s ?\d|boton|y|e|o)\b)[^.;,])"
+# Las comas SI se permiten ("al presionar el boton verde, la banda comienza a avanzar"):
+# antes una coma bastaba para que el arranque no se reconociera ni se probara.
+_SIN_OTRO = r"(?:(?!\b(?:con|i ?\d|s ?\d|boton|y|e|o)\b)[^.;])"
+# Alternancia con el mismo boton: "al presionarlo por segunda vez se detiene", "si lo vuelvo a
+# presionar se para", "con el mismo boton se detiene", "que el boton verde alterne".
+_RX_TOGGLE = re.compile(r"\b(?:presion\w*|puls\w*|oprim\w*|apriet\w*|tocar\w*|toque\w*)\s+(?:por\s+|una\s+)?"
+                        r"(?:segunda vez|otra vez|de nuevo|nuevamente)|\bvuelv\w* a (?:presion\w*|puls\w*|oprim\w*|"
+                        r"apretar\w*)|\bvolver a (?:presion\w*|puls\w*|oprim\w*)|\b(?:mismo|misma) (?:boton|pulsador|"
+                        r"tecla)\b|\b(?:altern\w*|toggle|conmut\w*)\b")
+_RX_TOGGLE_PARO = re.compile(rf"\b{_VERBO_PARO}|\bapag\w*")
+_RX_BOTON_TEXTO = re.compile(r"\b(i ?[12]|boton verde|boton rojo)\b")
 _RX_PARO_BOTON = re.compile(rf"\b(?:con|al (?:presionar|pulsar|oprimir)|presionando|pulsando|cuando (?:presione|pulse))\s+"
                             rf"(?:el |la )?(?:boton )?(i ?[12]|boton rojo|boton verde|rojo|verde)\b{_SIN_OTRO}{{0,40}}?\b"
                             rf"{_VERBO_PARO}|\b(i ?[12])\s+(?:la |lo )?(?:detiene|para|apaga|frena)\b")
@@ -214,10 +224,29 @@ def requisitos(textos) -> list:
                 if s:
                     reqs = [r for r in reqs if r["tipo"] != "arranca_con"]
                     reqs.append({"tipo": "arranca_con", "senal": s, "texto": o.strip()})
+        tg = toggle_en(texto)
+        if tg:
+            reqs = [r for r in reqs if r["tipo"] != "toggle"]
+            reqs.append({"tipo": "toggle", **tg, "texto": _fold(texto).strip()[:160]})
     # "al contar 3 cajas se detenga sola" ya lo prueba para_sola (con su conteo).
     if any(r["tipo"] == "para_sola" and r.get("conteo") for r in reqs):
         reqs = [r for r in reqs if r["tipo"] != "conteo"]
     return reqs
+
+
+def toggle_en(texto: str) -> dict:
+    """{"senal": I1|I2} si el texto pide que el MISMO boton arranque y detenga la
+    banda (alternancia). Sin boton reconocible no se adivina."""
+    t = _fold(texto)
+    m = _RX_TOGGLE.search(t)
+    if not m or not _RX_CTX_BANDA.search(t) or not _RX_TOGGLE_PARO.search(t):
+        return {}
+    a = _RX_ARRANQUE_BOTON.search(t)
+    b = _senal(next(g for g in a.groups() if g)) if a else None
+    if b not in ("I1", "I2"):
+        botones = [_senal(x.group(1)) for x in _RX_BOTON_TEXTO.finditer(t[:m.end()])]
+        b = botones[-1] if botones else None
+    return {"senal": b} if b in ("I1", "I2") else {}
 
 
 def de_aclaracion(acl: dict) -> dict:
@@ -307,6 +336,16 @@ def bloque_modelo(reqs: list) -> str:
                     f"- El usuario pidio reiniciar el contador con {r['boton_invalido']}, pero {r['boton_invalido']} "
                     f"es el PARO DE EMERGENCIA y no puede reiniciar nada: usa I1 o I2 y dilo en "
                     f"analisis.modificado.")
+        elif r["tipo"] == "toggle":
+            b = r["senal"]
+            filas.append(
+                f"- ALTERNANCIA con {b}: el 1er pulso de {b} arranca la banda, el 2o la detiene, el 3o la arranca... "
+                f"Receta PROBADA en el PLC: una secuencia libre (SQ1, o SQ2 si SQ1 ya se usa) {{\"inicio\":\"{b}\","
+                f"\"modo\":\"una_vez\",\"pasos\":[{{\"motor\":[\"marcha\"],\"avanza\":\"flanco\",\"senal\":\"{b}\"}}]}}: "
+                f"el pulso que la inicia pone la banda en marcha y el siguiente flanco de {b} termina la secuencia "
+                f"(la banda se detiene). Puede llevar \"paro\" (I2) si el usuario lo pide. NO uses motor.arranque/"
+                f"motor.paro con {b} ni una condicion '{b} AND BANDA_CORRIENDO' ni memorias set/reset con {b}: "
+                f"simulado en el ST, la banda nunca arranca. Los Hz van en banda.frecuencia_hz.")
         elif r["tipo"] == "para_con":
             filas.append(f"- {r['senal']} detiene la banda.")
         elif r["tipo"] == "arranca_con":
@@ -386,6 +425,9 @@ def verificar(cfg: dict, reqs: list) -> list:
             if time.monotonic() > limite:
                 break                     # sin tiempo: lo que falta no se reporta como falla
             s = _sim(band)
+            if r["tipo"] == "toggle":
+                problemas += _probar_toggle(s, r)
+                continue
             if r["tipo"] == "conteo":
                 # No exige que la banda corra (un conteo puede manejar solo luces o plumas).
                 s._band_conteo = band
@@ -435,6 +477,22 @@ def _ronda(s, sensor, n) -> list:
         s.correr(0.4)
         estados.append(_estado(s))
     return estados
+
+
+def _probar_toggle(s, r) -> list:
+    """4 pulsos del mismo boton: corre, parada, corre, parada."""
+    b = r["senal"]
+    s.correr(0.5)
+    visto = []
+    for _ in range(4):
+        s.pulsar(b, 0.4)
+        s.correr(_ARRANQUE_S)
+        visto.append("en marcha" if _corre(s) else "detenida")
+    if visto == ["en marcha", "detenida", "en marcha", "detenida"]:
+        return []
+    return [f"Con pulsos de {b} la banda debe alternar (en marcha, detenida, en marcha, detenida) y se observo: "
+            f"{', '.join(visto)}. Usa la receta de ALTERNANCIA: secuencia una_vez con inicio {b} y UN paso "
+            f"{{\"motor\":[\"marcha\"],\"avanza\":\"flanco\",\"senal\":\"{b}\"}}, sin motor.arranque/paro con {b}."]
 
 
 def _contador_atorado(s, senal) -> bool:
