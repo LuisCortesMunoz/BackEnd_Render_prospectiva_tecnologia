@@ -125,6 +125,20 @@ for nombre, cambio, palabra in [
     except ValueError as e:
         check(any(palabra in x for x in e.args[0]), f"{nombre}: se rechaza ({e.args[0][0][:70]})")
 
+PRES = {"reglas": [{"cuando": {"presionado": "boton verde"}, "hacer": [{"recurso": "amarilla", "accion": "encender"}],
+                    "fragmento": "prende la amarilla solo mientras se presiona el boton verde"}]}
+r = rb.validar(PRES, "prende la amarilla solo mientras se presiona el boton verde")
+check(r["reglas"][0]["cuando"] == {"presionado": "I1"}, "'mientras se presiona' (boton verde = I1)")
+try:
+    rb.validar({"reglas": [{"cuando": {"presionado": "I1"}, "hacer": [{"recurso": "banda", "accion": "avanzar"}],
+                            "fragmento": "la banda avanza mientras se presiona I1"}]},
+               "la banda avanza mientras se presiona I1")
+    check(False, "presionado con la banda")
+except ValueError as e:
+    check(any("solo enciende luces" in x for x in e.args[0]), "'mientras se presiona' con la banda: se rechaza")
+check(rb.verificar(lm.cfg_desde_respuesta(cb.armar_desde_reglas(r)), r) == [],
+      "armado y probado: enciende al presionar y se apaga al soltar")
+
 escenario("2. El extractor: secuencia, dudas, errores")
 ext_resp[:] = [{"secuencia": True}]
 check(eb.extraer(TXT, {}, _ext)["secuencia"], "acciones en orden -> va al flujo de secuencias")

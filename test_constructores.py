@@ -105,12 +105,22 @@ arma = ["Con I1 la banda avanza a 30 Hz y con I2 se detiene", TOGGLE,
         "Con I1 la banda avanza a 30 Hz y se detiene sola a los 10 segundos",
         "Cuando S1 detecte prende la roja parpadeando 4 segundos",
         "Con I1 prende la verde y con I2 se apaga la verde",
-        "Al presionar el pulsador I1 la banda avanza a 25 Hz"]
+        "Al presionar el pulsador I1 la banda avanza a 25 Hz",
+        # los lentes pegan la opcion elegida al final del texto
+        "Con I1 la banda avanza y con I2 se detiene Derecha 30 Hz",
+        "Prende la amarilla con el boton verde Solo mientras se presiona I1",
+        "Con I2 sube la pluma 1 mientras se mantiene presionado"]
 for t in arma:
     r = armar(t)
     check(r["resp"] is not None and not r["pregunta"], f"se arma: '{t[:60]}'")
     check(app.validar_logica_banda(lm.cfg_desde_respuesta(r["resp"])) == [], "  y valida en el PLC")
+r = armar("Con I1 la banda avanza y con I2 se detiene Izquierda 20 Hz")
+check(r["resp"]["banda"]["direccion"] == "izquierda" and r["resp"]["banda"]["frecuencia_hz"] == 20,
+      "'Izquierda 20 Hz' pegado por los lentes: izquierda a 20 Hz")
+check(armar("Prende la amarilla con el boton verde solo mientras se presiona")["resp"]["salidas"] == {"Q4": "I1"},
+      "'mientras se presiona' sin nombrar el boton: el del disparo (I1)")
 modelo = ["Con I1 prende la verde",                                         # ¿mientras o se queda? ambiguo
+          "Prende la roja con I1 mientras se presiona I2",                  # ¿I1 o I2?
           "Cuando S1 detecte prende la roja 3 s y luego la verde 2 s",      # orden: secuencia
           "Haz que la banda haga una danza bonita con I1",
           "Primero con I1 la banda avanza hasta que S1 detecte, luego sube la pluma 1 y al final prende la roja 3 s"]
@@ -175,6 +185,13 @@ for _ in range(45):
     v.append(s.q("Q5"))
 s.correr(1)
 check(sum(1 for a, b in zip(v, v[1:]) if a != b) >= 4 and not s.q("Q5"), "roja parpadea 4 s y se apaga")
+c, s = sim_de("Prende la amarilla con el boton verde Solo mientras se presiona I1")
+s.poner(I1=True)
+s.correr(0.5)
+on = s.q("Q4")
+s.poner(I1=False)
+s.correr(0.5)
+check(on and not s.q("Q4"), "amarilla solo mientras se presiona I1")
 c, s = sim_de("Con I1 prende la verde y con I2 se apaga la verde")
 s.pulsar("I1")
 s.correr(3)

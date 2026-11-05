@@ -91,6 +91,10 @@ def validar(data: dict, texto: str = None) -> dict:
             cuando = {"sensor": _sensor(c["sensor"])} if _sensor(c["sensor"]) else None
             if not cuando:
                 p.append(f"{tag}: el sensor '{c['sensor']}' no existe (S1 o S2).")
+        elif c.get("presionado"):
+            cuando = {"presionado": _boton(c["presionado"])} if _boton(c["presionado"]) else None
+            if not cuando:
+                p.append(f"{tag}: el boton '{c['presionado']}' no existe (I1 o I2).")
         elif c.get("conteo"):
             cuando = {"conteo": True}
         elif c.get("banda") in ("en_marcha", "detenida"):
@@ -114,6 +118,8 @@ def validar(data: dict, texto: str = None) -> dict:
                           "parpadeo": bool(h.get("parpadeo")), "queda": bool(h.get("queda"))})
         if not hacer and not p:
             p.append(f"{tag}: no dice que hacer.")
+        if cuando and "presionado" in cuando and any((h["recurso"], h["accion"]) not in _Q for h in hacer):
+            p.append(f"{tag}: 'mientras se presiona' solo enciende luces o mueve plumas.")
         frag = str(r.get("fragmento") or "")
         if texto is not None and not _respaldo(frag, texto):
             p.append(f"{tag}: no se encuentra en la instruccion ('{frag[:60]}').")
@@ -243,6 +249,9 @@ def verificar(cfg: dict, r: dict, presupuesto_s: float = PRESUPUESTO_S) -> list:
                 if "banda" in c:
                     problemas += _probar_mientras(band, c["banda"], h, arranque)
                     continue
+                if "presionado" in c:
+                    problemas += _probar_presionado(band, c["presionado"], h)
+                    continue
                 if h["recurso"] != "banda" and usos[h["recurso"]] > 1 and h["accion"] != "apagar":
                     continue
                 senal = c.get("boton") or c.get("sensor")
@@ -320,6 +329,22 @@ def _probar_banda(band, senal, h, arranque) -> list:
         s.correr(h["duracion_s"] + 1.0)
         if not _corre(s):
             return [f"Regla {_desc(senal, h)}: la banda no vuelve a avanzar despues de {h['duracion_s']:g} s."]
+    return []
+
+
+def _probar_presionado(band, boton, h) -> list:
+    """Presionado: la salida enciende; al soltar, se apaga."""
+    q = _Q[(h["recurso"], h["accion"])]
+    s = _sim(band)
+    s.poner(**{_SIM[boton]: True})
+    s.correr(0.5)
+    presionado = s.q(q)
+    s.poner(**{_SIM[boton]: False})
+    s.correr(0.5)
+    if not presionado:
+        return [f"Regla «{q} mientras se presiona {boton}»: al presionar {boton} no enciende."]
+    if s.q(q):
+        return [f"Regla «{q} mientras se presiona {boton}»: sigue encendida al soltar {boton}."]
     return []
 
 

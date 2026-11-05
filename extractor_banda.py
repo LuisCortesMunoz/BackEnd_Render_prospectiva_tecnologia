@@ -37,7 +37,8 @@ Motor: 1..327 Hz, direccion derecha o izquierda.
 
 FORMATO
 {"secuencia": false,
- "reglas": [{"cuando": {"boton": "I1"} | {"sensor": "S1"} | {"conteo": true} | {"banda": "en_marcha"|"detenida"},
+ "reglas": [{"cuando": {"boton": "I1"} | {"presionado": "I1"} | {"sensor": "S1"} | {"conteo": true} |
+                       {"banda": "en_marcha"|"detenida"},
              "hacer": [{"recurso": "banda|verde|amarilla|roja|pluma1|pluma2",
                         "accion": "avanzar|detener|pausar|encender|apagar|subir|bajar",
                         "duracion_s": N|null, "espera_s": N|null, "parpadeo": false, "queda": false}],
@@ -54,6 +55,7 @@ REGLAS
   (p. ej. "prende la verde con I1": ¿solo mientras se presiona, se queda encendida o N segundos?).
   Los Hz que falten NO van en dudas (el sistema los pregunta).
 - "cuando la banda avanza / esta en marcha" -> {"banda": "en_marcha"}; "con la banda detenida" -> {"banda": "detenida"}.
+- "solo mientras se presiona / mantiene presionado I1" (luz o pluma) -> {"presionado": "I1"} (se apaga al soltar).
 - "el mismo boton la arranca y la detiene" / "al presionarlo otra vez se detiene" -> "alternancia": ese boton
   (y una regla con ese boton que hace avanzar la banda).
 - "se detiene sola a los N s" -> "paro_solo_s": N. "se detiene N s y sigue" -> accion "pausar" con duracion_s.

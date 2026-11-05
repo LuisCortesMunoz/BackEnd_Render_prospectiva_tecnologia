@@ -85,12 +85,18 @@ _PIEZAS = [
     ("pluma", re.compile(rf"(?:se )?(sub\w*|levant\w*|elev\w*|baj\w*|desciend\w*|descend\w*|alz\w*) {_PLUMA}|"
                          rf"{_PLUMA} (?:se )?(sub\w*|levant\w*|elev\w*|baj\w*|desciend\w*|descend\w*|alz\w*)")),
     # modificadores
+    # "solo mientras se presiona (I1)": la luz / pluma actua SOLO mientras se mantiene el boton
+    ("presionado", re.compile(r"(?:solo |solamente |unicamente )?mientras (?:se |lo |la |yo )?(?:presion\w*|puls\w*|"
+                              r"oprim\w*|manten\w* presionad\w*|mantien\w* presionad\w*|teng\w* presionad\w*|este presionad\w*|"
+                              r"mantenga\w*)(?: el| la)?(?: boton| pulsador)?(?: (i ?[12]|boton verde|boton rojo|"
+                              r"verde|rojo))?\b")),
     ("parpadeo", re.compile(r"(?:parpade\w*|intermitente\w*|destell\w*)")),
     ("queda", re.compile(r"(?:y )?(?:se )?(?:queda|quede|mantiene|mantenga)\w*(?: encendid\w*| prendid\w*)?")),
     ("espera", re.compile(rf"(?:despues de|tras|luego de|pasados?|al cabo de) ({_N}) ?({_SEG})")),
     ("tiempo", re.compile(rf"(?:durante |por )?({_N}) ?({_SEG})")),
     ("hz", re.compile(rf"(?:a |con |en )?({_N}) ?(?:hz|hertz)\b")),
-    ("dir", re.compile(r"(?:hacia |a |para )?la (derecha|izquierda)")),
+    # "hacia la derecha" y tambien "derecha" suelta (los lentes pegan la opcion elegida al texto)
+    ("dir", re.compile(r"(?:hacia |a |para )?(?:la )?(derecha|izquierda)")),
 ]
 
 
@@ -170,7 +176,7 @@ def _grupos(frase) -> list:
             if actual is None:
                 raise _NoSeArma("espera sin disparo")
             actual["espera"] = _segundos(m.group(1), m.group(2))
-        elif tipo in ("tiempo", "parpadeo", "queda"):
+        elif tipo in ("tiempo", "parpadeo", "queda", "presionado"):
             destino = (actual["acciones"] if actual and actual["acciones"] else pendientes)
             if not destino:
                 raise _NoSeArma(f"'{m.group(0)}' sin accion")
@@ -201,6 +207,14 @@ def _luz(accion) -> tuple:
 
 
 _Q_LUZ = {"verde": "Q3", "amarilla": "Q4", "roja": "Q5"}
+_Q_ACCION = {("verde", "encender"): "Q3", ("amarilla", "encender"): "Q4", ("roja", "encender"): "Q5",
+             ("pluma1", "subir"): "Q8", ("pluma1", "bajar"): "Q9", ("pluma2", "subir"): "Q6",
+             ("pluma2", "bajar"): "Q7"}
+
+
+def reglas_q(h) -> str:
+    """Salida fisica de una accion de luz o pluma (None si es de la banda o 'apagar')."""
+    return _Q_ACCION.get((h.get("recurso"), h.get("accion")))
 
 
 def _dur(accion):
@@ -266,6 +280,25 @@ def reglas_desde_lectura(texto: str, partes: list) -> dict:
                     continue
                 d = _dur(a)
                 base = {"duracion_s": d, "espera_s": g["espera"] or None}
+                pm = next((mm for t, mm in a.get("mods", []) if t == "presionado"), None)
+                if pm is not None:
+                    # "prende la amarilla con I1 solo mientras se presiona": la salida sigue al boton
+                    b = _senal_txt(pm.group(1)) if pm.group(1) else cuando.get("boton")
+                    if cuando.get("boton") and b != cuando["boton"]:
+                        raise _NoSeArma("'con I1 ... mientras se presiona I2': no se sabe cual boton")
+                    if b not in ("I1", "I2") or a["tipo"] not in ("luz", "pluma") or d:
+                        raise _NoSeArma("'mientras se presiona' sin boton claro o con otra accion")
+                    if a["tipo"] == "luz":
+                        verbo, rec = _luz(a)
+                        if re.match(r"apag", verbo):
+                            raise _NoSeArma("'mientras se presiona' con apagar")
+                        h = [{"recurso": rec, "accion": "encender"}]
+                    else:
+                        verbo = a["m"].group(1) or a["m"].group(2) or ""
+                        h = [{"recurso": p, "accion": "bajar" if re.match(r"baj|desc", verbo) else "subir"}
+                             for p in _pluma(a["m"].group(0))]
+                    out["reglas"].append({"cuando": {"presionado": b}, "hacer": h, "fragmento": frase["texto"]})
+                    continue
                 if a["tipo"] == "marcha":
                     if en_toggle:
                         raise _NoSeArma("despues de 'otra vez' se esperaba que se detenga")
@@ -340,6 +373,14 @@ def armar_desde_reglas(r: dict, acl: dict = None) -> dict:
 
     for regla in reglas:
         cuando = regla["cuando"]
+        if "presionado" in cuando:
+            # la salida encendida SOLO mientras el boton esta presionado
+            for h in regla["hacer"]:
+                q = reglas_q(h)
+                if not q:
+                    raise _NoSeArma("'mientras se presiona' solo con luces o plumas")
+                salidas[q] = cuando["presionado"]
+            continue
         if "banda" in cuando:
             cond = "BANDA_CORRIENDO" if cuando["banda"] == "en_marcha" else "BANDA_DETENIDA"
             for h in regla["hacer"]:
