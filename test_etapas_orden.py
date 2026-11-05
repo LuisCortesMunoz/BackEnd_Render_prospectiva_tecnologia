@@ -481,4 +481,60 @@ d = eo.detectar("Primero avanza la banda, cuando termine el ciclo sube la pluma 
                 "banda", {})
 check(len(d["grupos"]) == 1, "una sola secuencia")
 
+escenario("15. 'Secuencia 1 / Secuencia 2', 'la primera / la segunda', 'Ademas': secuencias aparte")
+grupos = lambda t: [g["etapas"] for g in eo.detectar(t, "banda", {})["grupos"]]
+SEC12 = ("Secuencia 1: con I1 avanza la banda 10 segundos y luego se detiene. Secuencia 2: cuando el sensor 2 "
+         "detecte, sube la pluma 2 y despues prende la amarilla 4 segundos")
+d = eo.detectar(SEC12, "banda", {})
+check([g["etapas"] for g in d["grupos"]] == [[1, 2], [3, 4]], f"'Secuencia 1/2' se separan: {grupos(SEC12)}")
+check(d["etapas"][0]["texto"] == "con I1 avanza la banda 10 segundos", "el marcador no queda en el texto de la etapa")
+check(d["etapas"][2]["entra_con"] == "S2", "la segunda arranca con S2")
+check(eo.preguntas(d, "banda") == [], f"sin preguntas: {eo.preguntas(d, 'banda')}")
+DOS_ORD = ("Quiero dos secuencias: la primera, con I1 la banda avanza hasta que S1 detecte. La segunda, cuando S2 "
+           "detecte prende la verde 3 segundos y luego la roja 2 segundos")
+check(grupos(DOS_ORD) == [[1], [2, 3]], f"'la primera / la segunda' (antes no se detectaba): {grupos(DOS_ORD)}")
+ADEMAS = ("Primero prende la verde 2 s y luego la roja 2 s. Ademas, cuando S2 detecte sube la pluma 1 y luego "
+          "prende la amarilla 3 s")
+check(grupos(ADEMAS) == [[1, 2], [3, 4]], f"'Ademas,' abre otra secuencia: {grupos(ADEMAS)}")
+check(grupos("Secuencia uno: prende la verde 2 s y luego la roja 1 s. Otra secuencia: con S1 sube la pluma 1 "
+             "y luego prende la amarilla 2 s") == [[1, 2], [3, 4]], "'otra secuencia' tambien")
+# Lo que NO debe partir
+check(grupos("Primero la verde 2 segundos, luego la amarilla 2 segundos y luego la roja 2 segundos, repite la "
+             "secuencia 3 veces") == [[1, 2, 3]], "'repite la secuencia 3 veces' no abre otra")
+check(grupos("Al presionar I1 enciende la verde 2 s y luego la roja 2 s, despues inicia otra secuencia de que la "
+             "amarilla prenda 4 s y luego la verde 1 s") == [[1, 2, 3, 4]],
+      "'despues inicia otra secuencia' va a continuacion (la misma)")
+check(grupos("Primero sube la primera pluma, luego la segunda pluma y al final prende la roja 3 segundos")
+      == [[1, 2, 3]], "'la segunda pluma' no es otra secuencia")
+check(not eo.detectar("Cuando S1 detecte una pieza la banda se detiene, sube la pluma 1, espera 3 segundos, baja "
+                      "la pluma y la banda sigue. Ademas, cada vez que S2 cuente 5 piezas prende la roja",
+                      "banda", {})["aplica"], "'Ademas' solo no activa el modo de orden (frase con puras comas)")
+check(grupos("Primero la banda avanza hasta que S1 detecte; ademas, sube la pluma 1. Luego prende la roja 3 s y "
+             "al final la verde 2 s") == [[1, 2, 3]],
+      "'; ademas, sube la pluma' es lo que pasa en ese paso, no otra secuencia")
+check(grupos("Primero prende la verde 2 s y luego la roja 2 s. Ademas, sube la pluma 1 y luego prende la "
+             "amarilla 3 s") == [[1, 2, 3]], "'Ademas,' sin disparador (cuando/al presionar/con I1) no separa")
+check(grupos(DOS) == [[1, 2, 3], [4, 5, 6, 7]], "el caso del escenario 13 no cambia")
+
+# De punta a punta: el modelo recibe SQ1 y SQ2 y la respuesta pasa la verificacion y carga en el ST
+bloque = eo.bloque_modelo(d, "banda")
+check("SQ1" in bloque and "SQ2" in bloque and "INDEPENDIENTES" in bloque, "el modelo recibe dos bloques")
+SEC12_BIEN = {"name": "Dos secuencias", "banda": M30,
+              "secuencias": [
+                  {"id": "SQ1", "inicio": "I1", "modo": "una_vez", "pasos": [
+                      {"motor": ["marcha"], "avanza": "tiempo", "segundos": 10},
+                      {"salidas": [], "avanza": "tiempo", "segundos": 0.5}]},
+                  {"id": "SQ2", "inicio": "S2", "modo": "una_vez", "pasos": [
+                      {"salidas": ["Q6"], "avanza": "tiempo", "segundos": 2},
+                      {"salidas": ["Q4"], "avanza": "tiempo", "segundos": 4}]}],
+              "analisis": {"intencion": "dos secuencias", "compatibilidad": "total", "conservado": [],
+                           "modificado": [], "simplificado": [], "no_soportado": [], "requiere_confirmacion": False},
+              "preguntas": []}
+r = generar(SEC12, SEC12_BIEN)
+check(r.status == "ok" and len(llamadas) == 1, f"genera a la primera ({r.status}, {len(llamadas)} llamadas)")
+check("SECUENCIA SQ2" in "\n".join(m["content"] for m in llamadas[0] if m["role"] == "system"),
+      "el prompt (system) lleva la segunda secuencia")
+check(eo.verificar(cfg(SEC12_BIEN), d, "banda") == [], f"verifica: {eo.verificar(cfg(SEC12_BIEN), d, 'banda')}")
+cargar(cfg(SEC12_BIEN)["band"])
+
 print(f"\nTODAS LAS PRUEBAS DE ACCIONES EN ORDEN PASARON ({OK} comprobaciones).")

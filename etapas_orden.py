@@ -64,6 +64,53 @@ _DEBILES = [r"(?:y )?luego(?! de (?:" + _NUM_RX + r"))", r"(?:y )?despues de (?:
 _RX_FUERTE = re.compile(r"\b(?:" + "|".join(_FUERTES) + r")\b")
 _RX_DEBIL = re.compile(r"\b(?:" + "|".join(_DEBILES) + r")\b")
 
+# ── Otra secuencia independiente ────────────────────────────────────────────
+# "Secuencia 1: ... Secuencia 2: ...", "otra secuencia", "la segunda (secuencia)":
+# lo que sigue es una secuencia APARTE, no la etapa siguiente de la anterior.
+# Tambien son marcadores de orden (el usuario esta describiendo secuencias).
+# "repite la secuencia 3 veces" no abre otra (lookahead de "veces").
+_RX_SEC_NUM = re.compile(r"\b(?:la |una )?secuencia (?:numero |no\.? |#)?(?:\d+|uno|dos|tres|cuatro|"
+                         r"primera|segunda|tercera|cuarta)\b(?!\s*veces)")
+_RX_SEC_OTRA = re.compile(r"\b(?:la |una )?(?:otra|segunda|tercera|cuarta|siguiente|nueva) secuencia\b")
+# "la primera, ... La segunda, ...": solo si la instruccion habla de secuencias
+# (si no, "sube la primera y luego la segunda" son las plumas).
+_RX_SEC_ORDINAL = re.compile(r"\b(?:y )?(?:en )?la (?:primera|segunda|tercera|cuarta)\b(?!\s+(?:pluma|plumas|luz|luces|"
+                             r"lampara|etapa|vez|veces|pieza|piezas|caja|cajas|banda|sensor|deteccion|accion|parte|"
+                             r"senal|salida|entrada|secuencia))")
+# "Ademas, cuando S2 detecte ...", "Por otro lado, al presionar I4 ...": separan
+# secuencias ya detectadas, pero por si solos NO activan el modo de orden (una
+# frase con puras comas no se puede partir en etapas confiables). Solo al
+# empezar una oracion Y seguidos de un disparador: "...avanzando; ademas, la
+# pluma 2 se eleva" es lo que pasa EN ESE paso, no otra secuencia.
+_RX_SEC_APARTE = re.compile(r"(?:^|(?<=\.)|(?<=\. ))\s*(?:y )?(?:ademas|aparte|por otro lado|por separado|"
+                            r"al mismo tiempo|en paralelo|independientemente)\b"
+                            r"(?=,?\s*(?:cuando|en cuanto|cada vez|si |al (?:presionar|pulsar|oprimir|activar|"
+                            r"detectar)|con (?:el |la )?(?:boton|pulsador|sensor|interruptor|i ?\d|s ?\d)))")
+
+
+# "... luego la roja, despues inicia otra secuencia de ...": va A CONTINUACION
+# de la anterior (son mas etapas de la misma), no es una secuencia aparte.
+_RX_A_CONTINUACION = re.compile(r"\b(?:luego|despues|termin\w*|acab\w*|finalic\w*|enseguida|en seguida|"
+                                r"continuacion|posteriormente|tras)\b[^.;:]{0,25}$")
+
+
+def _marcas_otra_secuencia(t: str) -> tuple:
+    """({inicio: fin} de cada 'otra secuencia', cuantas son explicitas)."""
+    rxs = [_RX_SEC_NUM, _RX_SEC_OTRA] + ([_RX_SEC_ORDINAL] if "secuencia" in t else [])
+    marcas, explicitas = {}, 0
+    for rx in rxs:
+        for m in rx.finditer(t):
+            if _RX_A_CONTINUACION.search(t[:m.start()]):
+                continue
+            if not any(a <= m.start() < fin for a, fin in marcas.items()):
+                marcas[m.start()] = m.end()
+                explicitas += 1
+    for m in _RX_SEC_APARTE.finditer(t):
+        ini = m.start() + (len(m.group(0)) - len(m.group(0).lstrip()))
+        if not any(a <= ini < fin for a, fin in marcas.items()):
+            marcas[ini] = m.end()
+    return marcas, explicitas
+
 # ── Recursos ────────────────────────────────────────────────────────────────
 _RX_BOTON = re.compile(r"\bboton(?:es)? (?:verde|rojo)\b")
 _RX_LUZ = re.compile(r"\b(verde|amarill[ao]s?|roj[ao]s?|q(?:3|4|5|10|11|12))\b")
@@ -249,29 +296,34 @@ def detectar(texto: str, dispositivo: str = "banda", acl: dict = None) -> dict:
         return vacio
     original = str(texto or "")
     t = _fold(original)
-    orden = len(_RX_FUERTE.findall(t)) + len(_RX_DEBIL.findall(t))
+    otra_sec, sec_explicitas = _marcas_otra_secuencia(t)
+    orden = len(_RX_FUERTE.findall(t)) + len(_RX_DEBIL.findall(t)) + sec_explicitas
     if not orden:
         return vacio
     # inicio -> donde empieza el texto de la etapa: los marcadores de orden se
     # quitan; "cuando S1 detecte" se queda (dice con que senal empieza).
-    marcas = {}
+    # Los de "otra secuencia" van primero: ganan el lugar si se enciman.
+    marcas = dict(otra_sec)
     for rx, quita in ((_RX_FUERTE, True), (_RX_DEBIL, True), (_RX_CUANDO_SENAL, False)):
         for m in rx.finditer(t):
             if not any(a <= m.start() < fin for a, fin in marcas.items()):
                 marcas[m.start()] = m.end() if quita else m.start()
-    fuerte = bool(_RX_FUERTE.search(t))
+    fuerte = bool(_RX_FUERTE.search(t)) or sec_explicitas > 0
     cortes = sorted(set([0] + list(marcas)))
     trozos = []
     for k, a in enumerate(cortes):
         b = cortes[k + 1] if k + 1 < len(cortes) else len(t)
         ini = marcas.get(a, a)
-        trozos.append((original[ini:b], t[ini:b]))
+        trozos.append((original[ini:b], t[ini:b], a in otra_sec))
 
     # Una etapa que cierra un ciclo ("... y se repita el ciclo", "hasta que yo
     # detenga todo") termina su secuencia: lo que sigue es OTRA secuencia
     # independiente ("cuando el sensor 2 detecte ... haga la secuencia ...").
-    etapas, plumas_previas, grupo, cierra = [], [], 1, False
-    for orig, frag in trozos:
+    # "Secuencia 2: ..." tambien abre otra secuencia; si el marcador queda en
+    # un trozo sin contenido ("La segunda,") se aplica a la siguiente etapa.
+    etapas, plumas_previas, grupo, cierra, nueva = [], [], 1, False, False
+    for orig, frag, abre_sec in trozos:
+        nueva = nueva or abre_sec
         # "hasta que yo detenga todo" y "Con I2 se detiene todo" son el paro
         # general, no una etapa con la banda detenida.
         limpio = _RX_PARO_GENERAL.sub(lambda m: " " * len(m.group(0)), _RX_HASTA_PARO.sub(
@@ -297,9 +349,10 @@ def detectar(texto: str, dispositivo: str = "banda", acl: dict = None) -> dict:
             e["tiempos"] = []                       # "durante un tiempo determinado": se pregunta
         if req or e["tiempos"] or e["hasta"] or e["conteo"] or e["reinicia_contador"]:
             # (sin contenido = preambulo: "Con I1:", "A 30 Hz,")
-            if cierra and etapas:
+            if (cierra or nueva) and etapas and etapas[-1]["grupo"] == grupo:
                 grupo += 1
                 plumas_previas = []
+            nueva = False
             e["grupo"] = grupo
             etapas.append(e)
             plumas_previas = plumas or plumas_previas
