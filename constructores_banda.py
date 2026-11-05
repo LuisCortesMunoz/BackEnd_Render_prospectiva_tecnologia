@@ -147,6 +147,9 @@ class _NoSeArma(Exception):
     pass
 
 
+NoSeArma = _NoSeArma          # nombre publico (app.py arma reglas del extractor)
+
+
 def _grupos(frase) -> list:
     """[{disparo, acciones[], ...}] : cada disparo con las acciones que le siguen
     (o que lo preceden en la misma frase: 'prende la roja cuando S1 detecte')."""
@@ -211,9 +214,223 @@ def _tiene(accion, mod):
     return any(t == mod for t, _ in accion.get("mods", []))
 
 
-def construir(texto: str, intencion: dict, acl: dict = None) -> dict:
+# ── Lectura -> REGLAS (formato comun, el mismo que produce el extractor) ─────
+# {"reglas": [{"cuando": {"boton": "I1"} | {"sensor": "S1"} | {"conteo": true} |
+#                         {"banda": "en_marcha" | "detenida"},
+#              "hacer": [{"recurso": "banda|verde|amarilla|roja|pluma1|pluma2",
+#                         "accion": "avanzar|detener|pausar|encender|apagar|subir|bajar",
+#                         "duracion_s": N|null, "espera_s": N|null, "parpadeo": bool, "queda": bool}],
+#              "fragmento": "texto de donde salio"}],
+#  "motor": {"hz": N|null, "direccion": "derecha|izquierda"|null},
+#  "alternancia": "I1|I2"|null, "paro_solo_s": N|null,
+#  "conteo": {"senal": "S1|S2", "n": N, "reinicia": bool, "boton": "I1|I2"|null}|null}
+def reglas_desde_lectura(texto: str, partes: list) -> dict:
+    """partes = [(frase, grupos)] de las frases entendidas -> reglas."""
+    c = co.conteo_en(texto)
+    out = {"reglas": [], "motor": {"hz": None, "direccion": None}, "alternancia": None, "paro_solo_s": None,
+           "conteo": ({"senal": c["senal"], "n": c["conteo"], "reinicia": c["reinicia"], "boton": c.get("boton")}
+                      if c else None)}
+    for frase, grupos in partes:
+        for g in grupos:
+            tipo, m = g["disparo"]
+            if tipo == "hz":
+                out["motor"]["hz"] = co._numero(m.group(1))
+                continue
+            if tipo == "dir":
+                out["motor"]["direccion"] = m.group(1)
+                continue
+            if tipo == "reset":
+                if not c:
+                    raise _NoSeArma("reset de contador sin contador")
+                continue
+            if tipo == "paro_solo":
+                if not m.group(1):
+                    raise _NoSeArma("paro automatico sin tiempo")
+                out["paro_solo_s"] = _segundos(m.group(1), m.group(2))
+                continue
+            if tipo == "mientras":
+                hacer = []
+                for a in g["acciones"]:
+                    if a["tipo"] != "luz" or re.match(r"apag", _luz(a)[0]):
+                        raise _NoSeArma("'mientras' solo con encender luces")
+                    hacer.append({"recurso": _luz(a)[1], "accion": "encender", "parpadeo": _tiene(a, "parpadeo")})
+                out["reglas"].append({"cuando": {"banda": "en_marcha" if m.group(1) else "detenida"},
+                                      "hacer": hacer, "fragmento": frase["texto"]})
+                continue
+            cuando = _cuando_de(tipo, m, c)
+            senal = next(iter(cuando.values()))
+            hacer, en_toggle = [], False
+            for a in g["acciones"]:
+                if a["tipo"] == "toggle":
+                    en_toggle = True
+                    continue
+                d = _dur(a)
+                base = {"duracion_s": d, "espera_s": g["espera"] or None}
+                if a["tipo"] == "marcha":
+                    if en_toggle:
+                        raise _NoSeArma("despues de 'otra vez' se esperaba que se detenga")
+                    hacer.append({"recurso": "banda", "accion": "avanzar", **base})
+                elif a["tipo"] == "paro":
+                    if en_toggle:
+                        if "boton" not in cuando:
+                            raise _NoSeArma("alternancia con algo que no es un boton")
+                        out["alternancia"] = senal
+                        continue
+                    hacer.append({"recurso": "banda", "accion": "pausar" if d else "detener", **base})
+                elif a["tipo"] == "luz":
+                    verbo, rec = _luz(a)
+                    hacer.append({"recurso": rec, "accion": "apagar" if re.match(r"apag", verbo) else "encender",
+                                  "parpadeo": _tiene(a, "parpadeo"), "queda": _tiene(a, "queda"), **base})
+                elif a["tipo"] == "pluma":
+                    verbo = a["m"].group(1) or a["m"].group(2) or ""
+                    accion = "bajar" if re.match(r"baj|desc", verbo) else "subir"
+                    hacer += [{"recurso": p, "accion": accion, **base} for p in _pluma(a["m"].group(0))]
+                else:
+                    raise _NoSeArma(f"accion '{a['tipo']}'")
+            if hacer:
+                out["reglas"].append({"cuando": cuando, "hacer": hacer, "fragmento": frase["texto"]})
+    return out
+
+
+def _cuando_de(tipo, m, conteo) -> dict:
+    if tipo == "boton":
+        s = _senal_txt(m.group(1) or m.group(2))
+        if s not in ("I1", "I2"):
+            raise _NoSeArma(f"boton no reconocido: {m.group(0)}")
+        return {"boton": s}
+    if tipo == "sensor":
+        s = _senal_txt(m.group(1) or m.group(2))
+        if s not in ("S1", "S2"):
+            raise _NoSeArma(f"sensor no reconocido: {m.group(0)}")
+        return {"sensor": s}
+    if tipo == "conteo":
+        if not conteo:
+            raise _NoSeArma("conteo sin sensor claro")
+        return {"conteo": True}
+    raise _NoSeArma(f"disparo '{tipo}'")
+
+
+# ── REGLAS -> JSON del motor v7 ─────────────────────────────────────────────
+def armar_desde_reglas(r: dict, acl: dict = None) -> dict:
+    """Recetas probadas: eventos (lavo_motor.expandir_eventos reparte los ids),
+    contador, secuencia de alternancia y timers. Lanza _NoSeArma si algo no se
+    puede armar sin adivinar. resp["_pregunta"] = falta un dato (Hz)."""
     acl = acl or {}
-    out = {"resp": None, "pregunta": None, "piezas": [], "motivo": ""}
+    eventos, salidas, timers, contadores, secuencias = [], {}, [], [], []
+    arranques, paros = [], []
+    mueve = False
+    conteo = r.get("conteo")
+    reglas = r.get("reglas") or []
+
+    def nuevo_timer(**kw) -> str:
+        tid = f"T{len(timers) + 1}"
+        timers.append({"id": tid, "reset": None, **kw})
+        return tid
+
+    if any("conteo" in x["cuando"] for x in reglas):
+        if not conteo:
+            raise _NoSeArma("conteo sin sensor ni numero")
+        ct = {"id": "CT1", "entrada": conteo["senal"], "preset": int(conteo["n"])}
+        if conteo.get("reinicia"):
+            ct.update(modo="ciclico", reset=conteo.get("boton"))
+        else:
+            ct.update(modo="una_vez", reset=conteo.get("boton"))
+        contadores.append(ct)
+    hay_apagar = {h["recurso"] for x in reglas for h in x["hacer"] if h["accion"] == "apagar"}
+
+    for regla in reglas:
+        cuando = regla["cuando"]
+        if "banda" in cuando:
+            cond = "BANDA_CORRIENDO" if cuando["banda"] == "en_marcha" else "BANDA_DETENIDA"
+            for h in regla["hacer"]:
+                if h["recurso"] not in _Q_LUZ or h["accion"] != "encender":
+                    raise _NoSeArma("'mientras la banda...' solo con encender luces")
+                salidas[_Q_LUZ[h["recurso"]]] = (nuevo_timer(tipo="INTERMITENTE", entrada=cond, segundos=0.5,
+                                                             segundos_off=0.5) if h.get("parpadeo") else cond)
+            continue
+        senal = cuando.get("boton") or cuando.get("sensor") or "CT1"
+        for h in regla["hacer"]:
+            d, rec, acc = h.get("duracion_s"), h["recurso"], h["accion"]
+            ev = {"cuando": senal, "espera_s": h.get("espera_s"), "duracion_s": d}
+            if rec == "banda":
+                if acc == "avanzar":
+                    mueve = True
+                    arranques.append(senal)
+                elif acc == "detener":
+                    paros.append(senal)
+                elif acc == "pausar" and not d:
+                    raise _NoSeArma("pausar sin cuanto tiempo")
+                ev["acciones"] = {"banda": acc}
+            elif rec in _Q_LUZ:
+                if acc == "apagar":
+                    ev["acciones"] = {rec: "apagar"}
+                elif h.get("parpadeo"):
+                    if not d:
+                        raise _NoSeArma("parpadeo sin duracion")
+                    pulso = nuevo_timer(tipo="PULSO", entrada=senal, segundos=d)
+                    salidas[_Q_LUZ[rec]] = nuevo_timer(tipo="INTERMITENTE", entrada=pulso, segundos=0.5,
+                                                       segundos_off=0.5)
+                    continue
+                else:
+                    sin_fin = not d and not h.get("queda") and rec not in hay_apagar
+                    ct_fijo = senal == "CT1" and contadores and contadores[0]["modo"] == "una_vez"
+                    if sin_fin and not ct_fijo:
+                        # "con I1 prende la verde": mientras se presiona o se queda? no se adivina
+                        raise _NoSeArma(f"luz {rec} sin duracion ni quien la apague")
+                    ev["acciones"] = {rec: "encender"}
+            elif rec in ("pluma1", "pluma2"):
+                ev["acciones"] = {rec: acc}
+            else:
+                raise _NoSeArma(f"recurso '{rec}'")
+            eventos.append({k: v for k, v in ev.items() if v not in (None, 0, 0.0) or k == "acciones"})
+
+    if r.get("paro_solo_s"):
+        tid = nuevo_timer(tipo="TON", entrada="BANDA_CORRIENDO", segundos=float(r["paro_solo_s"]))
+        eventos.append({"cuando": tid, "acciones": {"banda": "detener"}})
+    toggle = r.get("alternancia")
+    if toggle:
+        mueve = True
+        arranques = [a for a in arranques if a != toggle]
+        eventos = [e for e in eventos if not (e["cuando"] == toggle and e["acciones"] == {"banda": "avanzar"})]
+        sq = {"id": "SQ1", "inicio": toggle, "modo": "una_vez",
+              "pasos": [{"motor": ["marcha"], "avanza": "flanco", "senal": toggle}]}
+        otros_paros = [p for p in paros if p != toggle]
+        if otros_paros:
+            sq["paro"] = otros_paros[0]
+            eventos = [e for e in eventos if e["acciones"] != {"banda": "detener"}]
+        secuencias.append(sq)
+    if contadores and contadores[0]["modo"] == "una_vez" and not contadores[0].get("reset") and arranques:
+        contadores[0]["reset"] = arranques[0]           # al arrancar de nuevo cuenta desde cero
+    if contadores and contadores[0].get("reset") is None:
+        contadores[0].pop("reset", None)
+    if not (eventos or salidas or secuencias):
+        raise _NoSeArma("no hay acciones")
+    if mueve and not (arranques or toggle):
+        raise _NoSeArma("la banda se mueve pero no se sabe con que arranca")
+
+    resp = {"name": _nombre(arranques, toggle, contadores, eventos, salidas), "analisis": {
+        "intencion": "", "compatibilidad": "total", "conservado": [], "modificado": [],
+        "simplificado": [], "no_soportado": [], "requiere_confirmacion": False}, "preguntas": []}
+    motor = r.get("motor") or {}
+    if mueve:
+        hz = motor.get("hz") or (ac.frecuencia(acl) if acl else None)
+        if not hz:
+            resp["_pregunta"] = preguntas_banda.pregunta("freq_hz")
+        resp["banda"] = {"mover": True, "direccion": ac.direccion(acl) or motor.get("direccion") or "derecha",
+                         "frecuencia_hz": hz}
+    else:
+        resp["banda"] = {"mover": False}
+    for clave, valor in (("timers", timers), ("contadores", contadores), ("eventos", eventos),
+                         ("salidas", salidas), ("secuencias", secuencias)):
+        if valor:
+            resp[clave] = valor
+    return resp
+
+
+def construir(texto: str, intencion: dict, acl: dict = None) -> dict:
+    """Lector de patrones -> reglas -> JSON. out["reglas"] = lo entendido (aunque sea parcial)."""
+    acl = acl or {}
+    out = {"resp": None, "pregunta": None, "piezas": [], "motivo": "", "reglas": None, "completo": False}
     lectura = leer(texto)
     if not lectura["frases"]:
         out["motivo"] = "sin texto"
@@ -225,184 +442,22 @@ def construir(texto: str, intencion: dict, acl: dict = None) -> dict:
         out["motivo"] = "frases no entendidas: " + " | ".join(
             f"{f['texto'][:50]} (sobra: {', '.join(f['sobra'][:4])})" for f in lectura["pendientes"])
     try:
-        partes = [(f, _grupos(f)) for f in lectura["entendidas"]]
+        reglas = reglas_desde_lectura(texto, [(f, _grupos(f)) for f in lectura["entendidas"]])
+        out["reglas"] = reglas
+        resp = armar_desde_reglas(reglas, acl)
     except _NoSeArma as e:
         out["motivo"] = (out["motivo"] + "; " if out["motivo"] else "") + str(e)
         return out
-    try:
-        resp = _armar(texto, [g for _, gs in partes for g in gs], acl)
-    except _NoSeArma as e:
-        out["motivo"] = (out["motivo"] + "; " if out["motivo"] else "") + str(e)
-        return out
+    resp["analisis"]["intencion"] = texto[:200]
     out["piezas"] = [{k: v for k, v in resp.items() if k not in ("name", "analisis", "preguntas", "_pregunta") and v}]
     if not lectura["pendientes"]:
+        out["completo"] = True
         if resp.get("_pregunta"):
             # falta un dato (los Hz): se pregunta con opciones y se arma con la respuesta
             out["pregunta"] = resp.pop("_pregunta")
         else:
             out["resp"] = resp
     return out
-
-
-def _armar(texto: str, grupos: list, acl: dict) -> dict:
-    eventos, salidas, timers, contadores, secuencias = [], {}, [], [], []
-    hz = dirc = None
-    mueve = False
-    toggle = None
-    arranques, paros = [], []
-    conteo = co.conteo_en(texto)
-    hay_apagar = {_luz(a)[1] for g in grupos for a in g["acciones"]
-                  if a["tipo"] == "luz" and re.match(r"apag", _luz(a)[0])}
-
-    def nuevo_timer(**kw) -> str:
-        tid = f"T{len(timers) + 1}"
-        timers.append({"id": tid, "reset": None, **kw})
-        return tid
-
-    def disparo_de(g):
-        tipo, m = g["disparo"]
-        if tipo == "boton":
-            s = _senal_txt(m.group(1) or m.group(2))
-            if s not in ("I1", "I2"):
-                raise _NoSeArma(f"boton no reconocido: {m.group(0)}")
-            return s
-        if tipo == "sensor":
-            s = _senal_txt(m.group(1) or m.group(2))
-            if s not in ("S1", "S2"):
-                raise _NoSeArma(f"sensor no reconocido: {m.group(0)}")
-            return s
-        if tipo == "conteo":
-            if not conteo:
-                raise _NoSeArma("conteo sin sensor claro")
-            if not contadores:
-                c = {"id": "CT1", "entrada": conteo["senal"], "preset": conteo["conteo"]}
-                if conteo["reinicia"]:
-                    c.update(modo="ciclico", reset=conteo.get("boton"))
-                elif conteo.get("boton"):
-                    c.update(modo="una_vez", reset=conteo["boton"])
-                else:
-                    c.update(modo="una_vez", reset=None)       # se ajusta al arranque mas abajo
-                contadores.append(c)
-            return "CT1"
-        raise _NoSeArma(f"disparo '{tipo}'")
-
-    for g in grupos:
-        tipo, m = g["disparo"]
-        if tipo == "hz":
-            hz = co._numero(m.group(1))
-            continue
-        if tipo == "dir":
-            dirc = m.group(1)
-            continue
-        if tipo == "reset":
-            if not conteo:
-                raise _NoSeArma("reset de contador sin contador")
-            continue
-        if tipo == "paro_solo":
-            if not m.group(1):
-                raise _NoSeArma("paro automatico sin tiempo")
-            tid = nuevo_timer(tipo="TON", entrada="BANDA_CORRIENDO", segundos=_segundos(m.group(1), m.group(2)))
-            eventos.append({"cuando": tid, "acciones": {"banda": "detener"}})
-            continue
-        if tipo == "mientras":
-            cond = "BANDA_CORRIENDO" if m.group(1) else "BANDA_DETENIDA"
-            for a in g["acciones"]:
-                if a["tipo"] != "luz" or re.match(r"apag", _luz(a)[0]):
-                    raise _NoSeArma("'mientras' solo con encender luces")
-                q = _Q_LUZ[_luz(a)[1]]
-                if _tiene(a, "parpadeo"):
-                    salidas[q] = nuevo_timer(tipo="INTERMITENTE", entrada=cond, segundos=0.5, segundos_off=0.5)
-                else:
-                    salidas[q] = cond
-            continue
-        senal = disparo_de(g)
-        en_toggle = False
-        for a in g["acciones"]:
-            if a["tipo"] == "toggle":
-                en_toggle = True
-                continue
-            d = _dur(a)
-            ev = {"cuando": senal, "espera_s": g["espera"] or 0, "duracion_s": d}
-            if a["tipo"] == "marcha":
-                mueve = True
-                if en_toggle:
-                    raise _NoSeArma("despues de 'otra vez' se esperaba que se detenga")
-                arranques.append(senal)
-                ev["acciones"] = {"banda": "avanzar"}
-            elif a["tipo"] == "paro":
-                if en_toggle:
-                    if senal not in ("I1", "I2"):
-                        raise _NoSeArma("alternancia con algo que no es un boton")
-                    toggle = senal
-                    continue
-                paros.append(senal)
-                ev["acciones"] = {"banda": "pausar" if d else "detener"}
-            elif a["tipo"] == "luz":
-                verbo, rec = _luz(a)
-                if re.match(r"apag", verbo):
-                    ev["acciones"] = {rec: "apagar"}
-                else:
-                    if _tiene(a, "parpadeo"):
-                        if not d:
-                            raise _NoSeArma("parpadeo sin duracion")
-                        pulso = nuevo_timer(tipo="PULSO", entrada=senal, segundos=d)
-                        salidas[_Q_LUZ[rec]] = nuevo_timer(tipo="INTERMITENTE", entrada=pulso, segundos=0.5,
-                                                           segundos_off=0.5)
-                        continue
-                    if not d and not _tiene(a, "queda") and rec not in hay_apagar \
-                            and not (senal.startswith("CT") and contadores and contadores[0]["modo"] == "una_vez"
-                                     and not contadores[0].get("reset")):
-                        # "con I1 prende la verde": ¿mientras se presiona o se queda? no se adivina
-                        raise _NoSeArma(f"luz {rec} sin duracion ni quien la apague")
-                    ev["acciones"] = {rec: "encender"}
-            elif a["tipo"] == "pluma":
-                verbo = a["m"].group(1) or a["m"].group(2) or ""
-                txt = a["m"].group(0)
-                estado = "bajar" if re.match(r"baj|desc", verbo) else "subir"
-                ev["acciones"] = {p: estado for p in _pluma(txt)}
-            else:
-                raise _NoSeArma(f"accion '{a['tipo']}'")
-            eventos.append({k: v for k, v in ev.items() if v not in (None, 0, 0.0) or k == "acciones"})
-
-    if toggle:
-        mueve = True
-        arranques = [a for a in arranques if a != toggle]
-        eventos = [e for e in eventos if not (e["cuando"] == toggle and e["acciones"] == {"banda": "avanzar"})]
-        if len(secuencias) >= 2:
-            raise _NoSeArma("sin secuencia libre para la alternancia")
-        sq = {"id": "SQ1", "inicio": toggle, "modo": "una_vez",
-              "pasos": [{"motor": ["marcha"], "avanza": "flanco", "senal": toggle}]}
-        otros_paros = [p for p in paros if p != toggle]
-        if otros_paros:
-            sq["paro"] = otros_paros[0]
-            eventos = [e for e in eventos if e["acciones"] != {"banda": "detener"}]
-        secuencias.append(sq)
-    if contadores and contadores[0]["modo"] == "una_vez" and not contadores[0].get("reset") and arranques:
-        contadores[0]["reset"] = arranques[0]           # al arrancar de nuevo cuenta desde cero
-    if contadores and conteo.get("reinicia") and not conteo.get("boton"):
-        contadores[0].pop("reset", None)
-    if not (eventos or salidas or secuencias):
-        raise _NoSeArma("no hay acciones")
-    if mueve and not (arranques or toggle):
-        raise _NoSeArma("la banda se mueve pero no se sabe con que arranca")
-
-    resp = {"name": _nombre(arranques, toggle, contadores, eventos, salidas), "analisis": {
-        "intencion": texto[:200], "compatibilidad": "total", "conservado": [], "modificado": [],
-        "simplificado": [], "no_soportado": [], "requiere_confirmacion": False}, "preguntas": []}
-    if mueve:
-        f = ac.frecuencia(acl) if acl else None
-        hz = hz or f
-        if not hz:
-            resp["_pregunta"] = preguntas_banda.pregunta("freq_hz")
-        resp["banda"] = {"mover": True, "direccion": ac.direccion(acl) or dirc or "derecha",
-                         "frecuencia_hz": hz}
-    else:
-        resp["banda"] = {"mover": False}
-    for clave, valor in (("timers", timers), ("contadores", contadores), ("eventos", eventos),
-                         ("salidas", salidas), ("secuencias", secuencias)):
-        if valor:
-            resp[clave] = valor
-    return resp
 
 
 def _nombre(arranques, toggle, contadores, eventos, salidas) -> str:

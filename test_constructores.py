@@ -36,6 +36,7 @@ import lavo_sim as ls
 app.HISTORIAL_PATH = os.path.join(tempfile.gettempdir(), "test_hist_cons.json")
 app.BANDA_MOTOR_V7 = True
 app.CONSTRUCTORES_BANDA = True
+app.EXTRACTOR_BANDA = False          # el extractor con IA se prueba en test_extractor.py
 
 OK = 0
 

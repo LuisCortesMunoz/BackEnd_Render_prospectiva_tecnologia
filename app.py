@@ -138,6 +138,8 @@ import comportamiento
 import simulacion_etapas
 import intencion_banda
 import constructores_banda
+import reglas_banda
+import extractor_banda
 import enlace_lentes
 try:
     import memoria_validada
@@ -730,6 +732,11 @@ EJEMPLOS
 BANDA_MOTOR_V7 = os.environ.get("BANDA_MOTOR_V7", "0").strip() == "1"
 # Etapa 3: armar sin el modelo lo que se entiende sin ambiguedad (LAVO_CONSTRUCTORES=0 lo apaga).
 CONSTRUCTORES_BANDA = os.environ.get("LAVO_CONSTRUCTORES", "1").strip() != "0"
+# Etapa 5: si el lector de patrones no entiende todo, la IA traduce la instruccion a REGLAS
+# (extractor_banda) y los constructores las arman. LAVO_EXTRACTOR=0 lo apaga.
+EXTRACTOR_BANDA = os.environ.get("LAVO_EXTRACTOR", "1").strip() != "0"
+EXTRACTOR_MODELO = os.environ.get("GROQ_EXTRACTOR_MODEL", "").strip() or MODELO
+EXTRACTOR_MAX_TOKENS = int(os.environ.get("EXTRACTOR_MAX_TOKENS", "1500"))
 
 SYSTEM_PROMPT_BANDA_V7 = """Eres el programador del PLC Horner XL4 de una BANDA TRANSPORTADORA con el programa maestro LAVO v7.
 El PLC ejecuta un MOTOR GENERAL: tu trabajo es CONSTRUIR el comportamiento pedido conectando bloques, no elegir
@@ -1992,6 +1999,25 @@ def _crear_completion(messages: list, max_tokens: int, con_formato: bool = True,
     return groq_client.chat.completions.create(**kwargs)
 
 
+def llamar_extractor_json(messages: list) -> dict:
+    """Llamada CORTA del extractor de reglas (extractor_banda): entender la
+    instruccion, no escribir el JSON del PLC. Sin reintentos: si falla, el
+    flujo sigue como siempre. Modelo propio en GROQ_EXTRACTOR_MODEL (Groq pone
+    limites por modelo: otro modelo no gasta los tokens/minuto del principal)."""
+    if groq_client is None:
+        raise RuntimeError("sin GROQ_API_KEY")
+    t0 = time.perf_counter()
+    kwargs = dict(messages=messages, model=EXTRACTOR_MODELO, temperature=0, max_tokens=EXTRACTOR_MAX_TOKENS,
+                  response_format={"type": "json_object"})
+    if EXTRACTOR_MODELO.startswith("openai/gpt-oss"):
+        kwargs["reasoning_effort"] = "low"
+    resp = groq_client.chat.completions.create(**kwargs)
+    texto, _fin = _texto_respuesta(resp)
+    metricas_lavo.sumar("extractor_tokens", (resp.usage.prompt_tokens or 0) + (resp.usage.completion_tokens or 0))
+    metricas_lavo.sumar("extractor_ms", (time.perf_counter() - t0) * 1000)
+    return extraer_json_de_texto(texto)
+
+
 class SinRespuesta(ValueError):
     """Groq no dejo responder (sin espacio tras razonar o limite por minuto):
     repetir la misma llamada en el acto solo gasta cuota, no se reintenta."""
@@ -2956,7 +2982,7 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     # torreta, plumas) se arma SIN el modelo con recetas probadas en el ST; se
     # valida y se simula antes de entregarlo. Si una frase no se entiende, va al
     # modelo como siempre, con las piezas ya armadas de las demas frases.
-    piezas_armadas = None
+    piezas_armadas, reglas_guia = None, None
     if CONSTRUCTORES_BANDA and not prev and not correccion:
         cons = constructores_banda.construir(texto, intencion, acl)
         if cons["pregunta"]:
@@ -2967,13 +2993,22 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                 analysis={"equipo": "banda", "motor_v7": True, "constructor": True,
                           "intencion": intencion_banda.resumen(intencion)})
         if cons["resp"]:
-            r = _respuesta_constructor(texto, cons["resp"], reqs, intencion)
+            r = _respuesta_constructor(texto, cons["resp"], reqs, intencion, cons["reglas"])
             if r is not None:
                 return r
         elif cons["piezas"] and cons["piezas"][0]:
             piezas_armadas = cons["piezas"]
         if cons["motivo"]:
             log.info(f"/generar-logica banda v7: constructor no armo todo ({cons['motivo']})")
+        # Etapa 5: el lector no entendio todo -> la IA traduce la instruccion a REGLAS
+        # (llamada corta) y, si se pueden armar, se arman y se simulan sin el modelo de
+        # generacion. Si no, las reglas guian al modelo y se prueban igual.
+        if EXTRACTOR_BANDA and not cons["completo"] and not etapas["aplica"]:
+            r = _usar_extractor(texto, acl, reqs, intencion, cons)
+            if isinstance(r, LogicaResponse):
+                return r
+            if r:
+                reglas_guia, piezas_armadas = r, None
 
     if CONTEXTO_RAMIFICADO:
         if _pide_ampliar_catalogo(texto) or aclaraciones.autoriza_catalogo(acl):
@@ -3010,6 +3045,10 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     if piezas_armadas:
         messages.append({"role": "system", "content": constructores_banda.bloque_piezas(piezas_armadas)})
         metricas_lavo.poner("piezas_armadas", True)
+    if reglas_guia:
+        # Reglas del extractor que no se pudieron armar solas: guian al modelo y se prueban.
+        messages.append({"role": "system", "content": extractor_banda.bloque_reglas(reglas_guia)})
+        reqs = reglas_banda.combinar(reqs, reglas_banda.requisitos(reglas_guia))
     messages.append({"role": "user", "content": aclaraciones.mensaje_usuario(texto, _acl(req))})
 
     # Edicion: si la version nueva pierde piezas que no se pidio quitar, se le
@@ -3125,10 +3164,13 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                     questions=[edicion_incremental.pregunta_que_falla("banda")], assumptions=[],
                     analysis={"equipo": "banda", "motor_v7": True, "correccion": True,
                               "diagnostico": diagnostico})
-        if not errores and (reqs or (etapas["aplica"] and not orden)):
+        if not errores and (reqs or reglas_guia or (etapas["aplica"] and not orden)):
             # Validacion final: el programa simulado hace lo pedido (requisitos
-            # sueltos y, si hay acciones en orden, la historia completa etapa por etapa).
+            # sueltos, una prueba por regla del extractor y, si hay acciones en
+            # orden, la historia completa etapa por etapa).
             fallas = comportamiento.verificar(cand, reqs)
+            if reglas_guia and not fallas:
+                fallas = reglas_banda.verificar(cand, reglas_guia)
             if etapas["aplica"] and not orden and not fallas:
                 fallas = simulacion_etapas.verificar(cand, etapas)
             if fallas:
@@ -3163,7 +3205,8 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     if cfg is None and sin_comportamiento is not None:
         # La ultima revision ya no carga: vale el ultimo cargable (con su aviso).
         cfg, candidato = sin_comportamiento
-        fallas = comportamiento.verificar(cfg, reqs) or simulacion_etapas.verificar(cfg, etapas)
+        fallas = (comportamiento.verificar(cfg, reqs) or (reglas_banda.verificar(cfg, reglas_guia) if reglas_guia
+                                                          else []) or simulacion_etapas.verificar(cfg, etapas))
     analisis_llm = candidato.get("analisis") if isinstance(candidato, dict) else {}
     # Avisos informativos: el programa se entrega igual (sin pedir confirmar);
     # si no hace lo pedido, el usuario pide corregirlo. El detalle tecnico de
@@ -3198,6 +3241,7 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     return _respuesta_banda_v7(texto, cfg, analisis_llm, extra={
         "fuente": "modelo", "contexto": plan, "edicion": bool(prev),
         "intencion": intencion_banda.resumen(intencion),
+        "reglas_guia": reglas_guia,
         "memorias_referencia": [{"id": r["id"], "similitud": p} for p, r in similares],
         # Validacion final por simulacion: que se probo y si cumple.
         "comportamiento": {"probado": [r["tipo"] + (f" {r['senal']}" if r.get("senal") else "")
@@ -3207,9 +3251,54 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         **({"correccion": True, "diagnostico": diagnostico} if correccion else {})})
 
 
-def _respuesta_constructor(texto: str, resp: dict, reqs: list, intencion: dict):
-    """Programa armado sin el modelo (constructores_banda): se valida y se
-    simula; None = algo no cumple y lo resuelve el modelo como siempre."""
+def _usar_extractor(texto: str, acl: dict, reqs: list, intencion: dict, cons: dict):
+    """LogicaResponse (pregunta o programa armado), reglas validas para guiar
+    al modelo, o None (seguir como siempre)."""
+    metricas_lavo.sumar("extractor_llamadas", 1)
+    ext = extractor_banda.extraer(texto, acl, llamar_extractor_json)
+    if ext["secuencia"]:
+        metricas_lavo.poner("extractor", "secuencia")
+        return None
+    if ext["dudas"]:
+        metricas_lavo.poner("extractor", "dudas")
+        log.info(f"/generar-logica banda v7: el extractor pregunta {[d['campo'] for d in ext['dudas']]}")
+        return LogicaResponse(logic={}, name="", outputs=0, device="banda", status="needs_clarification",
+                              questions=ext["dudas"], assumptions=[],
+                              analysis={"equipo": "banda", "motor_v7": True, "extractor": True,
+                                        "intencion": intencion_banda.resumen(intencion)})
+    reglas = ext["reglas"]
+    if not reglas:
+        metricas_lavo.poner("extractor", "sin_reglas")
+        log.info(f"/generar-logica banda v7: reglas del extractor no validas ({ext['problemas']})")
+        return None
+    faltan = reglas_banda.contradice(cons.get("reglas"), reglas)
+    if faltan:
+        metricas_lavo.poner("extractor", "contradice")
+        log.warning(f"/generar-logica banda v7: el extractor no coincide con lo entendido ({faltan}); se ignora")
+        return None
+    try:
+        resp = constructores_banda.armar_desde_reglas(reglas, acl)
+    except constructores_banda.NoSeArma as e:
+        metricas_lavo.poner("extractor", "guia")
+        log.info(f"/generar-logica banda v7: reglas del extractor no armables ({e}); guian al modelo")
+        return reglas
+    if resp.get("_pregunta"):
+        metricas_lavo.poner("extractor", "pregunta_hz")
+        return LogicaResponse(logic={}, name="", outputs=0, device="banda", status="needs_clarification",
+                              questions=[resp.pop("_pregunta")], assumptions=[],
+                              analysis={"equipo": "banda", "motor_v7": True, "extractor": True})
+    resp["analisis"]["intencion"] = texto[:200]
+    r = _respuesta_constructor(texto, resp, reqs, intencion, reglas, fuente="extractor")
+    metricas_lavo.poner("extractor", "armado" if r is not None else "guia")
+    return r if r is not None else reglas
+
+
+def _respuesta_constructor(texto: str, resp: dict, reqs: list, intencion: dict, reglas: dict = None,
+                           fuente: str = "constructor"):
+    """Programa armado sin el modelo (constructores_banda, desde reglas del
+    lector o del extractor): se valida y se simula (los requisitos de la
+    sesion + una prueba por regla); None = algo no cumple y lo resuelve el
+    modelo como siempre."""
     import lavo_motor
     try:
         cand = lavo_motor.cfg_desde_respuesta(resp)
@@ -3220,17 +3309,21 @@ def _respuesta_constructor(texto: str, resp: dict, reqs: list, intencion: dict):
     if errores:
         log.warning(f"Constructor de la banda: no valida ({errores}); lo resuelve el modelo.")
         return None
-    fallas = comportamiento.verificar(cand, reqs)
+    if reglas:
+        reqs = reglas_banda.combinar(reqs, reglas_banda.requisitos(reglas))
+    fallas = comportamiento.verificar(cand, reqs) + (reglas_banda.verificar(cand, reglas) if reglas else [])
     if fallas:
-        log.warning(f"Constructor de la banda: la simulacion no cumple ({fallas}); lo resuelve el modelo.")
+        log.warning(f"Constructor de la banda ({fuente}): la simulacion no cumple ({fallas}); lo resuelve el modelo.")
         return None
-    log.info("/generar-logica banda v7: armado por los constructores, sin llamar al modelo")
-    metricas_lavo.poner("fuente", "constructor")
-    metricas_lavo.poner("contexto", ["constructores"])
+    log.info(f"/generar-logica banda v7: armado sin el modelo de generacion ({fuente})")
+    metricas_lavo.poner("fuente", fuente)
+    metricas_lavo.poner("contexto", [fuente])
+    probado = [r["tipo"] + (f" {r['senal']}" if r.get("senal") else "") for r in reqs]
+    if reglas:
+        probado.append(f"reglas ({len(reglas.get('reglas') or [])})")
     return _respuesta_banda_v7(texto, cand, resp.get("analisis") or {}, extra={
-        "fuente": "constructor", "edicion": False, "intencion": intencion_banda.resumen(intencion),
-        "comportamiento": {"probado": [r["tipo"] + (f" {r['senal']}" if r.get("senal") else "") for r in reqs],
-                           "fallas": []}})
+        "fuente": fuente, "edicion": False, "intencion": intencion_banda.resumen(intencion),
+        "reglas": reglas, "comportamiento": {"probado": probado, "fallas": []}})
 
 
 def _movimiento_desde_aclaraciones(texto: str, prev, acl: dict):
