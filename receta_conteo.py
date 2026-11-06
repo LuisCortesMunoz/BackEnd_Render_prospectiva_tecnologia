@@ -47,7 +47,10 @@ _RX_DURA = re.compile(r"^\s*(?:durante|por)\s+(\d+(?:[.,]\d+)?|un|una|dos|tres|c
 # Lo que el patron NO cubre: si aparece, no se usa la receta.
 _RX_FUERA = re.compile(
     r"\bparpade\w*|\bintermit\w*|\brepit\w*|\bveces\b|\bsecuencia\s+[12]\b|\botra secuencia\b|\binviert\w*|"
-    r"\bizquierda\b.*\bderecha\b|\bpausa\w*|\bdetiene\s+(?:durante\s+)?\d+\s*(?:s|seg)|"
+    r"\bizquierda\b.*\bderecha\b")
+# Pausas: solo caben si son "en cada deteccion" del MISMO sensor que cuenta (se arman).
+_RX_PAUSA_SUELTA = re.compile(
+    r"\bpausa\w*|\bdetiene\s+(?:durante\s+)?\d+\s*(?:s|seg)|"
     r"\bdetenga\s+(?:durante\s+)?\d+\s*(?:s|seg)|\b(?:continu\w*|sigue|siga|reanud\w*)\s+(?:avanzando\s+)?(?:despues|luego)\b")
 _RX_SENSOR = re.compile(r"\b(?:sensor\s*|s\s?)([12])\b")
 _RX_HZ = re.compile(r"\b(\d{1,3})\s*(?:hz|hertz)\b")
@@ -99,8 +102,11 @@ def detectar(textos, acl: dict = None) -> dict:
     if not textos:
         return None
     todo = " ".join(_fold(x) for x in textos)
-    if _RX_FUERA.search(todo) or co.pausa_por_deteccion(todo):
-        return None                     # pausas por deteccion ("se espere 3 s"): no es este patron
+    if _RX_FUERA.search(todo):
+        return None
+    pausa = co.pausa_por_deteccion(todo)          # "cada que S1 detecte se espere 3 s antes de avanzar"
+    if not pausa and _RX_PAUSA_SUELTA.search(todo):
+        return None                               # una pausa que no es por deteccion: no es este patron
     # El conteo y el paro: de la instruccion que los dice (la ultima que los diga).
     pc, base = None, None
     for x in textos:
@@ -109,6 +115,8 @@ def detectar(textos, acl: dict = None) -> dict:
             pc, base = p, _fold(x)
     if not pc or co.quita_paro(todo):
         return None
+    if pausa and pausa["senal"] != pc["senal"]:
+        return None                               # pausa por OTRO sensor: no es este patron
     n = pc["conteo"]
     for x in textos:
         c = co.cambio_conteo(x)
@@ -154,12 +162,17 @@ def detectar(textos, acl: dict = None) -> dict:
     boton = "I2" if re.search(r"\b(?:con|al (?:presionar|pulsar))\s+(?:el\s+)?(?:boton\s+)?i\s?2\b[^.;]{0,40}"
                                r"\b(?:arranc\w*|avanc\w*|avanz\w*|marcha)", todo) else "I1"
     return {"conteo": n, "senal": pc["senal"], "segundos": float(pc.get("segundos") or 0),
+            "pausa": float(pausa["segundos"]) if pausa else 0.0,
             "acciones": acciones, "hz": hz, "direccion": "izquierda" if re.search(r"\bizquierda\b", todo) else "derecha",
             "arranque": boton, "paro_i2": bool(_RX_PARO_I2.search(todo)) and boton != "I2"}
 
 
 def armar(plan: dict) -> dict:
     pasos = []
+    pausa = float(plan.get("pausa") or 0)
+    if pausa:
+        # La caja N tambien hace su pausa (como todas) y despues avanza lo pedido.
+        pasos.append({"motor": ["paro"], "avanza": "tiempo", "segundos": pausa})
     if plan["segundos"] > 0:
         pasos.append({"motor": ["marcha"], "avanza": "tiempo", "segundos": plan["segundos"]})
     pasos.append({"motor": ["paro"], "avanza": "tiempo", "segundos": 0.5})
@@ -173,13 +186,18 @@ def armar(plan: dict) -> dict:
         "name": f"Conteo {plan['conteo']} en {plan['senal']} y paro",
         "banda": {"mover": True, "direccion": plan["direccion"], "frecuencia_hz": plan["hz"]},
         "motor": {"arranque": plan["arranque"], "modo": "enclavado"},
-        "condiciones": [], "timers": [], "memorias": [], "eventos": [],
+        "condiciones": [], "timers": [], "memorias": [],
+        # Pausa en cada deteccion: evento del motor (se detiene N s y sigue sola).
+        "eventos": ([{"cuando": plan["senal"], "duracion_s": pausa, "acciones": {"banda": "pausar"}}]
+                    if pausa else []),
         "contadores": [{"id": "CT1", "entrada": plan["senal"], "preset": plan["conteo"], "modo": "una_vez",
                         "reset": "SQ1_CICLO"}],
         "salidas": {q: "SQ1_FIN" for q in luces_fin},
         "secuencias": [{"id": "SQ1", "inicio": "CT1", "modo": "una_vez", "exclusiva": True, "pasos": pasos}],
         "analisis": {
-            "intencion": (f"Arranca con {plan['arranque']}; al contar {plan['conteo']} en {plan['senal']} la banda "
+            "intencion": (f"Arranca con {plan['arranque']}; "
+                          + (f"cada deteccion en {plan['senal']} la detiene {pausa:g} s y sigue; " if pausa else "")
+                          + f"al contar {plan['conteo']} en {plan['senal']} la banda "
                           + (f"sigue {plan['segundos']:g} s y " if plan["segundos"] else "")
                           + "se detiene; " + (", luego ".join(_NOMBRE[q] for q, _ in plan["acciones"]) + "; "
                                               if plan["acciones"] else "")
@@ -213,13 +231,43 @@ def verificar(cfg: dict, plan: dict) -> list:
         s.correr(2)
         if not corre():
             return [f"Ciclo {ciclo}: {plan['arranque']} no arranca la banda."]
+        pausa = float(plan.get("pausa") or 0)
         for k in range(plan["conteo"] - 1):
             s.pulsar(sensor, 0.3)
+            if pausa:
+                # Cada caja: se detiene, sigue detenida casi toda la pausa y vuelve a avanzar sola.
+                s.correr(1.2)
+                if corre():
+                    return [f"Ciclo {ciclo}: la caja {k + 1} no detiene la banda {pausa:g} s."]
+                s.correr(max(0.0, pausa - 1.2) + 1.8)
+                if not corre():
+                    return [f"Ciclo {ciclo}: tras la pausa de la caja {k + 1} la banda no vuelve a avanzar."]
+                continue
             s.correr(0.7)
             if not corre():
                 return [f"Ciclo {ciclo}: la banda se detiene antes de contar {plan['conteo']} (caja {k + 1})."]
         s.pulsar(sensor, 0.3)
-        if plan["segundos"] > 1.5:
+        if pausa:
+            # La caja N: su pausa y despues el avance pedido (se mide cuanto avanza).
+            s.correr(1.2)
+            if corre():
+                return [f"Ciclo {ciclo}: la caja {plan['conteo']} no hace su pausa de {pausa:g} s."]
+            t, inicio, fin = 1.2, None, None
+            while t < pausa + plan["segundos"] + 6:
+                s.correr(0.2)
+                t += 0.2
+                if corre() and inicio is None:
+                    inicio = t
+                if inicio is not None and not corre():
+                    fin = t
+                    break
+            if inicio is None:
+                return [f"Ciclo {ciclo}: tras la caja {plan['conteo']} la banda ya no avanza los {plan['segundos']:g} s."]
+            if fin is None or abs((fin - inicio) - plan["segundos"]) > 1.5:
+                return [f"Ciclo {ciclo}: tras la caja {plan['conteo']} avanza "
+                        f"{'sin detenerse' if fin is None else f'{fin - inicio:.1f} s'} (se pidieron {plan['segundos']:g} s)."]
+            s.correr(1.0)
+        elif plan["segundos"] > 1.5:
             s.correr(plan["segundos"] - 1.3)
             if not corre():
                 return [f"Ciclo {ciclo}: al contar {plan['conteo']} se detiene antes de los {plan['segundos']:g} s."]

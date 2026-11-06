@@ -149,6 +149,7 @@ import regresion_banda
 import huella_banda
 import reparaciones_banda
 import receta_conteo
+import cambios_texto
 import enlace_lentes
 try:
     import memoria_validada
@@ -2962,6 +2963,13 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     prev = _programa_previo_v7(req)
     acl = _acl(req)
     historial = (req.contexto.historial if req.contexto else None) or []
+    # Errores de escritura frecuentes ("por sis ola", "botn") se corrigen ANTES de
+    # leer la instruccion y de mandarla al modelo/extractor (los tomaban como datos).
+    corregido = cambios_texto.corregir(texto)
+    if corregido != texto:
+        log.info(f"/generar-logica banda v7: texto corregido: {texto!r} -> {corregido!r}")
+        texto = corregido
+    historial = [cambios_texto.corregir(h) for h in historial]
     # "revisa", "no esta funcionando", "corrige"...: la logica activa falla.
     correccion = bool(prev) and edicion_incremental.es_correccion(texto)
     # Lo que se entendio de la instruccion, en un solo formato (intencion_banda):

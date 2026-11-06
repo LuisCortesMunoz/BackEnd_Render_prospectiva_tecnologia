@@ -55,6 +55,31 @@ def tiempo_por_contexto(texto: str) -> list:
     return out
 
 
+# Errores de escritura frecuentes (dictado, teclado de los lentes) que confunden al
+# modelo y al extractor ("se detenga por sis ola" lo leian como un dato). Se corrigen
+# en el texto ANTES de usarlo; lo demas queda tal cual.
+_TYPOS = [
+    (re.compile(r"\bpor\s+sis\s+ola\b", re.I), "por sí sola"),
+    (re.compile(r"\bsis\s+ola\b", re.I), "sí sola"),
+    (re.compile(r"\bpor\s*sis\b", re.I), "por sí"),
+    (re.compile(r"\bporsi\b", re.I), "por sí"),
+    (re.compile(r"\bbotn\b", re.I), "botón"),
+    (re.compile(r"\bboto\b", re.I), "botón"),
+    (re.compile(r"\bsu?saurio\b", re.I), "usuario"),
+    (re.compile(r"\busaurio\b", re.I), "usuario"),
+    (re.compile(r"\bsensr\b", re.I), "sensor"),
+    (re.compile(r"\bsenosr\b", re.I), "sensor"),
+    (re.compile(r"\bsegudnos\b", re.I), "segundos"),
+]
+
+
+def corregir(texto: str) -> str:
+    t = str(texto or "")
+    for rx, bien in _TYPOS:
+        t = rx.sub(bien, t)
+    return t
+
+
 def _fold(t) -> str:
     t = unicodedata.normalize("NFD", str(t or "").lower())
     return "".join(c for c in t if unicodedata.category(c) != "Mn")

@@ -109,7 +109,7 @@ check(rb.aplicar(NO_PIDE, texto2, [texto2])[0]["secuencias"][0]["pasos"] == NO_P
       "si el texto no pide que se detenga sola (solo 'con I2 se detiene'), no se toca")
 
 # ---------------------------------------------------------------------------
-escenario("4. La receta fija de conteo no se usa con pausas")
-check(rc.detectar([T], {}) is None, "con 'se espere 3 s' por S1: no aplica la receta (la arma el modelo)")
+escenario("4. La receta fija de conteo con la pausa del mismo sensor (ronda 6)")
+check(rc.detectar([T], {})["pausa"] == 3.0, "con 'se espere 3 s' por S1: la receta la arma (ver test_ronda6)")
 
 print(f"\nTODAS LAS PRUEBAS DE LA RONDA 5 PASARON ({OK} comprobaciones).")
