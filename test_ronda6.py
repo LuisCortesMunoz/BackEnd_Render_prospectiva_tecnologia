@@ -127,4 +127,15 @@ check(eng["motor"]["arranque"] == "I1" and r.logic["band"]["freq_hz"] == 40
       and pausa_t and pausa_t["entrada"] == "S1" and pausa_t["segundos"] == 3.0,
       "con I1 a 40 Hz y la pausa de 3 s por S1 (motor.pausa = timer de S1)")
 
+# ---------------------------------------------------------------------------
+escenario("4. Sin el aviso falso de 'la banda puede volver a avanzar sola'")
+aviso = lambda c: [a for a in app.avisos_logica_banda(c) if "bloque motor" in a]  # noqa: E731
+check(aviso(cfg) == [] and not any("bloque motor" in w for w in r.warnings),
+      "la receta detiene el motor al terminar (paro con SQ1_CICLO): sin aviso")
+p2 = dict(rc.detectar([T], {}), paro_i2=True)
+check(aviso(lm.cfg_desde_respuesta(rc.armar(p2))) == [], "con paro = I2 OR SQ1_CICLO: tampoco")
+sin = rc.armar(rc.detectar([T], {}))
+sin["motor"].pop("paro")
+check(len(aviso(lm.cfg_desde_respuesta(sin))) == 1, "si de verdad falta el paro al terminar, el aviso sigue")
+
 print(f"\nTODAS LAS PRUEBAS DE LA RONDA 6 PASARON ({OK} comprobaciones).")

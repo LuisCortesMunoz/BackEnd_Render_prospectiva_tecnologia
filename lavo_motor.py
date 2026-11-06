@@ -892,10 +892,20 @@ def validar_motor(band, hw=HW_BANDA) -> tuple:
     if motor.get("paro_inversion_s") is not None:
         _decimas(motor["paro_inversion_s"], "motor.paro_inversion_s", errores, minimo=REV_TIME_MIN)
     if not _vacio(motor.get("arranque")):
+        # Senales que detienen el motor: el paro y, si es una condicion OR, sus entradas.
+        paros = [motor.get("paro")]
+        for c in eng.get("condiciones") or []:
+            if isinstance(c, dict) and _misma_senal(motor.get("paro"), c.get("id")) and \
+                    str(c.get("op") or "").upper() == "OR":
+                paros += list(c.get("entradas") or [])
         for s in seqs:
             if not (isinstance(s, dict) and _mueve_motor(s)):
                 continue
             sid = s.get("id")
+            # Si el motor se detiene al terminar la secuencia (paro con SQk_CICLO/SQk_FIN),
+            # no vuelve a avanzar solo: no hay nada que avisar.
+            if any(_misma_senal(p, f"{sid}_{x}") for p in paros if not _vacio(p) for x in ("CICLO", "FIN")):
+                continue
             if not any(_misma_senal(motor["arranque"], f"{sid}_{x}") for x in
                        ["FIN", "CICLO"] + [f"PASO{i}" for i in range(1, N_STEPS + 1)]):
                 avisos.append(f"{sid} mueve la banda y el bloque motor tambien arranca con "
