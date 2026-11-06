@@ -72,6 +72,15 @@ EXTRACTOR_MAL = {"banda": {"mover": True, "direccion": "derecha", "frecuencia_hz
                              {"cuando": "I2", "acciones": {"banda": "detener"}}]}
 check(app._respuesta_constructor(T6, EXTRACTOR_MAL, [], intencion, fuente="extractor") is None,
       "lo que armo el extractor pierde la inversion: no se entrega (lo resuelve el modelo)")
+# Banco r5a: el analisis decia "invierte ... hacia la izquierda" y la logica no; antes pasaba el filtro
+EXTRACTOR_R5A = {"banda": {"mover": True, "direccion": "derecha", "frecuencia_hz": 25},
+                 "motor": {"arranque": "C1", "paro": "C2"},
+                 "condiciones": [{"id": "C1", "op": "OR", "entradas": ["I1", "S2"]},
+                                 {"id": "C2", "op": "OR", "entradas": ["T1", "I2"]}],
+                 "timers": [{"id": "T1", "tipo": "RETARDO", "entrada": "S2", "segundos": 5.0}],
+                 "analisis": {"intencion": "Con S2 la banda invierte el sentido hacia la izquierda 5 s"}}
+check(app._respuesta_constructor(T6, EXTRACTOR_R5A, [], intencion, fuente="extractor") is None,
+      "el 'izquierda' del analisis no cuenta: solo la logica (banco r5a)")
 R6 = {"name": "C6", "banda": {"mover": True, "direccion": "derecha", "frecuencia_hz": 25},
       "motor": {"arranque": "I1", "paro": "I2", "modo": "enclavado"},
       "secuencias": [{"id": "SQ1", "inicio": "S2", "paro": "I2", "modo": "una_vez", "exclusiva": True, "pasos": [

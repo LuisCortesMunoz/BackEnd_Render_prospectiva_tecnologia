@@ -3505,7 +3505,9 @@ def _respuesta_constructor(texto: str, resp: dict, reqs: list, intencion: dict, 
     # leyo mal (banco C6: "invierte y avanza a la izquierda 5 s" -> "avanza 5 s").
     t_fold = edicion_incremental._norm(texto)
     if re.search(r"\b(?:inviert\w*|invertir|reversa|cambi\w* (?:de |el )?sentido|hacia la izquierda|a la izquierda)\b",
-                 t_fold) and not re.search(r"invertir|izquierda|dir_2|reversa", json.dumps(resp, ensure_ascii=False).lower()):
+                 t_fold) and not re.search(r"invertir|izquierda|dir_2|reversa", json.dumps(
+                {k: v for k, v in resp.items() if k not in ("analisis", "preguntas", "no_soportado", "name")},
+                ensure_ascii=False).lower()):
         log.warning(f"Constructor de la banda ({fuente}): el texto pide cambiar de sentido y lo armado no; "
                     "lo resuelve el modelo.")
         return None
