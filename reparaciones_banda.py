@@ -19,7 +19,11 @@ y los contadores (comprobados en el ST real con lavo_sim / el banco de pruebas):
    la direccion que dejo la secuencia). Se agrega SQk_CICLO al paro del motor:
    al terminar se queda detenida hasta un nuevo arranque.
 
-aplicar(respuesta, texto) -> (respuesta_reparada, [avisos])
+4. LUZ FIJA QUE DEBIA PARPADEAR: se pidio que una luz parpadee y quedo fija en
+   pasos de una secuencia (o en 'salidas'). Se quita de esos pasos y se maneja
+   con un timer INTERMITENTE cuya entrada es ese paso (o esa regla).
+
+aplicar(respuesta, texto, textos) -> (respuesta_reparada, [avisos])
 Nunca quita nada de lo pedido; si no aplica, devuelve la respuesta igual.
 """
 
@@ -158,12 +162,66 @@ def _paro_al_terminar(r: dict, texto: str, avisos: list):
                       f"seguir a {motor.get('arranque')} y avanzaba sola.")
 
 
-def aplicar(respuesta: dict, texto: str = "") -> tuple:
+def _parpadeo(r: dict, textos: list, avisos: list):
+    import comportamiento
+    pedidos = [x for x in comportamiento.requisitos(textos) if x["tipo"] == "parpadea"]
+    timers = [t for t in _lista(r.get("timers")) if isinstance(t, dict)]
+    salidas = r.get("salidas") if isinstance(r.get("salidas"), dict) else {}
+    for p in pedidos:
+        q = p["q"]
+        actual = _s(salidas.get(q))
+        existente = next((t for t in timers if _s(t.get("id")) == actual
+                          and str(t.get("tipo") or "").upper().startswith("INTERMIT")), None)
+        pasos = []
+        for s in [s for s in _lista(r.get("secuencias")) if isinstance(s, dict)]:
+            for i, paso in enumerate(_lista(s.get("pasos")), 1):
+                if isinstance(paso, dict) and q in [_s(x) for x in _lista(paso.get("salidas"))]:
+                    pasos.append((paso, f"{_s(s.get('id'))}_PASO{i}"))
+        if existente is not None and not pasos:
+            continue                                # ya parpadea y nada la deja fija
+        if pasos:
+            for paso, _ in pasos:
+                paso["salidas"] = [x for x in _lista(paso.get("salidas")) if _s(x) != q]
+            entradas = [sen for _, sen in pasos]
+        elif actual:
+            entradas = [actual]
+        else:
+            continue
+        usados_t = {int(m.group(1)) for t in timers for m in [re.fullmatch(r"T(\d+)", _s(t.get("id")))] if m}
+        nt = int(actual[1:]) if existente is not None else next((k for k in range(1, 17) if k not in usados_t), None)
+        if nt is None:
+            continue
+        entrada = entradas[0]
+        if len(entradas) > 1:
+            conds = r.setdefault("condiciones", []) if isinstance(r.get("condiciones"), list) else None
+            if conds is None:
+                r["condiciones"] = conds = []
+            usados_c = {int(m.group(1)) for c in conds if isinstance(c, dict)
+                        for m in [re.fullmatch(r"C(\d+)", _s(c.get("id")))] if m}
+            nc = next((k for k in range(1, 17) if k not in usados_c), None)
+            if nc is None:
+                continue
+            conds.append({"id": f"C{nc}", "op": "OR", "entradas": entradas, "flanco": "nivel"})
+            entrada = f"C{nc}"
+        if existente is not None:
+            existente["entrada"] = entrada          # el timer del modelo, con la entrada que dura lo pedido
+            existente["reset"] = None               # la entrada ya marca cuanto dura (un reset lo apagaba)
+        else:
+            timers.append({"id": f"T{nt}", "tipo": "INTERMITENTE", "entrada": entrada, "segundos": 0.5,
+                           "segundos_off": 0.5})
+        r["timers"] = timers
+        salidas[q] = f"T{nt}"
+        r["salidas"] = salidas
+        avisos.append(f"{q} parpadea (timer T{nt} intermitente mientras {entrada}): estaba fija.")
+
+
+def aplicar(respuesta: dict, texto: str = "", textos: list = None) -> tuple:
     if not isinstance(respuesta, dict):
         return respuesta, []
     r = copy.deepcopy(respuesta)
     avisos = []
     try:
+        _parpadeo(r, list(textos) if textos else [texto], avisos)
         _reset_contador(r, avisos)
         _arranque_por_defecto(r, texto, avisos)
         _paro_al_terminar(r, texto, avisos)

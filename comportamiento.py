@@ -236,6 +236,26 @@ def parpadeo_en(texto: str) -> list:
     return out
 
 
+# "Esto se repite 3 veces y despues la banda se detiene" (con un sensor que dispara cada vuelta).
+_RX_REPITE_PARA = re.compile(
+    r"\brepit\w*\s+(?:el ciclo\s+|la secuencia\s+)?(\d+|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s+veces"
+    r"[^.;]{0,40}?\b(?:despues|luego|al final|al terminar|y)\b[^.;]{0,30}?\b(?:deten\w*|detien\w*|deteng\w*|para|pare)\b")
+
+
+def repite_y_para(texto: str) -> dict:
+    """{"veces": N, "senal": S1|S2} si pide repetir un ciclo N veces (cada vuelta la
+    dispara un sensor) y DESPUES quedar detenida; {} si no."""
+    t = _fold(texto)
+    m = _RX_REPITE_PARA.search(t)
+    if not m:
+        return {}
+    n = int(_numero(m.group(1)))
+    ms = re.search(r"\b(?:sensor\s*|s\s?)([12])\b", t[:m.start()])
+    if not ms or not 1 < n <= 10:
+        return {}
+    return {"veces": n, "senal": f"S{ms.group(1)}"}
+
+
 def cambio_conteo(texto: str):
     """N si el texto CAMBIA el numero de un conteo ya pedido ('cambia el conteo a 5');
     None si no."""
@@ -377,6 +397,15 @@ def requisitos(textos) -> list:
             for viejo, nuevo in subs["t"]:
                 if r.get("segundos") is not None and abs(float(r["segundos"]) - viejo) < 0.05:
                     r["segundos"] = nuevo
+        rp = repite_y_para(texto)
+        if rp:
+            reqs = [r for r in reqs if r["tipo"] != "para_tras_repetir"]
+            reqs.append({"tipo": "para_tras_repetir", **rp, "texto": _fold(texto).strip()[:160]})
+        for viejo, nuevo in [(int(a), int(b)) for a, b in re.findall(
+                r"\ben vez de (\d+)(?: veces)?\s*,?\s*(?:que sean|sean) (\d+)", _fold(texto))]:
+            for r in reqs:
+                if r["tipo"] == "para_tras_repetir" and r["veces"] == viejo:
+                    r["veces"] = nuevo
         for p in parpadeo_en(texto):
             # "ahora la amarilla en lugar de la roja": la mas reciente manda (una por disparador).
             reqs = [r for r in reqs if not (r["tipo"] == "parpadea" and r.get("senal") == p["senal"])]
@@ -650,6 +679,8 @@ def _verificar_req(band: dict, r: dict, arranque: list) -> list:
             problemas.append(f"Al presionar {r['senal']} la banda NO se detiene.")
     elif r["tipo"] == "para_sola":
         problemas += _probar_para_sola(s, r, band, arranque)
+    elif r["tipo"] == "para_tras_repetir":
+        problemas += _probar_repite_y_para(s, r)
     elif r["tipo"] == "parpadea":
         problemas += _probar_parpadeo(s, r)
     elif r["tipo"] == "sigue_al_contar":
@@ -951,3 +982,33 @@ def _probar_parpadeo(s, r) -> list:
             f"segundos encendido / segundos_off apagado) cuya entrada sea lo que la activa (p. ej. el paso o "
             f"SQn_ACTIVA de la secuencia, o el timer que dura lo pedido) y en 'salidas' {q} = ese timer; no pongas "
             f"{q} fija en los pasos de una secuencia exclusiva."]
+
+
+def _probar_repite_y_para(s, r) -> list:
+    """N vueltas (cada una la dispara un objeto en el sensor): entre vuelta y vuelta la
+    banda vuelve a avanzar; tras la N-esima se queda detenida (6 s sin moverse)."""
+    n, sensor = int(r["veces"]), ("I4" if r["senal"] == "S1" else "I5")
+    for k in range(1, n + 1):
+        s.pulsar(sensor, 0.3)
+        if k < n:
+            t = 0.0
+            while not _corre(s) or t < 1.0:
+                s.correr(0.5)
+                t += 0.5
+                if t > 20:
+                    return [f"Tras la vuelta {k} de {n} la banda ya no vuelve a avanzar."]
+            s.correr(1.0)
+    t = 0.0
+    while t < 20:
+        s.correr(0.5)
+        t += 0.5
+        if not _corre(s):
+            quieta = 0.0
+            while quieta < 6 and not _corre(s):
+                s.correr(0.5)
+                quieta += 0.5
+            if quieta >= 6:
+                return []
+    return [f"Despues de repetir {n} veces la banda NO se queda detenida (sigue avanzando o vuelve a arrancar): "
+            f"al terminar la ultima vuelta detén el motor (p. ej. paro con SQn_FIN o SQn_CICLO de la secuencia que "
+            f"cuenta las vueltas) y no dejes un arranque enclavado que la vuelva a mover."]

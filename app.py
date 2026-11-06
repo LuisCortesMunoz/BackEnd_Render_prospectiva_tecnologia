@@ -3181,6 +3181,18 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
             if intento < intentos and not isinstance(e, SinRespuesta):
                 log.warning(f"Banda v7 auto-revision {intento}/{intentos}: JSON ilegible — {e}")
                 continue
+            if ultimo_cargable is not None or sin_orden is not None or sin_comportamiento is not None:
+                # El ultimo intento llego roto, pero ya habia una version que carga: se
+                # entrega esa (con su aviso) en lugar de un error tras esperar.
+                log.warning(f"Banda v7: ultimo intento con JSON ilegible ({e}); se entrega la ultima version valida.")
+                metricas_lavo.sumar("json_ilegible_final", 1)
+                if sin_orden is None and sin_comportamiento is None:
+                    cfg, candidato = ultimo_cargable
+                    errores = []
+                    fallas = (comportamiento.verificar(cfg, reqs)
+                              or (reglas_banda.verificar(cfg, reglas_guia) if reglas_guia else [])
+                              or simulacion_etapas.verificar(cfg, etapas))
+                break
             raise HTTPException(422, str(e))
         except Exception as e:
             log.error(f"Error generar-logica banda v7 (modelo): {e}")
@@ -3208,7 +3220,8 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                                           "analisis": candidato.get("analisis") or {}})
         try:
             candidato = aclaraciones.aplicar_banda_v7(candidato, acl)
-            candidato, ajustes = reparaciones_banda.aplicar(candidato, texto_sesion)
+            candidato, ajustes = reparaciones_banda.aplicar(candidato, texto_sesion,
+                                                            [str(h) for h in historial] + [texto])
             if ajustes:
                 log.info(f"Banda v7 ajustes deterministas: {ajustes}")
                 metricas_lavo.sumar("ajustes", len(ajustes))
@@ -3474,6 +3487,16 @@ def _respuesta_constructor(texto: str, resp: dict, reqs: list, intencion: dict, 
     sesion + una prueba por regla); None = algo no cumple y lo resuelve el
     modelo como siempre."""
     import lavo_motor
+    # Si el texto pide cambiar de sentido y lo armado no lo hace en ninguna parte, se
+    # leyo mal (banco C6: "invierte y avanza a la izquierda 5 s" -> "avanza 5 s").
+    t_fold = edicion_incremental._norm(texto)
+    if re.search(r"\b(?:inviert\w*|invertir|reversa|cambi\w* (?:de |el )?sentido|hacia la izquierda|a la izquierda)\b",
+                 t_fold) and not re.search(r"invertir|izquierda|dir_2|reversa", json.dumps(resp, ensure_ascii=False).lower()):
+        log.warning(f"Constructor de la banda ({fuente}): el texto pide cambiar de sentido y lo armado no; "
+                    "lo resuelve el modelo.")
+        return None
+    # Las mismas reparaciones deterministas que en el camino del modelo.
+    resp, ajustes = reparaciones_banda.aplicar(resp, texto)
     try:
         cand = lavo_motor.cfg_desde_respuesta(resp)
         cand["respuesta_llm"] = {k: v for k, v in resp.items() if k not in ("analisis", "preguntas", "no_soportado")}
@@ -3497,7 +3520,8 @@ def _respuesta_constructor(texto: str, resp: dict, reqs: list, intencion: dict, 
         probado.append(f"reglas ({len(reglas.get('reglas') or [])})")
     return _respuesta_banda_v7(texto, cand, resp.get("analisis") or {}, extra={
         "fuente": fuente, "edicion": False, "intencion": intencion_banda.resumen(intencion),
-        "reglas": reglas, "comportamiento": {"probado": probado, "fallas": []}})
+        "reglas": reglas, "comportamiento": {"probado": probado, "fallas": []},
+        "avisos": ["Ajuste automático: " + a for a in ajustes]})
 
 
 def _respuesta_receta(texto: str, plan: dict, textos: list, intencion: dict, prev):
