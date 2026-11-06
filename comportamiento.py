@@ -181,6 +181,55 @@ def pide_paro_solo(texto: str) -> bool:
     return bool(_RX_PARO_SOLA.search(_fold(texto)))
 
 
+# Paro ligado a un conteo: "cuando el contador llegue a 3, la banda avanza 5 s y luego
+# se detiene (sola)". Lo dispara el conteo, no un boton: basta "se detiene sola",
+# "se detiene", "se para" o "para" (como verbo, no "para que" / "para contar").
+_RX_PARO_CONTEO = re.compile(
+    r"\b(?:se\s+)?(?:deten\w*|detien\w*|deteng\w*)\b|"
+    r"\bse\s+par(?:a|e|en|an|ara|ará)\b|"
+    r"\b(?:banda|cinta|motor|transportadora|y|luego|despues|entonces|finalmente|ahi|alli)\s+(?:se\s+)?"
+    r"par(?:a|e|en|an)\b(?!\s+(?:que|el|la|los|las|un|una|contar|ver|poder|esto|eso|cuando|cada|ello)\b)")
+# El paro es de un boton, no del conteo ("con I2 se detiene").
+_RX_PARO_DE_BOTON = re.compile(r"\b(?:con|al (?:presionar|pulsar|oprimir)|presionando|pulsando|cuando (?:presione|pulse))"
+                               r"\s+(?:el |la )?(?:boton |pulsador )?(?:i ?\d|boton|verde|rojo)")
+_RX_PARO_NEGADO = re.compile(r"\b(?:sin|nunca|jamas)\s+(?:que\s+)?(?:se\s+)?$")
+
+
+def paro_por_conteo(texto: str) -> dict:
+    """{"conteo": N, "senal": S1|S2, "segundos": X} si el texto pide que, al llegar el
+    contador a N, la banda (siga X s y) se detenga sola; {} si no lo dice.
+
+    El paro debe venir DESPUES del conteo, en la misma oracion o en la siguiente, y
+    no ser de un boton. X es el tiempo que dice entre el conteo y el paro ("avanza
+    5 segundos y luego se detiene"); 0 si se detiene al llegar."""
+    t = _fold(texto)
+    c = conteo_en(texto)
+    m = _RX_CUENTA_N.search(t)
+    if not c or not m:
+        return {}
+    resto = t[m.end():]
+    corte = [x.end() for x in re.finditer(r"[.;\n]", resto)]
+    resto = resto[:corte[1] if len(corte) > 1 else len(resto)]       # esa oracion y la siguiente
+    for p in _RX_PARO_CONTEO.finditer(resto):
+        tramo = resto[:p.start()]
+        despues = resto[p.end():p.end() + 30]
+        de_boton = re.match(r"\s*(?:con|al (?:presionar|pulsar|oprimir)|cuando (?:presione|pulse))\b", despues)
+        if _RX_PARO_DE_BOTON.search(tramo[-60:]) or _RX_PARO_NEGADO.search(tramo) or de_boton:
+            continue
+        # De quien es el paro: de la banda (o sin sujeto), no de una luz o una pluma.
+        oracion = re.split(r"[.;,\n]|\by\b", tramo)[-1] + p.group(0)
+        if _RX_CTX_OTRO.search(oracion) and not _RX_CTX_BANDA.search(oracion):
+            continue
+        tm = None
+        for x in _RX_TIEMPO.finditer(tramo):
+            tm = x
+        seg = 0.0
+        if tm:
+            seg = _numero(tm.group(1)) * (60 if tm.group(2).startswith("min") else 1)
+        return {"conteo": c["conteo"], "senal": c["senal"], "segundos": seg}
+    return {}
+
+
 def requisitos(textos) -> list:
     """Comportamientos que se pueden probar, de la instruccion mas antigua a
     la mas reciente (la mas reciente manda: 'ya no se detenga sola' lo quita)."""
@@ -225,13 +274,20 @@ def requisitos(textos) -> list:
                 if s:
                     reqs = [r for r in reqs if r["tipo"] != "arranca_con"]
                     reqs.append({"tipo": "arranca_con", "senal": s, "texto": o.strip()})
+        # "Al llegar a 3, la banda avanza 5 s y luego se detiene": el paro es del CONTEO
+        # (los 5 s se cuentan desde el objeto 3, no desde el arranque).
+        pc = {} if _RX_SIN_PARO_SOLA.search(_fold(texto)) else paro_por_conteo(texto)
+        if pc:
+            reqs = [r for r in reqs if r["tipo"] != "para_sola"]
+            reqs.append({"tipo": "para_sola", **pc, "texto": _fold(texto).strip()[:160]})
         tg = toggle_en(texto)
         if tg:
             reqs = [r for r in reqs if r["tipo"] != "toggle"]
             reqs.append({"tipo": "toggle", **tg, "texto": _fold(texto).strip()[:160]})
-    # "al contar 3 cajas se detenga sola" ya lo prueba para_sola (con su conteo).
+    # "al contar 3 cajas se detenga sola" ya lo prueba para_sola (con su conteo), salvo
+    # que el contador ademas se reinicie (eso lo prueba el requisito "conteo").
     if any(r["tipo"] == "para_sola" and r.get("conteo") for r in reqs):
-        reqs = [r for r in reqs if r["tipo"] != "conteo"]
+        reqs = [r for r in reqs if r["tipo"] != "conteo" or r.get("reinicia") or r.get("boton")]
     return reqs
 
 
@@ -470,11 +526,12 @@ def _verificar_req(band: dict, r: dict, arranque: list) -> list:
         if _corre(s):
             problemas.append(f"Al presionar {r['senal']} la banda NO se detiene.")
     elif r["tipo"] == "para_sola":
-        problemas += _probar_para_sola(s, r)
+        problemas += _probar_para_sola(s, r, band, arranque)
     return problemas
 
 
 _ESPERA_FIN_ACCION_S = 20     # lo maximo que se espera a que termine la accion del conteo
+_ESPERA_ACCION_S = 12         # lo maximo que se espera a que EMPIECE la accion tras el objeto N
 
 
 def _estado(s) -> set:
@@ -533,9 +590,29 @@ def _probar_conteo(s, r, arranque) -> list:
     n, sensor = int(r["conteo"]), ("I4" if r["senal"] == "S1" else "I5")
     antes = [_estado(s)] + _ronda(s, sensor, n - 1)
     al_n = _ronda(s, sensor, 1)[0]
-    cambio = al_n - set().union(*antes)
-    if "BANDA_DETENIDA" in cambio and "BANDA_CORRIENDO" not in set().union(*antes):
-        cambio.discard("BANDA_DETENIDA")          # nunca corrio: no es un efecto del conteo
+    vistos = set().union(*antes)
+
+    def _cambio(estado):
+        c = estado - vistos
+        if "BANDA_DETENIDA" in c and "BANDA_CORRIENDO" not in vistos:
+            c.discard("BANDA_DETENIDA")           # nunca corrio: no es un efecto del conteo
+        return c
+
+    cambio = _cambio(al_n)
+    # La accion puede llegar unos segundos despues del objeto N ("al llegar a 3, la banda
+    # avanza 5 s y luego se detiene"): se espera sin tocar nada.
+    t = 0.0
+    while not cambio and t < _ESPERA_ACCION_S:
+        s.correr(0.5)
+        t += 0.5
+        cambio = _cambio(_estado(s))
+    if cambio and t > 0:
+        # Llego tarde: solo cuenta si NO pasa igual sin el objeto N (si no, es por tiempo).
+        band = getattr(s, "_band_conteo", None)
+        if band is not None:
+            c = _replica(band, arranque, sensor, n - 1, 0.7 + t, objetos_s=0.7, arranque_s=_ARRANQUE_S)
+            if cambio & _cambio(_estado(c)):
+                cambio = set()
     if not cambio:
         return [f"Al contar {n} en {r['senal']} no pasa nada (ninguna salida ni la banda cambian)."]
     if r.get("reinicia"):
@@ -620,16 +697,25 @@ def _probar_reset_boton(s, r, arranque, cambio, n, sensor) -> list:
     return []
 
 
-def _probar_para_sola(s, r) -> list:
+_QUIETA_S = 6.0          # tras el paro automatico, sin tocar nada, debe seguir detenida
+
+
+def _replica(band, arranque, sensor, objetos, extra_s, objetos_s=1.0, arranque_s=_ARRANQUE_S):
+    """Simulacion de control: misma linea de tiempo (arranque, 'objetos' objetos cada
+    'objetos_s' s y 'extra_s' s mas) pero sin el ultimo objeto."""
+    c = _sim(band)
+    _arrancar(c, arranque)
+    c.correr(arranque_s)
+    for _ in range(objetos):
+        c.pulsar(sensor, 0.3)
+        c.correr(objetos_s - 0.3)
+    c.correr(extra_s)
+    return c
+
+
+def _probar_para_sola(s, r, band=None, arranque=None) -> list:
     if r.get("conteo"):
-        sensor = "I4" if r["senal"] == "S1" else "I5"
-        for k in range(int(r["conteo"])):
-            if not _corre(s):
-                return [f"La banda se detiene antes de contar {r['conteo']} cajas (se detuvo en la caja {k})."]
-            s.pulsar(sensor, 0.3)
-            s.correr(0.7)
-        s.correr(_FRENO_S)
-        return [] if not _corre(s) else [f"La banda NO se detiene sola al contar {r['conteo']} cajas en {r['senal']}."]
+        return _probar_paro_conteo(s, r, band, arranque)
     if r.get("senal"):
         s.pulsar(r["senal"], 0.3)
         s.correr(_FRENO_S)
@@ -649,3 +735,45 @@ def _probar_para_sola(s, r) -> list:
             return []
     return [f"La banda NO se detiene sola: despues de {MAX_SOLA_S} s sin tocar ningun boton sigue en marcha "
             f"(su paro solo depende de botones)."]
+
+
+def _probar_paro_conteo(s, r, band=None, arranque=None) -> list:
+    """Paro ligado al conteo: corre con los N-1 primeros objetos; desde el objeto N
+    sigue en marcha los 'segundos' pedidos (si los hay), luego se detiene y,
+    sin tocar nada, ya no vuelve a arrancar. Los segundos se cuentan desde el
+    objeto N, no desde el arranque."""
+    n, senal = int(r["conteo"]), r["senal"]
+    sensor = "I4" if senal == "S1" else "I5"
+    seg = float(r.get("segundos") or 0)
+    for k in range(n):
+        if not _corre(s):
+            return [f"La banda se detiene antes de contar {n} cajas en {senal} (se detuvo en la caja {k})."]
+        s.pulsar(sensor, 0.3)
+        if k < n - 1:
+            s.correr(0.7)
+    # Desde el objeto N (los timers del PLC van por pulsos de 1 s: +-1 s de margen).
+    if seg:
+        sigue = max(0.0, seg - 1.3)
+        if sigue:
+            s.correr(sigue)
+            if not _corre(s):
+                return [f"Al contar {n} en {senal} la banda se detiene enseguida: debia seguir avanzando "
+                        f"{_fmt(seg)} s y luego detenerse."]
+        s.correr(seg - sigue + _FRENO_S)
+        if _corre(s):
+            return [f"Al contar {n} en {senal} la banda NO se detiene sola despues de avanzar {_fmt(seg)} s "
+                    f"(los {_fmt(seg)} s se cuentan desde la caja {n}, no desde el arranque)."]
+    else:
+        s.correr(_FRENO_S)
+        if _corre(s):
+            return [f"La banda NO se detiene sola al contar {n} cajas en {senal}."]
+    # Control: lo mismo SIN la caja N. Si tambien se detiene, el paro es por tiempo, no por el conteo.
+    if band is not None:
+        c = _replica(band, arranque, sensor, n - 1, 0.3 + seg + _FRENO_S)
+        if not _corre(c):
+            return [f"La banda se detiene por tiempo, no por el conteo: sin la caja {n} tambien se detiene "
+                    f"(debe esperar a contar {n} en {senal}" + (f" y luego avanzar {_fmt(seg)} s)." if seg else ").")]
+    s.correr(_QUIETA_S)
+    if _corre(s):
+        return [f"Despues de detenerse al contar {n} en {senal}, la banda vuelve a arrancar sola sin tocar nada."]
+    return []
