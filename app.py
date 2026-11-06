@@ -148,6 +148,7 @@ import extractor_banda
 import regresion_banda
 import huella_banda
 import reparaciones_banda
+import receta_conteo
 import enlace_lentes
 try:
     import memoria_validada
@@ -750,6 +751,9 @@ EJEMPLOS
 BANDA_MOTOR_V7 = os.environ.get("BANDA_MOTOR_V7", "0").strip() == "1"
 # Etapa 3: armar sin el modelo lo que se entiende sin ambiguedad (LAVO_CONSTRUCTORES=0 lo apaga).
 CONSTRUCTORES_BANDA = os.environ.get("LAVO_CONSTRUCTORES", "1").strip() != "0"
+# Receta fija (sin IA) de "contar N -> avanzar X s -> parar -> acciones en orden ->
+# reiniciar" (receta_conteo). LAVO_RECETA_CONTEO=0 la apaga.
+RECETA_CONTEO = os.environ.get("LAVO_RECETA_CONTEO", "1").strip() != "0"
 # Etapa 5: si el lector de patrones no entiende todo, la IA traduce la instruccion a REGLAS
 # (extractor_banda) y los constructores las arman. LAVO_EXTRACTOR=0 lo apaga.
 EXTRACTOR_BANDA = os.environ.get("LAVO_EXTRACTOR", "1").strip() != "0"
@@ -3010,6 +3014,20 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
             if r is not None:
                 return r
 
+    # Receta fija del patron "contar N -> avanzar X s -> parar -> acciones en orden ->
+    # reiniciar": si TODA la sesion cabe en el, se arma sin el modelo y se verifica.
+    plan_receta = receta_conteo.detectar(list(historial) + [texto], acl) if RECETA_CONTEO else None
+    if plan_receta:
+        if plan_receta["hz"] is None:
+            log.info("/generar-logica banda v7: receta de conteo sin frecuencia — se pregunta")
+            return LogicaResponse(
+                logic={}, name="", outputs=0, device="banda", status="needs_clarification",
+                questions=[preguntas_banda.pregunta("freq_hz")], assumptions=[],
+                analysis={"equipo": "banda", "motor_v7": True, "receta": "conteo"})
+        r = _respuesta_receta(texto, plan_receta, list(historial) + [texto], intencion, prev)
+        if r is not None:
+            return r
+
     # Varias acciones en orden ("primero A, cuando termine B, para cerrar C"):
     # las etapas se detectan aqui, se pregunta cuando termina la que no lo dice
     # y despues se comprueba que la secuencia las respete en ese orden.
@@ -3480,6 +3498,34 @@ def _respuesta_constructor(texto: str, resp: dict, reqs: list, intencion: dict, 
     return _respuesta_banda_v7(texto, cand, resp.get("analisis") or {}, extra={
         "fuente": fuente, "edicion": False, "intencion": intencion_banda.resumen(intencion),
         "reglas": reglas, "comportamiento": {"probado": probado, "fallas": []}})
+
+
+def _respuesta_receta(texto: str, plan: dict, textos: list, intencion: dict, prev):
+    """Programa de receta_conteo: se valida y se simula (2 ciclos completos +
+    los requisitos de la sesion). None = no cumple y lo resuelve el modelo."""
+    import lavo_motor
+    resp = receta_conteo.armar(plan)
+    try:
+        cand = lavo_motor.cfg_desde_respuesta(resp)
+        cand["respuesta_llm"] = {k: v for k, v in resp.items() if k not in ("analisis", "preguntas", "no_soportado")}
+        errores = validar_logica_banda(cand)
+    except (ValueError, TypeError) as e:
+        errores, cand = [str(e)], None
+    if errores:
+        log.warning(f"Receta de conteo: no valida ({errores}); lo resuelve el modelo.")
+        return None
+    reqs = [r for r in comportamiento.requisitos(textos) if r["tipo"] != "conteo"]
+    fallas = receta_conteo.verificar(cand, plan) + comportamiento.verificar(cand, reqs)
+    if fallas:
+        log.warning(f"Receta de conteo: la simulacion no cumple ({fallas}); lo resuelve el modelo.")
+        return None
+    log.info(f"/generar-logica banda v7: receta de conteo {plan}")
+    metricas_lavo.poner("fuente", "receta")
+    metricas_lavo.poner("contexto", ["receta_conteo"])
+    return _respuesta_banda_v7(texto, cand, resp["analisis"], extra={
+        "fuente": "receta", "edicion": bool(prev), "intencion": intencion_banda.resumen(intencion),
+        "comportamiento": {"probado": ["receta: 2 ciclos completos (conteo, avance, paro, acciones en orden, "
+                                       "reinicio)"] + [r["tipo"] for r in reqs], "fallas": []}})
 
 
 def _movimiento_desde_aclaraciones(texto: str, prev, acl: dict):

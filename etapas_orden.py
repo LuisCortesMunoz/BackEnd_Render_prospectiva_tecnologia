@@ -1024,6 +1024,33 @@ def separar_aclaraciones(texto: str):
     return texto[:m.start()], acl
 
 
+_COLOR_DE = {"Q3": "verde", "Q4": "amarilla", "Q5": "roja"}
+
+
+def con_sustituciones(det: dict, textos) -> dict:
+    """Las etapas del historial con los cambios que pidieron las instrucciones
+    posteriores ("la amarilla en lugar de la roja", "cambia los 10 s por 6 s"):
+    la verificacion exige lo VIGENTE, no lo que se pidio al principio."""
+    import cambios_texto
+    import copy
+    if not det.get("aplica"):
+        return det
+    det = copy.deepcopy(det)
+    for t in textos or []:
+        subs = cambios_texto.sustituciones(t)
+        for e in det.get("etapas") or []:
+            for viejo, nuevo in subs["q"]:
+                for r in e.get("requisitos") or []:
+                    if r.get("tipo") == "salida" and viejo in r["q"]:
+                        r["q"] = (set(r["q"]) - {viejo}) | {nuevo}
+                        r["desc"] = ", ".join(_DESC_Q.get(x, x) for x in sorted(r["q"]))
+                if viejo in _COLOR_DE and nuevo in _COLOR_DE:
+                    e["texto"] = re.sub(rf"\b{_COLOR_DE[viejo]}\b", _COLOR_DE[nuevo], e["texto"])
+            for viejo, nuevo in subs["t"]:
+                e["tiempos"] = [nuevo if abs(x - viejo) < 0.05 else x for x in e.get("tiempos") or []]
+    return det
+
+
 def de_historial(historial, dispositivo: str = "banda", acl: dict = None, posteriores=None) -> dict:
     """Las etapas de la instruccion MAS RECIENTE del historial que pidio acciones
     en orden ("la secuencia esta mal" se revisa contra lo que se pidio)."""
@@ -1035,5 +1062,5 @@ def de_historial(historial, dispositivo: str = "banda", acl: dict = None, poster
         if d["aplica"]:
             # las instrucciones posteriores (correcciones) y la actual pueden responder sus dudas
             despues = [separar_aclaraciones(x)[0] for x in hist[i + 1:]] + list(posteriores or [])
-            return con_respuestas_de_sesion(d, texto, dispositivo, a, despues)
+            return con_sustituciones(con_respuestas_de_sesion(d, texto, dispositivo, a, despues), despues)
     return detectar("", dispositivo, acl)

@@ -123,6 +123,33 @@ def _texto(serie: list, canal: str) -> str:
     return inicio + ("; " + ", ".join(partes) if partes else " todo el tiempo")
 
 
+_PLUMAS = ("Q6", "Q7", "Q8", "Q9")
+
+
+def _orden_plumas(esc: dict) -> list:
+    """Orden en que se mueven las plumas, SIN tiempos: la lista de conjuntos de
+    salidas de pluma activas (sin repetir consecutivos). Pluma 2 y luego pluma 1
+    [{Q7}, set(), {Q8}] no es lo mismo que las dos a la vez [{Q7, Q8}]."""
+    eventos = []
+    for c in _PLUMAS:
+        for t, v in esc.get(c) or []:
+            eventos.append((t, c, v))
+    estado, out = set(), []
+    for t in sorted({e[0] for e in eventos}):
+        for _, c, v in [e for e in eventos if e[0] == t]:
+            (estado.add if v else estado.discard)(c)
+        actual = frozenset(estado)
+        if actual and (not out or out[-1] != actual):
+            out.append(actual)
+    return out
+
+
+def _texto_orden(orden: list) -> str:
+    if not orden:
+        return "sin mover plumas"
+    return " -> ".join(" y ".join(NOMBRE[q] for q in sorted(paso)) for paso in orden)
+
+
 def comparar(antes: dict, despues: dict) -> list:
     difs = []
     if not antes or not despues:
@@ -135,19 +162,39 @@ def comparar(antes: dict, despues: dict) -> list:
             if not _iguales(a, b):
                 difs.append({"modulo": CANALES[c], "escenario": esc, "canal": c,
                              "antes": _texto(a, c), "despues": _texto(b, c)})
+        oa, ob = _orden_plumas(antes[esc]), _orden_plumas(despues[esc])
+        if oa != ob:
+            difs.append({"modulo": "plumas", "escenario": esc, "canal": "plumas_orden", "sin_tiempo": True,
+                         "antes": _texto_orden(oa), "despues": _texto_orden(ob)})
     return difs
 
 
 def fuera_de_zona(difs: list, zona: dict) -> list:
-    """Diferencias en modulos que el usuario no menciono. Si habla de tiempos o
-    del contador (que cambian el momento de todo) o es vago, no se juzga."""
+    """Diferencias en modulos que el usuario no menciono (zona vaga: no se juzga).
+    - Si habla de tiempos o del contador, eso mueve el MOMENTO de todo: la banda
+      queda permitida y de lo demas solo se juzga el ORDEN de las plumas.
+    - Una luz que cambia en un escenario donde tambien cambio lo pedido puede ser
+      consecuencia (verde = BANDA_CORRIENDO): no se juzga. Las plumas si."""
     mods = set((zona or {}).get("modulos") or [])
-    if not mods or mods & {"tiempos", "conteo"}:
+    if not mods:
         return []
-    # En un escenario donde TAMBIEN cambio lo pedido, lo demas puede ser consecuencia
-    # (una luz que sigue a BANDA_CORRIENDO cambia si cambia la marcha): no se juzga.
-    con_pedido = {d["escenario"] for d in difs if d["modulo"] in mods}
-    return [d for d in difs if d["modulo"] not in mods and d["escenario"] not in con_pedido]
+    temporal = bool(mods & {"tiempos", "conteo"})
+    permitidos = mods | ({"motor"} if temporal else set())
+    con_pedido = {d["escenario"] for d in difs if d["modulo"] in permitidos and d["canal"] != "plumas_orden"}
+    out = []
+    for d in difs:
+        if d["modulo"] in permitidos:
+            continue
+        if temporal and d["canal"] != "plumas_orden":
+            continue
+        if not temporal and d["canal"] == "plumas_orden" and any(
+                x["escenario"] == d["escenario"] and x["modulo"] == "plumas" and x["canal"] != "plumas_orden"
+                for x in out):
+            continue                      # ya se reporto con tiempos
+        if d["modulo"] == "torreta" and d["escenario"] in con_pedido:
+            continue
+        out.append(d)
+    return out
 
 
 def _lineas(difs: list, n: int = 6) -> list:
@@ -157,7 +204,8 @@ def _lineas(difs: list, n: int = 6) -> list:
         if k in vistos:
             continue
         vistos.add(k)
-        out.append(f"Con «{d['escenario']}», {NOMBRE[d['canal']]}: antes {d['antes']}; ahora {d['despues']}.")
+        quien = "el orden de las plumas" if d["canal"] == "plumas_orden" else NOMBRE[d["canal"]]
+        out.append(f"Con «{d['escenario']}», {quien}: antes {d['antes']}; ahora {d['despues']}.")
         if len(out) >= n:
             break
     return out

@@ -24,6 +24,7 @@ import re
 import unicodedata
 
 import cache_simulacion
+import cambios_texto
 import lavo_motor as lm
 
 # Tope de tiempo simulado por prueba (s): sin condicion dicha, la banda debe
@@ -214,6 +215,27 @@ _RX_YA_NO_PARA = re.compile(r"\bya no (?:se |la |lo )?(?:deten\w*|detien\w*|dete
                             r"\bno (?:debe|tiene que|necesita) (?:detenerse|parar\w*)\b")
 
 
+# "la luz roja parpadea", "que la amarilla parpadee 4 s cuando S2 detecte".
+_RX_PARPADEA = re.compile(r"\b(?:parpade\w*|intermit\w*|destell\w*)\b")
+_Q_COLOR = {"verde": "Q3", "amarilla": "Q4", "amarillo": "Q4", "roja": "Q5", "rojo": "Q5"}
+
+
+def parpadeo_en(texto: str) -> list:
+    """[{"q": Q, "senal": S1|S2|I1|I2|None}] de cada oracion que pide que una luz parpadee."""
+    out = []
+    for o in _oraciones(texto):
+        if not _RX_PARPADEA.search(o):
+            continue
+        cs = re.findall(r"\b(verde|amarill[ao]|roj[ao])\b", o)
+        if not cs:
+            continue
+        ms = re.search(r"\b(?:sensor\s*|s\s?)([12])\b", o)
+        mb = re.search(r"\b(?:presion\w*|puls\w*|con)\s+(?:el\s+)?(?:boton\s+)?(i\s?[12])\b", o)
+        senal = f"S{ms.group(1)}" if ms else (_senal(mb.group(1)) if mb else None)
+        out.append({"q": _Q_COLOR[cs[-1]], "senal": senal})
+    return out
+
+
 def cambio_conteo(texto: str):
     """N si el texto CAMBIA el numero de un conteo ya pedido ('cambia el conteo a 5');
     None si no."""
@@ -234,6 +256,9 @@ def quita_paro(texto: str) -> bool:
     t = _fold(texto)
     m = _RX_YA_NO_PARA.search(t)
     if not m:
+        return False
+    # En una queja ("revisa, ya no se detiene a las 3") pide que SI se detenga.
+    if re.search(r"\b(?:revis\w*|no funciona\w*|esta mal|falla\w*|corrig\w*|arregl\w*|sigue sin|deberia)\b", t):
         return False
     despues = t[m.end():]
     if _RX_TIEMPO.search(despues) or re.search(r"\b(?:pasa directo|directo a)\b", despues) or \
@@ -343,6 +368,19 @@ def requisitos(textos) -> list:
         if pc:
             reqs = [r for r in reqs if r["tipo"] != "para_sola"]
             reqs.append({"tipo": "para_sola", **pc, "texto": _fold(texto).strip()[:160]})
+        # "la amarilla en lugar de la roja", "cambia los 10 s por 6 s": se actualiza lo ya pedido.
+        subs = cambios_texto.sustituciones(texto)
+        for r in reqs:
+            for viejo, nuevo in subs["q"]:
+                if r.get("q") == viejo:
+                    r["q"] = nuevo
+            for viejo, nuevo in subs["t"]:
+                if r.get("segundos") is not None and abs(float(r["segundos"]) - viejo) < 0.05:
+                    r["segundos"] = nuevo
+        for p in parpadeo_en(texto):
+            # "ahora la amarilla en lugar de la roja": la mas reciente manda (una por disparador).
+            reqs = [r for r in reqs if not (r["tipo"] == "parpadea" and r.get("senal") == p["senal"])]
+            reqs.append({"tipo": "parpadea", **p, "texto": _fold(texto).strip()[:160]})
         tg = toggle_en(texto)
         if tg:
             reqs = [r for r in reqs if r["tipo"] != "toggle"]
@@ -612,6 +650,8 @@ def _verificar_req(band: dict, r: dict, arranque: list) -> list:
             problemas.append(f"Al presionar {r['senal']} la banda NO se detiene.")
     elif r["tipo"] == "para_sola":
         problemas += _probar_para_sola(s, r, band, arranque)
+    elif r["tipo"] == "parpadea":
+        problemas += _probar_parpadeo(s, r)
     elif r["tipo"] == "sigue_al_contar":
         n, senal = int(r["conteo"]), r["senal"]
         sensor = "I4" if senal == "S1" else "I5"
@@ -884,3 +924,30 @@ def _probar_paro_conteo(s, r, band=None, arranque=None) -> list:
                     f"banda ya no vuelve a arrancar (el paro del motor se queda activo: usa una senal que se "
                     f"libere, p. ej. el pulso SQ1_CICLO o el timer de la accion, no una condicion que siga activa)."]
     return []
+
+
+_NOMBRE_LUZ = {"Q3": "verde", "Q4": "amarilla", "Q5": "roja"}
+
+
+def _probar_parpadeo(s, r) -> list:
+    """Tras su disparador, la luz debe encenderse y apagarse al menos 2 veces en 8 s."""
+    q = r["q"]
+    if r.get("senal"):
+        s.pulsar("I4" if r["senal"] == "S1" else "I5" if r["senal"] == "S2" else r["senal"], 0.3)
+    prev, flancos, encendida = False, 0, False
+    for _ in range(80):
+        s.correr(0.1)
+        v = q in s.salidas()
+        encendida = encendida or v
+        if v and not prev:
+            flancos += 1
+        prev = v
+    if flancos >= 2:
+        return []
+    luz = _NOMBRE_LUZ.get(q, q)
+    cuando = f" al detectar {r['senal']}" if r.get("senal") else ""
+    estado = "se queda fija" if encendida else "no se enciende"
+    return [f"La luz {luz} debe PARPADEAR{cuando} y {estado}. Para parpadear usa un timer INTERMITENTE (tipo 6, "
+            f"segundos encendido / segundos_off apagado) cuya entrada sea lo que la activa (p. ej. el paso o "
+            f"SQn_ACTIVA de la secuencia, o el timer que dura lo pedido) y en 'salidas' {q} = ese timer; no pongas "
+            f"{q} fija en los pasos de una secuencia exclusiva."]
