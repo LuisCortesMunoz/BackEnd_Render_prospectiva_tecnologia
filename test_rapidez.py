@@ -247,6 +247,7 @@ check(cs.estadistica["aciertos"] >= 2,
 escenario("4. C: tope de tiempo")
 cs.limpiar()
 app.TIEMPO_MAX_S, app.MARGEN_FINAL_S = 1.0, 0.0
+app.TIEMPO_FALLA_S = 0.0          # sin el reintento por falla clara (lo prueba test_ronda4)
 espera_modelo[0] = 0.6
 r = generar(CORR, SIN_ARRANQUE, DIRECTO_DET, prev=TAMBIEN_DET, historial=[ORIG])
 check(len(llamadas) == 1, "sin tiempo para otro intento: no se llama otra vez al modelo")
@@ -262,6 +263,7 @@ check(len(llamadas) == 2 and r.analysis["fuente"] == "modelo", "LAVO_TIEMPO_MAX_
 app.TIEMPO_MAX_S = 100.0
 check(app._hay_tiempo_para_reintento(None), "el primer intento siempre se hace")
 app.TIEMPO_MAX_S, app.MARGEN_FINAL_S = 100.0, 10.0
+app.TIEMPO_FALLA_S = 90.0
 espera_modelo[0] = 0.0
 
 print(f"\nTODAS LAS PRUEBAS DE RAPIDEZ PASARON ({OK} comprobaciones).")

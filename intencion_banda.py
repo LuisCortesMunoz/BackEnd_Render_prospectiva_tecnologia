@@ -67,7 +67,7 @@ def analizar(texto: str, historial=None, acl: dict = None, prev=None, correccion
     if etapas["aplica"]:
         # En una secuencia el paro automatico y el conteo son etapas: los prueba la
         # simulacion de etapas (con sus tiempos y la senal anterior), no la prueba suelta.
-        reqs = [r for r in reqs if r["tipo"] not in ("para_sola", "conteo", "sigue_al_contar")]
+        reqs = [r for r in reqs if r["tipo"] not in ("para_sola", "conteo", "sigue_al_contar", "pausa_sensor")]
     mov = preguntas_banda.analizar(texto, prev, acl)
 
     intencion = {

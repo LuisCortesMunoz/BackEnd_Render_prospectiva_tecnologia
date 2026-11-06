@@ -256,6 +256,52 @@ def repite_y_para(texto: str) -> dict:
     return {"veces": n, "senal": f"S{ms.group(1)}"}
 
 
+# "cuando el sensor 2 detecta una caja, la banda se detiene 4 segundos y luego continua",
+# "hasta que S2 detecta; entonces se detiene 4 s, la pluma sube y vuelve a avanzar".
+_RX_PAUSA_SENSOR = re.compile(
+    r"\b(?:sensor\s*|s\s?)([12])\b[^.]{0,80}?\b(?:se\s+)?(?:deten\w*|detien\w*|deteng\w*|para|pare|pausa\w*)\s+"
+    r"(?:durante\s+|por\s+)?(\d+(?:[.,]\d+)?|un|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s*"
+    r"(?:s|seg|segundos?)\b[^.;]{0,90}?\b(?:vuelv\w* a (?:avanzar|moverse|arrancar)|continu\w*|sigue|siga|"
+    r"reanud\w*|retom\w*)")
+
+
+def pausa_por_deteccion(texto: str) -> dict:
+    """{"senal": S1|S2, "segundos": N} si pide que, cada vez que el sensor detecta, la
+    banda se detenga N s y luego siga sola; {} si no."""
+    m = _RX_PAUSA_SENSOR.search(_fold(texto))
+    if not m:
+        return {}
+    n = _numero(m.group(2))
+    return {"senal": f"S{m.group(1)}", "segundos": n} if 0 < n <= 60 else {}
+
+
+def _probar_pausa(s, r) -> list:
+    """Con la banda en marcha, cada objeto en el sensor: se detiene enseguida, sigue
+    detenida casi todo el tiempo pedido y luego vuelve a avanzar sola."""
+    n, senal = float(r["segundos"]), r["senal"]
+    sensor = "I4" if senal == "S1" else "I5"
+    for k in range(1, int(r.get("ciclos") or 2) + 1):
+        if not _corre(s):
+            return [f"Antes de la deteccion {k} en {senal} la banda no esta avanzando."]
+        s.pulsar(sensor, 0.3)
+        s.correr(_FRENO_S)
+        if _corre(s):
+            return [f"Al detectar {senal} (vez {k}) la banda NO se detiene {_fmt(n)} s."]
+        if n > 2.5:
+            s.correr(n - 2.5)
+            if _corre(s):
+                return [f"Al detectar {senal} (vez {k}) la banda vuelve a avanzar antes de los {_fmt(n)} s."]
+        t = 0.0
+        while not _corre(s) and t < 6:
+            s.correr(0.5)
+            t += 0.5
+        if not _corre(s):
+            return [f"Al detectar {senal} (vez {k}) la banda se detiene pero NO vuelve a avanzar a los {_fmt(n)} s "
+                    f"(la pausa debe durar {_fmt(n)} s en CADA deteccion y luego seguir sola)."]
+        s.correr(1.5)
+    return []
+
+
 def cambio_conteo(texto: str):
     """N si el texto CAMBIA el numero de un conteo ya pedido ('cambia el conteo a 5');
     None si no."""
@@ -397,6 +443,10 @@ def requisitos(textos) -> list:
             for viejo, nuevo in subs["t"]:
                 if r.get("segundos") is not None and abs(float(r["segundos"]) - viejo) < 0.05:
                     r["segundos"] = nuevo
+        pp = pausa_por_deteccion(texto)
+        if pp:
+            reqs = [r for r in reqs if not (r["tipo"] == "pausa_sensor" and r["senal"] == pp["senal"])]
+            reqs.append({"tipo": "pausa_sensor", **pp, "texto": _fold(texto).strip()[:160]})
         rp = repite_y_para(texto)
         if rp:
             reqs = [r for r in reqs if r["tipo"] != "para_tras_repetir"]
@@ -436,6 +486,12 @@ def requisitos(textos) -> list:
             and _RX_AVANZA.search(todo) and not _RX_ARRANQUE_OTRO.search(todo)):
         reqs.append({"tipo": "arranca_con", "senal": "I1", "defecto": True,
                      "texto": "no se dijo con que arranca: con I1"})
+    # Pausa en cada deteccion dentro de un ciclo que se repite N veces: solo las N-1
+    # primeras vueltas deben reanudar (tras la ultima se detiene).
+    rep = next((r for r in reqs if r["tipo"] == "para_tras_repetir"), None)
+    for r in reqs:
+        if r["tipo"] == "pausa_sensor" and rep and rep["senal"] == r["senal"]:
+            r["ciclos"] = max(1, min(2, int(rep["veces"]) - 1))
     # "al contar 3 cajas se detenga sola" ya lo prueba para_sola (con su conteo), salvo
     # que el contador ademas se reinicie (eso lo prueba el requisito "conteo").
     if any(r["tipo"] == "para_sola" and r.get("conteo") for r in reqs):
@@ -681,6 +737,8 @@ def _verificar_req(band: dict, r: dict, arranque: list) -> list:
         problemas += _probar_para_sola(s, r, band, arranque)
     elif r["tipo"] == "para_tras_repetir":
         problemas += _probar_repite_y_para(s, r)
+    elif r["tipo"] == "pausa_sensor":
+        problemas += _probar_pausa(s, r)
     elif r["tipo"] == "parpadea":
         problemas += _probar_parpadeo(s, r)
     elif r["tipo"] == "sigue_al_contar":

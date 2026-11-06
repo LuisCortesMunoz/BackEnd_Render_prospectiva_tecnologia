@@ -32,6 +32,29 @@ _RX_T = [
 ]
 
 
+# "La espera con la amarilla debe ser de 5 segundos", "que la roja dure 4 s": nuevo
+# tiempo SIN decir el anterior; se aplica por CONTEXTO (la luz/pluma que nombra).
+_RX_TIEMPO_NUEVO = re.compile(rf"\b(?:debe|tiene que|deberia)\s+(?:ser|durar|tardar)\s+(?:de\s+)?{_NUM}{_SEG}|"
+                              rf"\bque\s+(?:sea|dure|tarde)\s+(?:de\s+)?{_NUM}{_SEG}|"
+                              rf"\b(?:dure|durar|tarde)\s+{_NUM}{_SEG}")
+_RX_CONTEXTO = re.compile(r"\b(verde|amarill[ao]|roj[ao]|pluma\s*[12]|espera|pausa|retardo|avance|marcha)\b")
+
+
+def tiempo_por_contexto(texto: str) -> list:
+    """[(palabras de contexto, segundos nuevos)] de frases que fijan un tiempo sin decir el anterior."""
+    t = _fold(texto)
+    if any(rx.search(t) for rx in _RX_T):
+        return []                                    # ya dice el anterior: lo cubre sustituciones()
+    out = []
+    for m in _RX_TIEMPO_NUEVO.finditer(t):
+        n = next(g for g in m.groups() if g)
+        oracion = re.split(r"[.;]", t[:m.start()])[-1] + t[m.start():m.end()]
+        ctx = {re.sub(r"\s+", " ", c) for c in _RX_CONTEXTO.findall(oracion)}
+        if ctx:
+            out.append((ctx, _f(n)))
+    return out
+
+
 def _fold(t) -> str:
     t = unicodedata.normalize("NFD", str(t or "").lower())
     return "".join(c for c in t if unicodedata.category(c) != "Mn")

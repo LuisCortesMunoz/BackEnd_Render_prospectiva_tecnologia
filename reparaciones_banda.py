@@ -23,6 +23,9 @@ y los contadores (comprobados en el ST real con lavo_sim / el banco de pruebas):
    pasos de una secuencia (o en 'salidas'). Se quita de esos pasos y se maneja
    con un timer INTERMITENTE cuya entrada es ese paso (o esa regla).
 
+5. PLUMA DE 0 s: un paso mueve una pluma 0 s (o menos de 1 s) y el siguiente ya
+   no la mantiene: se le dan 3 s para que alcance a moverse.
+
 aplicar(respuesta, texto, textos) -> (respuesta_reparada, [avisos])
 Nunca quita nada de lo pedido; si no aplica, devuelve la respuesta igual.
 """
@@ -215,6 +218,36 @@ def _parpadeo(r: dict, textos: list, avisos: list):
         avisos.append(f"{q} parpadea (timer T{nt} intermitente mientras {entrada}): estaba fija.")
 
 
+_PLUMAS = ("Q6", "Q7", "Q8", "Q9")
+PLUMA_MIN_S = 1.0          # menos que esto la pluma casi no se mueve
+PLUMA_S = 3.0              # lo que se le da (como en receta_conteo)
+
+
+def _plumas_cortas(r: dict, avisos: list):
+    """Un paso que mueve una pluma 0 s (o casi) y el siguiente ya no la mantiene: la
+    salida dura un scan y la pluma no alcanza a moverse (banco C2: 'luego baja' en 0 s)."""
+    for s in [s for s in _lista(r.get("secuencias")) if isinstance(s, dict)]:
+        pasos = [p for p in _lista(s.get("pasos")) if isinstance(p, dict)]
+        for i, p in enumerate(pasos):
+            qs = [_s(x) for x in _lista(p.get("salidas")) if _s(x) in _PLUMAS]
+            if not qs or str(p.get("avanza") or "tiempo").lower() != "tiempo":
+                continue
+            try:
+                seg = float(p.get("segundos") or 0)
+            except (TypeError, ValueError):
+                continue
+            if seg >= PLUMA_MIN_S:
+                continue
+            sig = p.get("siguiente")
+            j = (int(sig) - 1) if str(sig or "").isdigit() else (i + 1)
+            despues = [_s(x) for x in _lista(pasos[j].get("salidas"))] if 0 <= j < len(pasos) else []
+            if all(q in despues for q in qs):
+                continue                              # el siguiente paso la sigue moviendo
+            p["segundos"] = PLUMA_S
+            avisos.append(f"{_s(s.get('id'))} paso {i + 1}: {', '.join(qs)} duraba {seg:g} s (la pluma no alcanza a "
+                          f"moverse); ahora {PLUMA_S:g} s.")
+
+
 def aplicar(respuesta: dict, texto: str = "", textos: list = None) -> tuple:
     if not isinstance(respuesta, dict):
         return respuesta, []
@@ -222,6 +255,7 @@ def aplicar(respuesta: dict, texto: str = "", textos: list = None) -> tuple:
     avisos = []
     try:
         _parpadeo(r, list(textos) if textos else [texto], avisos)
+        _plumas_cortas(r, avisos)
         _reset_contador(r, avisos)
         _arranque_por_defecto(r, texto, avisos)
         _paro_al_terminar(r, texto, avisos)

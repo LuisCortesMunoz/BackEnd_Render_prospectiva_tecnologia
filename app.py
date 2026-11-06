@@ -195,6 +195,10 @@ MARGEN_FINAL_S      = 10.0      # regresion final y armado de la respuesta
 # Sin NINGUN candidato usable todavia (JSON ilegible, preguntas repetidas) se
 # permite otro intento hasta este limite: mejor tarde que "no se pudo".
 TIEMPO_DURO_S       = float(os.environ.get("LAVO_TIEMPO_DURO_S", "140"))
+# Si la simulacion encontro una falla CLARA (orden, comportamiento) se permite un
+# reintento mientras no se pase de este tiempo, aunque el intento anterior fuera
+# lento (banco C9: un intento de 80 s detecto la falla y no se pudo corregir).
+TIEMPO_FALLA_S      = float(os.environ.get("LAVO_TIEMPO_FALLA_S", "90"))
 
 # ─── Variables PLC ────────────────────────────────────────────────
 
@@ -3161,8 +3165,10 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     fuera_pedidas = 0
     for intento in range(1, intentos + 1):
         sin_nada = ultimo_cargable is None and sin_orden is None and sin_comportamiento is None
+        falla_clara = sin_orden is not None or sin_comportamiento is not None
         if (intento > 1 and not _hay_tiempo_para_reintento(t_intento)
-                and not (sin_nada and _segundos_generacion() < TIEMPO_DURO_S)):
+                and not (sin_nada and _segundos_generacion() < TIEMPO_DURO_S)
+                and not (falla_clara and _segundos_generacion() < TIEMPO_FALLA_S)):
             log.warning(f"Banda v7: sin tiempo para el intento {intento}/{intentos} "
                         f"({_segundos_generacion():.0f} s); se entrega lo mejor que hay.")
             metricas_lavo.poner("tope_tiempo", intento - 1)

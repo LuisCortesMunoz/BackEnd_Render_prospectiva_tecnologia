@@ -1048,7 +1048,20 @@ def con_sustituciones(det: dict, textos) -> dict:
                     e["texto"] = re.sub(rf"\b{_COLOR_DE[viejo]}\b", _COLOR_DE[nuevo], e["texto"])
             for viejo, nuevo in subs["t"]:
                 e["tiempos"] = [nuevo if abs(x - viejo) < 0.05 else x for x in e.get("tiempos") or []]
+        # "la espera con la amarilla debe ser de 5 s": solo si UNA etapa con un solo tiempo
+        # nombra esa luz/pluma (si es ambiguo no se toca).
+        for ctx, nuevo in cambios_texto.tiempo_por_contexto(t):
+            raices = {c[:-1] if c[-1] in "ao" and c[:-1] in ("amarill", "roj") else c for c in ctx}
+            cand = [e for e in det.get("etapas") or [] if len(e.get("tiempos") or []) == 1
+                    and any(re.search(rf"\b{re.escape(r)}", _fold_simple(e["texto"])) for r in raices)]
+            if len(cand) == 1:
+                cand[0]["tiempos"] = [nuevo]
     return det
+
+
+def _fold_simple(t) -> str:
+    t = unicodedata.normalize("NFD", str(t or "").lower())
+    return "".join(c for c in t if unicodedata.category(c) != "Mn")
 
 
 def de_historial(historial, dispositivo: str = "banda", acl: dict = None, posteriores=None) -> dict:
