@@ -87,8 +87,13 @@ _RX_TOGGLE = re.compile(r"\b(?:presion\w*|puls\w*|oprim\w*|apriet\w*|tocar\w*|to
                         r"tecla)\b|\b(?:altern\w*|toggle|conmut\w*)\b")
 _RX_TOGGLE_PARO = re.compile(rf"\b{_VERBO_PARO}|\bapag\w*")
 _RX_BOTON_TEXTO = re.compile(r"\b(i ?[12]|boton verde|boton rojo)\b")
+# "al presionar I1, la banda avanza 10 s, se detiene 3 s" es una SECUENCIA que arranca con
+# I1, no un paro con I1: entre el boton y el paro no puede haber un verbo de marcha.
+_SIN_OTRO_NI_MARCHA = (r"(?:(?!\b(?:con|i ?\d|s ?\d|boton|y|e|o|avanz\w*|avanc\w*|arranc\w*|marcha|muev\w*|"
+                       r"pone|ponga)\b)[^.;])")
 _RX_PARO_BOTON = re.compile(rf"\b(?:con|al (?:presionar|pulsar|oprimir)|presionando|pulsando|cuando (?:presione|pulse))\s+"
-                            rf"(?:el |la )?(?:boton |pulsador )?(i ?[12]|boton rojo|boton verde|rojo|verde)\b{_SIN_OTRO}{{0,40}}?\b"
+                            rf"(?:el |la )?(?:boton |pulsador )?(i ?[12]|boton rojo|boton verde|rojo|verde)\b"
+                            rf"{_SIN_OTRO_NI_MARCHA}{{0,40}}?\b"
                             rf"{_VERBO_PARO}|\b(i ?[12])\s+(?:la |lo )?(?:detiene|para|apaga|frena)\b")
 _RX_ARRANQUE_BOTON = re.compile(rf"\b(?:con|al (?:presionar|pulsar|oprimir)|presionando|pulsando|cuando (?:presione|pulse))\s+"
                                 rf"(?:el |la )?(?:boton |pulsador )?(i ?[12]|boton verde|boton rojo)\b{_SIN_OTRO}{{0,40}}?\b"
@@ -192,7 +197,61 @@ _RX_PARO_CONTEO = re.compile(
 # El paro es de un boton, no del conteo ("con I2 se detiene").
 _RX_PARO_DE_BOTON = re.compile(r"\b(?:con|al (?:presionar|pulsar|oprimir)|presionando|pulsando|cuando (?:presione|pulse))"
                                r"\s+(?:el |la )?(?:boton |pulsador )?(?:i ?\d|boton|verde|rojo)")
-_RX_PARO_NEGADO = re.compile(r"\b(?:sin|nunca|jamas)\s+(?:que\s+)?(?:se\s+)?$")
+_RX_PARO_NEGADO = re.compile(r"\b(?:sin|nunca|jamas|ya no|no)\s+(?:que\s+)?(?:se\s+)?(?:la\s+|lo\s+)?$")
+
+# Cambios sobre lo ya pedido (la instruccion mas reciente manda sobre el historial):
+# "cambia el conteo a 5", "5 cajas en lugar de 3", "en vez de 3 que sean 5".
+_RX_CAMBIA_CONTEO = re.compile(
+    rf"\b(?:conteo|contador|cuenta|preset|limite)\b[^.;]{{0,40}}?\b(?:a|en|de|sea|sean)\s+({_NUM_RX})\b{_NO_TIEMPO}|"
+    rf"\b({_NUM_RX})\s+(?:cajas|piezas|objetos|productos|detecciones|conteos)?\s*en (?:lugar|vez) de\s+(?:{_NUM_RX})\b|"
+    rf"\ben (?:lugar|vez) de\s+(?:{_NUM_RX})\s+(?:cajas|piezas|objetos|productos|detecciones|conteos)?\s*,?\s*"
+    rf"(?:que sean|sean|a|que llegue a)\s+({_NUM_RX})\b{_NO_TIEMPO}")
+_RX_VERBO_CAMBIO = re.compile(r"\b(?:cambi\w*|pon\w*|ajust\w*|modific\w*|aument\w*|reduc\w*|que sea\w*|en (?:lugar|vez) de)\b")
+# "ya no se detiene", "que no se detenga", "sin detenerse": QUITA el paro automatico.
+# ("no se detiene" solo, en presente, es una queja: pide que SI se detenga.)
+_RX_YA_NO_PARA = re.compile(r"\bya no (?:se |la |lo )?(?:deten\w*|detien\w*|deteng\w*|par[ae]n?)\b|"
+                            r"\bque no se (?:detenga|pare)\b|\bsin (?:que se )?deten\w*|\bsin parar(?:se)?\b|"
+                            r"\bno (?:debe|tiene que|necesita) (?:detenerse|parar\w*)\b")
+
+
+def cambio_conteo(texto: str):
+    """N si el texto CAMBIA el numero de un conteo ya pedido ('cambia el conteo a 5');
+    None si no."""
+    t = _fold(texto)
+    if not _RX_VERBO_CAMBIO.search(t):
+        return None
+    m = _RX_CAMBIA_CONTEO.search(t)
+    if not m:
+        return None
+    n = int(_numero(next(g for g in m.groups() if g)))
+    return n if 1 < n <= 20 else None
+
+
+def quita_paro(texto: str) -> bool:
+    """'ya no se detiene' QUITA el paro automatico, salvo que la misma frase siga
+    hablando de un paro o un tiempo despues ("en la tercera ya no se detiene, pasa
+    directo a los 5 segundos": cambia una pausa, el paro final sigue)."""
+    t = _fold(texto)
+    m = _RX_YA_NO_PARA.search(t)
+    if not m:
+        return False
+    despues = t[m.end():]
+    if _RX_TIEMPO.search(despues) or re.search(r"\b(?:pasa directo|directo a)\b", despues) or \
+            _RX_PARO_SOLA.search(despues) or re.search(rf"\b{_VERBO_PARO}\b", despues):
+        return False
+    return True
+
+
+# Si nadie dice con que arranca, la banda arranca con I1 (la regla del prompt y de
+# reparaciones_banda); un arranque por sensor o "siempre" no se toca.
+_RX_AVANZA = re.compile(r"\b(avanc\w*|avanz\w*|se mueva|muev\w*|pone en marcha|ponga en marcha|arranc\w*|arranqu\w*)\b")
+_RX_ARRANQUE_OTRO = re.compile(r"\b(?:i ?[12]|boton|pulsador|siempre (?:en marcha|avanzando|encendida|activa)|"
+                               r"(?:avance|avanza|corra|corre|gire|gira|funcione|este en marcha) siempre|al encender|"
+                               r"al iniciar|al cargar|automaticamente al)\b|"
+                               # "cuando S1 detecte, la banda arranca": arranque por sensor (no "acumule 3... continue")
+                               r"\b(?:cuando|al|si|en cuanto)\s+(?:el |la )?(?:sensor\s*|s ?)[12]"
+                               r"(?:(?!acumul|cuent|cont[aeo]|detecciones|continu|sigue|siga)[^.;]){0,50}"
+                               r"\b(?:avanc\w*|avanz\w*|arranc\w*|marcha|muev\w*|invierte|invertir)")
 
 
 def paro_por_conteo(texto: str) -> dict:
@@ -226,7 +285,11 @@ def paro_por_conteo(texto: str) -> dict:
         seg = 0.0
         if tm:
             seg = _numero(tm.group(1)) * (60 if tm.group(2).startswith("min") else 1)
-        return {"conteo": c["conteo"], "senal": c["senal"], "segundos": seg}
+        # Se pide un NUEVO ciclo ("el contador se reinicia", "nuevo ciclo"): tras el paro,
+        # el arranque normal debe volver a mover la banda (se prueba en la simulacion).
+        ciclo = bool(c.get("reinicia")) or bool(re.search(
+            r"\b(?:nuevo ciclo|nueva secuencia|reinici\w*|vuelv\w* a (?:contar|empezar|arrancar)|otro ciclo)\b", t))
+        return {"conteo": c["conteo"], "senal": c["senal"], "segundos": seg, "rearranque": ciclo}
     return {}
 
 
@@ -284,6 +347,28 @@ def requisitos(textos) -> list:
         if tg:
             reqs = [r for r in reqs if r["tipo"] != "toggle"]
             reqs.append({"tipo": "toggle", **tg, "texto": _fold(texto).strip()[:160]})
+        # Cambios sobre lo ya pedido: la instruccion mas reciente manda.
+        n = None if conteo_en(texto) else cambio_conteo(texto)
+        if n:
+            for r in reqs:
+                if r.get("conteo"):
+                    r["conteo"] = n
+        if quita_paro(texto):
+            # "Al llegar a 4 ya no se detiene": se quita el paro y, si era del conteo,
+            # se exige lo contrario (que siga avanzando al contar).
+            viejos = [r for r in reqs if r["tipo"] == "para_sola"]
+            reqs = [r for r in reqs if r["tipo"] not in ("para_sola", "sigue_al_contar")]
+            cont = next((r for r in viejos if r.get("conteo")), None) or \
+                next((r for r in reqs if r["tipo"] == "conteo"), None)
+            if cont:
+                reqs.append({"tipo": "sigue_al_contar", "conteo": cont["conteo"], "senal": cont["senal"],
+                             "texto": _fold(texto).strip()[:160]})
+    # Arranque por defecto: si nadie dijo con que arranca, I1.
+    todo = " ".join(_fold(t) for t in textos or [])
+    if (not any(r["tipo"] in ("arranca_con", "toggle") for r in reqs) and _RX_CTX_BANDA.search(todo)
+            and _RX_AVANZA.search(todo) and not _RX_ARRANQUE_OTRO.search(todo)):
+        reqs.append({"tipo": "arranca_con", "senal": "I1", "defecto": True,
+                     "texto": "no se dijo con que arranca: con I1"})
     # "al contar 3 cajas se detenga sola" ya lo prueba para_sola (con su conteo), salvo
     # que el contador ademas se reinicie (eso lo prueba el requisito "conteo").
     if any(r["tipo"] == "para_sola" and r.get("conteo") for r in reqs):
@@ -527,6 +612,16 @@ def _verificar_req(band: dict, r: dict, arranque: list) -> list:
             problemas.append(f"Al presionar {r['senal']} la banda NO se detiene.")
     elif r["tipo"] == "para_sola":
         problemas += _probar_para_sola(s, r, band, arranque)
+    elif r["tipo"] == "sigue_al_contar":
+        n, senal = int(r["conteo"]), r["senal"]
+        sensor = "I4" if senal == "S1" else "I5"
+        for _ in range(n):
+            s.pulsar(sensor, 0.3)
+            s.correr(0.7)
+        s.correr(4.0)
+        if not _corre(s):
+            problemas.append(f"Al contar {n} en {senal} la banda se detiene, y se pidió que ya NO se detenga "
+                             f"(quita el paro del motor por el contador y deja solo las otras acciones).")
     return problemas
 
 
@@ -776,4 +871,16 @@ def _probar_paro_conteo(s, r, band=None, arranque=None) -> list:
     s.correr(_QUIETA_S)
     if _corre(s):
         return [f"Despues de detenerse al contar {n} en {senal}, la banda vuelve a arrancar sola sin tocar nada."]
+    # Nuevo ciclo: terminadas las acciones (salidas quietas), el arranque normal la vuelve a mover.
+    if arranque and r.get("rearranque"):
+        t = 0.0
+        while s.salidas() and t < 15:
+            s.correr(0.5)
+            t += 0.5
+        _arrancar(s, arranque)
+        s.correr(_ARRANQUE_S)
+        if not _corre(s):
+            return [f"Despues del paro automatico al contar {n} en {senal}, al presionar {', '.join(arranque)} la "
+                    f"banda ya no vuelve a arrancar (el paro del motor se queda activo: usa una senal que se "
+                    f"libere, p. ej. el pulso SQ1_CICLO o el timer de la accion, no una condicion que siga activa)."]
     return []

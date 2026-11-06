@@ -166,7 +166,8 @@ activa = copy.deepcopy(s.logic)
 escenario("6. Si el modelo insiste en perder piezas, se entrega avisando que piezas se quitaron")
 r = s.enviar("Agrega que la roja encienda cuando la banda este detenida",
              j([S1], salidas={"Q5": "BANDA_DETENIDA"}),
-             j([S1], salidas={"Q5": "BANDA_DETENIDA"}))
+             j([S1], salidas={"Q5": "BANDA_DETENIDA"}),
+             j([S1], salidas={"Q5": "BANDA_DETENIDA"}))   # 3a: la huella ve que se perdio la pausa de S2
 check(r.status == "ok", f"se entrega sin pedir confirmar ({r.status})")
 check(any("no pedia quitar" in x for x in r.warnings), f"avisa que se quitaron piezas: {r.warnings}")
 check(s.logic != activa, "pasa a ser la logica activa (si no es lo pedido, el usuario pide corregirlo)")

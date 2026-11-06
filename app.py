@@ -146,6 +146,8 @@ import constructores_banda
 import reglas_banda
 import extractor_banda
 import regresion_banda
+import huella_banda
+import reparaciones_banda
 import enlace_lentes
 try:
     import memoria_validada
@@ -189,6 +191,9 @@ MAX_AUTOREVISIONES  = int(os.environ.get("MAX_AUTOREVISIONES", "3"))
 # 100 s la respuesta siempre llega. LAVO_TIEMPO_MAX_S=0 lo desactiva.
 TIEMPO_MAX_S        = float(os.environ.get("LAVO_TIEMPO_MAX_S", "100"))
 MARGEN_FINAL_S      = 10.0      # regresion final y armado de la respuesta
+# Sin NINGUN candidato usable todavia (JSON ilegible, preguntas repetidas) se
+# permite otro intento hasta este limite: mejor tarde que "no se pudo".
+TIEMPO_DURO_S       = float(os.environ.get("LAVO_TIEMPO_DURO_S", "140"))
 
 # ─── Variables PLC ────────────────────────────────────────────────
 
@@ -3123,8 +3128,23 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     intentos = max(1, MAX_AUTOREVISIONES)
     msgs_iter = list(messages)
     ultimo_cargable, t_intento = None, None
+    # Reparaciones deterministas (reparaciones_banda) con el texto de toda la sesion.
+    texto_sesion = " ".join([str(h) for h in historial] + [texto])
+    ajustes_de = {}                     # id(cand) -> avisos de lo que se ajusto
+    # Huella (huella_banda): con logica vigente se compara lo que HACE la version
+    # nueva con la vigente: cambios fuera de lo pedido o un cambio sin efecto.
+    zona_h = zona if zona is not None else (edicion_incremental.localizar(texto, etapas) if prev else None)
+    huella_prev = None
+    if cfg_prev is not None:
+        try:
+            huella_prev = huella_banda.huella(cfg_prev)
+        except Exception as e:                       # la huella nunca debe tumbar la generacion
+            log.warning(f"Banda v7: huella de la version vigente no disponible ({e}).")
+    fuera_pedidas = 0
     for intento in range(1, intentos + 1):
-        if intento > 1 and not _hay_tiempo_para_reintento(t_intento):
+        sin_nada = ultimo_cargable is None and sin_orden is None and sin_comportamiento is None
+        if (intento > 1 and not _hay_tiempo_para_reintento(t_intento)
+                and not (sin_nada and _segundos_generacion() < TIEMPO_DURO_S)):
             log.warning(f"Banda v7: sin tiempo para el intento {intento}/{intentos} "
                         f"({_segundos_generacion():.0f} s); se entrega lo mejor que hay.")
             metricas_lavo.poner("tope_tiempo", intento - 1)
@@ -3170,7 +3190,12 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                                           "analisis": candidato.get("analisis") or {}})
         try:
             candidato = aclaraciones.aplicar_banda_v7(candidato, acl)
+            candidato, ajustes = reparaciones_banda.aplicar(candidato, texto_sesion)
+            if ajustes:
+                log.info(f"Banda v7 ajustes deterministas: {ajustes}")
+                metricas_lavo.sumar("ajustes", len(ajustes))
             cand = lavo_motor.cfg_desde_respuesta(candidato)
+            ajustes_de[id(cand)] = ajustes
             cand["respuesta_llm"] = {k: v for k, v in candidato.items()
                                      if k not in ("analisis", "preguntas", "no_soportado")}
             errores = validar_logica_banda(cand)
@@ -3265,6 +3290,30 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                     msgs_iter.append({"role": "assistant", "content": json.dumps(candidato, ensure_ascii=False)})
                     msgs_iter.append({"role": "user", "content": texto_falla})
                     continue
+        if not errores and huella_prev and intento < intentos and _hay_tiempo_para_reintento(t_intento):
+            try:
+                difs_h = huella_banda.comparar(huella_prev, huella_banda.huella(cand))
+            except Exception as e:
+                log.warning(f"Banda v7: huella no disponible ({e}).")
+                difs_h = None
+            if difs_h is not None:
+                fuera = huella_banda.fuera_de_zona(difs_h, zona_h)
+                texto_h = None
+                # Solo cambios FUERA de lo pedido. "Sin efecto" no se juzga con la huella:
+                # la bateria fija no reproduce cada historia (S1 -> S2 con pausa...) y
+                # veria iguales dos programas distintos; eso lo cubren misma_logica y
+                # los requisitos simulados.
+                if fuera and fuera_pedidas < 2:
+                    fuera_pedidas += 1
+                    metricas_lavo.sumar("huella_fuera_de_zona", 1)
+                    texto_h = huella_banda.mensaje(fuera)
+                if texto_h:
+                    log.warning(f"Banda v7 huella {intento}/{intentos}: {texto_h[:300]}")
+                    ultimo_cargable = (cand, candidato)
+                    msgs_iter = list(messages)
+                    msgs_iter.append({"role": "assistant", "content": json.dumps(candidato, ensure_ascii=False)})
+                    msgs_iter.append({"role": "user", "content": texto_h})
+                    continue
         if not errores:
             cfg = cand
             break
@@ -3329,12 +3378,21 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         compat["compatibilidad"] = "ninguna"
         return LogicaResponse(
             logic={}, name="", outputs=0, device="banda", status="not_supported",
-            warnings=["No se encontro una configuracion segura para esta instruccion: "
-                      + "; ".join(errores)],
+            warnings=["No se encontro una configuracion segura para esta instruccion: " + "; ".join(errores)
+                      if errores else "El modelo no devolvió una configuración usable a tiempo. Intenta de nuevo."],
             analysis={"equipo": "banda", "motor_v7": True, "compatibilidad": compat, "contexto": plan})
 
     if perdidas:
         avisos_extra.append(edicion_incremental.aviso_perdidas(perdidas))
+    avisos_extra += ["Ajuste automático: " + a for a in ajustes_de.get(id(cfg), [])]
+    if huella_prev:
+        try:
+            fuera_final = huella_banda.fuera_de_zona(huella_banda.comparar(huella_prev, huella_banda.huella(cfg)), zona_h)
+            if fuera_final:
+                metricas_lavo.poner("huella_fuera_final", len(fuera_final))
+                avisos_extra.append(huella_banda.aviso(fuera_final))
+        except Exception as e:
+            log.warning(f"Banda v7: huella final no disponible ({e}).")
 
     return _respuesta_banda_v7(texto, cfg, analisis_llm, extra={
         "fuente": "modelo", "contexto": plan, "edicion": bool(prev),
