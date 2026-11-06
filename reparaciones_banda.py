@@ -134,7 +134,25 @@ def _paro_al_terminar(r: dict, texto: str, avisos: list):
     if str(motor.get("modo") or "enclavado").lower() not in ("enclavado", ""):
         return
     arr = _s(motor.get("arranque"))
-    for s in [s for s in _lista(r.get("secuencias")) if isinstance(s, dict)]:
+    seqs = [s for s in _lista(r.get("secuencias")) if isinstance(s, dict)]
+    # Banco C12: "avance 5 s y se detenga por si sola" armado como UNA secuencia de un
+    # paso de marcha: termina en marcha y el motor enclavado sigue. Si el texto pide
+    # EXPLICITAMENTE el paro solo (o tras el conteo) y es la unica que mueve la banda,
+    # se le agrega el paso de paro (y abajo, el paro con SQk_CICLO).
+    import comportamiento
+    pide_solo = comportamiento.pide_paro_solo(texto) or bool(comportamiento.paro_por_conteo(texto))
+    mueven = [s for s in seqs if _mueve(s) and not _repite(s)]
+    if pide_solo and len(mueven) == 1 and not _termina_detenida(mueven[0]):
+        ultimo = [p for p in _lista(mueven[0].get("pasos")) if isinstance(p, dict)][-1]
+        termina = str(ultimo.get("siguiente") or "fin").strip().lower() == "fin"   # no regresa a otro paso
+        if str(ultimo.get("avanza") or "tiempo").lower() == "tiempo" and termina:
+            mueven[0]["pasos"] = _lista(mueven[0].get("pasos")) + [
+                {"motor": ["paro"], "avanza": "tiempo", "segundos": 0.5}]
+            if "siguiente" in ultimo and str(ultimo.get("siguiente") or "").lower() == "fin":
+                ultimo.pop("siguiente")
+            avisos.append(f"{_s(mueven[0].get('id'))} terminaba con la banda en marcha y se pidió que se detenga "
+                          f"sola: se agregó el paso de paro al final.")
+    for s in seqs:
         sid = _s(s.get("id"))
         if not sid or not _mueve(s) or not _termina_detenida(s) or _repite(s) or arr.startswith(sid + "_"):
             continue

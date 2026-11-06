@@ -99,8 +99,8 @@ def detectar(textos, acl: dict = None) -> dict:
     if not textos:
         return None
     todo = " ".join(_fold(x) for x in textos)
-    if _RX_FUERA.search(todo):
-        return None
+    if _RX_FUERA.search(todo) or co.pausa_por_deteccion(todo):
+        return None                     # pausas por deteccion ("se espere 3 s"): no es este patron
     # El conteo y el paro: de la instruccion que los dice (la ultima que los diga).
     pc, base = None, None
     for x in textos:

@@ -41,10 +41,20 @@ _NUM = {"un": 1, "una": 1, "uno": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 
 _NUM_RX = r"\d+(?:[.,]\d+)?|" + "|".join(sorted(_NUM, key=len, reverse=True))
 
 
+# Errores de escritura frecuentes (dictado, teclado de los lentes) que cambian el sentido:
+# "se detenga por sis ola" -> "por si sola".
+_TYPOS = [(re.compile(r"\bsis\s+ola\b"), "si sola"), (re.compile(r"\bporsi\b"), "por si"),
+          (re.compile(r"\bpor\s+sis\b"), "por si"), (re.compile(r"\bsi\s+sola\b"), "si sola"),
+          (re.compile(r"\bbotn\b"), "boton"), (re.compile(r"\bsensr\b"), "sensor")]
+
+
 def _fold(texto) -> str:
     t = unicodedata.normalize("NFD", str(texto or "").lower())
     t = "".join(c for c in t if unicodedata.category(c) != "Mn")
-    return re.sub(r"\s+", " ", t)
+    t = re.sub(r"\s+", " ", t)
+    for rx, bien in _TYPOS:
+        t = rx.sub(bien, t)
+    return t
 
 
 def _numero(s) -> float:
@@ -99,14 +109,17 @@ _RX_PARO_BOTON = re.compile(rf"\b(?:con|al (?:presionar|pulsar|oprimir)|presiona
 _RX_ARRANQUE_BOTON = re.compile(rf"\b(?:con|al (?:presionar|pulsar|oprimir)|presionando|pulsando|cuando (?:presione|pulse))\s+"
                                 rf"(?:el |la )?(?:boton |pulsador )?(i ?[12]|boton verde|boton rojo)\b{_SIN_OTRO}{{0,40}}?\b"
                                 r"(?:arranc\w*|avanc\w*|avanz\w*|muev\w*|se pone en marcha)|"
-                                r"\barranca\w* con (?:el |la )?(?:boton |pulsador )?(i ?[12])\b")
+                                r"\b(?:arranca\w*|avanz\w*|avanc\w*|mover|mueve)\s+(?:la banda\s+|la cinta\s+)?"
+                                r"con (?:el |la )?(?:boton |pulsador )?(i ?[12])\b")
 
 
 # "Cuando S2 cuente 3 cajas prende la roja 5 s y que el contador se reinicie solo",
 # "cada 3 piezas en S1 sube la pluma", "al llegar a 4 detecciones ...".
 _NO_TIEMPO = r"(?!\s*(?:[.,]\d|s\b|seg|segundos?|min|minutos?|hz|hertz|%|veces por))"
 _RX_CUENTA_N = re.compile(rf"\b(?:cuente\w*|contar|cuenta|cont[oae]\w*|llegu\w* a|llegar a|lleg[ao] a|acumul\w*|"
-                          rf"complet\w*|registr\w*|cada|despues de|al pasar|pasen)\s+(?:a\s+)?({_NUM_RX})\b{_NO_TIEMPO}"
+                          rf"complet\w*|registr\w*|cada|despues de|al pasar|pasen)\s+(?:a\s+)?"
+                          # "llegue a un contador de 3", "llegue a un conteo de 3": el "un" no es el numero
+                          rf"(?:(?:un|el)\s+(?:contador|conteo|total|numero|valor)\s+de\s+)?({_NUM_RX})\b{_NO_TIEMPO}"
                           rf"(?:\s+(cajas|piezas|objetos|productos|detecciones|conteos|pulsos))?")
 _RX_HAY_CONTEO = re.compile(r"\b(contador\w*|conteo\w*|cuent\w*|cont[ae]\w*|acumul\w*|detecciones|cajas|piezas|"
                             r"objetos|productos)\b")
@@ -265,10 +278,25 @@ _RX_PAUSA_SENSOR = re.compile(
     r"reanud\w*|retom\w*)")
 
 
+# "Cada que el sensor uno detecte se espere 3 segundos antes de avanzar".
+_RX_PAUSA_ESPERA = re.compile(
+    r"\b(?:sensor\s*|s\s?)([12]|uno|dos)\b[^.]{0,60}?\b(?:se\s+)?(?:esper\w*|aguard\w*)\s+"
+    r"(?:durante\s+|por\s+)?(\d+(?:[.,]\d+)?|un|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s*"
+    r"(?:s|seg|segundos?)\b[^.;]{0,30}?\b(?:antes de|y (?:luego|despues)?\s*)\s*(?:volver a\s+)?"
+    r"(?:avanz\w*|avanc\w*|continu\w*|segui\w*|sig\w*|arranc\w*|mover\w*)")
+
+
 def pausa_por_deteccion(texto: str) -> dict:
     """{"senal": S1|S2, "segundos": N} si pide que, cada vez que el sensor detecta, la
     banda se detenga N s y luego siga sola; {} si no."""
-    m = _RX_PAUSA_SENSOR.search(_fold(texto))
+    t = _fold(texto)
+    m = _RX_PAUSA_SENSOR.search(t)
+    if not m:
+        m = _RX_PAUSA_ESPERA.search(t)
+        if m:
+            n = _numero(m.group(2))
+            s = {"uno": "1", "dos": "2"}.get(m.group(1), m.group(1))
+            return {"senal": f"S{s}", "segundos": n} if 0 < n <= 60 else {}
     if not m:
         return {}
     n = _numero(m.group(2))
@@ -492,6 +520,16 @@ def requisitos(textos) -> list:
     for r in reqs:
         if r["tipo"] == "pausa_sensor" and rep and rep["senal"] == r["senal"]:
             r["ciclos"] = max(1, min(2, int(rep["veces"]) - 1))
+    # Pausa y paro por conteo en el MISMO sensor: la prueba del paro espera cada pausa; la
+    # prueba suelta del conteo no aplica (veria la banda detenida en cada caja) y el
+    # reinicio lo prueba el nuevo ciclo del paro.
+    pausa = next((r for r in reqs if r["tipo"] == "pausa_sensor"), None)
+    if pausa:
+        for r in reqs:
+            if r["tipo"] == "para_sola" and r.get("conteo") and r.get("senal") == pausa["senal"]:
+                r["pausa_s"] = pausa["segundos"]
+                reqs = [x for x in reqs if not (x["tipo"] == "conteo" and x.get("senal") == pausa["senal"])]
+                break
     # "al contar 3 cajas se detenga sola" ya lo prueba para_sola (con su conteo), salvo
     # que el contador ademas se reinicie (eso lo prueba el requisito "conteo").
     if any(r["tipo"] == "para_sola" and r.get("conteo") for r in reqs):
@@ -969,14 +1007,33 @@ def _probar_paro_conteo(s, r, band=None, arranque=None) -> list:
     n, senal = int(r["conteo"]), r["senal"]
     sensor = "I4" if senal == "S1" else "I5"
     seg = float(r.get("segundos") or 0)
+    pausa = float(r.get("pausa_s") or 0)       # el mismo sensor tambien pausa la banda en cada deteccion
     for k in range(n):
         if not _corre(s):
             return [f"La banda se detiene antes de contar {n} cajas en {senal} (se detuvo en la caja {k})."]
         s.pulsar(sensor, 0.3)
         if k < n - 1:
             s.correr(0.7)
+            t = 0.0
+            while pausa and not _corre(s) and t < pausa + 4:     # su pausa: espera a que reanude
+                s.correr(0.5)
+                t += 0.5
+    if pausa:
+        # Con pausa en el mismo sensor el momento exacto depende del diseño (pausa y luego
+        # el avance, o el avance directo): se exige que avance despues de la caja N y que
+        # termine detenida.
+        avanzo, t = False, 0.0
+        while t < pausa + seg + 4:
+            s.correr(0.5)
+            t += 0.5
+            avanzo = avanzo or _corre(s)
+        if seg and not avanzo:
+            return [f"Al contar {n} en {senal} la banda ya no avanza los {_fmt(seg)} s pedidos."]
+        if _corre(s):
+            return [f"Al contar {n} en {senal} la banda NO se detiene sola despues de avanzar {_fmt(seg)} s."]
+        band = None                           # el control por tiempo no aplica con pausas
     # Desde el objeto N (los timers del PLC van por pulsos de 1 s: +-1 s de margen).
-    if seg:
+    elif seg:
         sigue = max(0.0, seg - 1.3)
         if sigue:
             s.correr(sigue)
