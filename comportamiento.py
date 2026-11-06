@@ -23,6 +23,7 @@ reconoce no se inventa (el resto lo sigue revisando el validador de siempre).
 import re
 import unicodedata
 
+import cache_simulacion
 import lavo_motor as lm
 
 # Tope de tiempo simulado por prueba (s): sin condicion dicha, la banda debe
@@ -424,38 +425,52 @@ def verificar(cfg: dict, reqs: list) -> list:
         for r in reqs:
             if time.monotonic() > limite:
                 break                     # sin tiempo: lo que falta no se reporta como falla
-            s = _sim(band)
-            if r["tipo"] == "toggle":
-                problemas += _probar_toggle(s, r)
-                continue
-            if r["tipo"] == "conteo":
-                # No exige que la banda corra (un conteo puede manejar solo luces o plumas).
-                s._band_conteo = band
-                _arrancar(s, arranque)
-                s.correr(_ARRANQUE_S)
-                problemas += _probar_conteo(s, r, arranque)
-                continue
-            if r["tipo"] == "arranca_con":
-                _arrancar(s, [r["senal"]])
-                s.correr(_ARRANQUE_S)
-                if not _corre(s):
-                    problemas.append(f"Al presionar {r['senal']} la banda no arranca.")
-                continue
-            _arrancar(s, arranque)
-            s.correr(_ARRANQUE_S)
-            if not _corre(s):
-                problemas.append("La banda no arranca" + (f" con {', '.join(arranque)}" if arranque else "")
-                                 + f", asi que no se puede comprobar: «{r['texto']}».")
-                continue
-            if r["tipo"] == "para_con":
-                s.pulsar(r["senal"])
-                s.correr(_FRENO_S)
-                if _corre(s):
-                    problemas.append(f"Al presionar {r['senal']} la banda NO se detiene.")
-            elif r["tipo"] == "para_sola":
-                problemas += _probar_para_sola(s, r)
+            # Cada requisito se simula aparte: el resultado se reutiliza (cache)
+            # cuando el mismo programa vuelve a probarse con el mismo requisito.
+            prueba = {"r": r, "arranque": arranque}
+            fallas = cache_simulacion.obtener("comportamiento", band, prueba)
+            if fallas is None:
+                fallas = _verificar_req(band, r, arranque)
+                cache_simulacion.guardar("comportamiento", band, prueba, fallas)
+            problemas += fallas
     except ValueError as e:
         problemas.append(str(e))
+    return problemas
+
+
+def _verificar_req(band: dict, r: dict, arranque: list) -> list:
+    """Fallas de UN requisito en una simulacion nueva (lo que verificar hacia por cada r)."""
+    problemas = []
+    s = _sim(band)
+    if r["tipo"] == "toggle":
+        problemas += _probar_toggle(s, r)
+        return problemas
+    if r["tipo"] == "conteo":
+        # No exige que la banda corra (un conteo puede manejar solo luces o plumas).
+        s._band_conteo = band
+        _arrancar(s, arranque)
+        s.correr(_ARRANQUE_S)
+        problemas += _probar_conteo(s, r, arranque)
+        return problemas
+    if r["tipo"] == "arranca_con":
+        _arrancar(s, [r["senal"]])
+        s.correr(_ARRANQUE_S)
+        if not _corre(s):
+            problemas.append(f"Al presionar {r['senal']} la banda no arranca.")
+        return problemas
+    _arrancar(s, arranque)
+    s.correr(_ARRANQUE_S)
+    if not _corre(s):
+        problemas.append("La banda no arranca" + (f" con {', '.join(arranque)}" if arranque else "")
+                         + f", asi que no se puede comprobar: «{r['texto']}».")
+        return problemas
+    if r["tipo"] == "para_con":
+        s.pulsar(r["senal"])
+        s.correr(_FRENO_S)
+        if _corre(s):
+            problemas.append(f"Al presionar {r['senal']} la banda NO se detiene.")
+    elif r["tipo"] == "para_sola":
+        problemas += _probar_para_sola(s, r)
     return problemas
 
 

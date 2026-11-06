@@ -19,6 +19,7 @@ Asi TODO lo entendido se prueba, no solo lo que reconocia algun detector.
 import re
 import time
 
+import cache_simulacion
 import comportamiento as co
 
 RECURSOS = {"banda": ("avanzar", "detener", "pausar"),
@@ -229,6 +230,17 @@ def verificar(cfg: dict, r: dict, presupuesto_s: float = PRESUPUESTO_S) -> list:
     band = (cfg or {}).get("band") or {}
     if (band.get("engine") or {}).get("version") != 7 or not r:
         return []
+    # El mismo programa con las mismas reglas da lo mismo: se reutiliza (cache).
+    fallas = cache_simulacion.obtener("reglas", band, r)
+    if fallas is None:
+        fallas, completo = _verificar(band, r, presupuesto_s)
+        if completo:
+            cache_simulacion.guardar("reglas", band, r, fallas)
+    return fallas
+
+
+def _verificar(band: dict, r: dict, presupuesto_s: float):
+    """(fallas, completo); completo=False si se acabo el tiempo."""
     reglas = r.get("reglas") or []
     # Una salida que manejan varias reglas no se prueba sola (depende del orden de los disparos).
     usos = {}
@@ -245,7 +257,7 @@ def verificar(cfg: dict, r: dict, presupuesto_s: float = PRESUPUESTO_S) -> list:
                 continue                          # lo prueba comportamiento (conteo, 2 rondas)
             for h in x["hacer"]:
                 if time.monotonic() > limite:
-                    return problemas              # sin tiempo: lo que falta no se reporta
+                    return problemas, False       # sin tiempo: lo que falta no se reporta
                 if "banda" in c:
                     problemas += _probar_mientras(band, c["banda"], h, arranque)
                     continue
@@ -263,7 +275,7 @@ def verificar(cfg: dict, r: dict, presupuesto_s: float = PRESUPUESTO_S) -> list:
                     problemas += _probar_salida(band, senal, h)
     except ValueError as e:
         problemas.append(str(e))
-    return problemas
+    return problemas, True
 
 
 def _desc(senal, h) -> str:

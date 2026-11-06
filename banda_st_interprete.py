@@ -60,11 +60,23 @@ def _tokens(texto):
 
 
 class _Traductor:
-    def __init__(self, toks, arreglos):
+    def __init__(self, toks, arreglos, locales=True):
         self.t = toks
         self.i = 0
         self.arr = arreglos
         self.lineas = []
+        # locales=True: cada variable del ST es una variable local de scan()
+        # (se lee de V al entrar y las asignadas se devuelven a V al salir).
+        # Mismo resultado que V['X'] en cada acceso, ~2x mas rapido.
+        self.locales = locales
+        self.nombres = set()      # todas las variables que aparecen
+        self.asignados = set()    # las que el ST escribe sin indice
+
+    def var(self, nombre):
+        if not self.locales:
+            return f"V['{nombre}']"
+        self.nombres.add(nombre)
+        return f"v_{nombre}"
 
     def ver(self, k=0):
         return self.t[self.i + k] if self.i + k < len(self.t) else (None, None)
@@ -94,7 +106,7 @@ class _Traductor:
                 if v in _KW_EXPR:
                     partes.append(_KW_EXPR[v])
                 else:
-                    partes.append(f"V['{v}']")
+                    partes.append(self.var(v))
             elif k == "num":
                 partes.append(v)
             elif v == "=":
@@ -147,7 +159,8 @@ class _Traductor:
             b = self.expr({"DO"})
             self.tomar("DO")
             self.emitir(nivel, f"for _{var} in range({a}, ({b}) + 1):")
-            self.emitir(nivel + 1, f"V['{var}'] = _{var}")
+            self.emitir(nivel + 1, f"{self.var(var)} = _{var}")
+            self.asignados.add(var)
             self.bloque(nivel + 1, {"END_FOR"})
             self.tomar("END_FOR")
             return
@@ -185,18 +198,19 @@ class _Traductor:
             idx = self.expr({"]"})
             self.tomar("]")
             self.arr.add(nombre)
-            destino = f"V['{nombre}'][{idx}]"
+            destino = f"{self.var(nombre)}[{idx}]"
         else:
-            destino = f"V['{nombre}']"
+            destino = self.var(nombre)
+            self.asignados.add(nombre)
         self.tomar(":=")
         self.emitir(nivel, f"{destino} = {self.expr({';'})}")
         self.tomar(";")
 
 
-def compilar_st(texto):
+def compilar_st(texto, locales=True):
     """Texto ST -> (funcion scan(V), conjunto de arreglos)."""
     arreglos = set()
-    tr = _Traductor(_tokens(texto), arreglos)
+    tr = _Traductor(_tokens(texto), arreglos, locales)
     while tr.i < len(tr.t):
         tr.sentencia(1)
     # Tambien son arreglos los que solo se leen con indice.
@@ -204,6 +218,14 @@ def compilar_st(texto):
     for j in range(len(toks) - 1):
         if toks[j][0] == "id" and toks[j + 1][1] == "[":
             arreglos.add(toks[j][1])
+    if locales:
+        # Entrada: todas las variables desde V (las que faltan valen 0, como
+        # _Vars.__missing__); salida: las escalares asignadas vuelven a V.
+        # Los arreglos son el mismo objeto, asi que se escriben en su lugar.
+        entrada = [f"    v_{n} = V['{n}']" for n in sorted(tr.nombres)]
+        escalares = sorted(tr.asignados - arreglos)
+        salida = [f"    V['{n}'] = v_{n}" for n in escalares]
+        tr.lineas = entrada + tr.lineas + salida
     fuente = "def scan(V):\n" + "\n".join(tr.lineas) + "\n"
     ns = {}
     exec(compile(fuente, "<st>", "exec"), ns)

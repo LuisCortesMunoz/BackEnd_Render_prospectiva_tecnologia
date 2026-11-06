@@ -182,6 +182,13 @@ MAX_EJEMPLOS_PROMPT = 3
 # corrigiendo sus PROPIOS errores de validacion antes de rendirse. Cada intento
 # extra es otra llamada a Groq, por eso se mantiene bajo (3).
 MAX_AUTOREVISIONES  = int(os.environ.get("MAX_AUTOREVISIONES", "3"))
+# Tope de tiempo de una generacion de la banda (desde que llega la peticion,
+# incluida la espera en la fila). Un reintento solo empieza si, al ritmo del
+# intento anterior, termina antes del tope; si no, se entrega lo mejor que ya
+# se tiene (o se conserva la version vigente). Unity corta a los 150 s: con
+# 100 s la respuesta siempre llega. LAVO_TIEMPO_MAX_S=0 lo desactiva.
+TIEMPO_MAX_S        = float(os.environ.get("LAVO_TIEMPO_MAX_S", "100"))
+MARGEN_FINAL_S      = 10.0      # regresion final y armado de la respuesta
 
 # ─── Variables PLC ────────────────────────────────────────────────
 
@@ -2900,6 +2907,20 @@ def _programa_previo_v7(req) -> Optional[dict]:
     return None
 
 
+def _segundos_generacion() -> float:
+    """Segundos desde que llego la peticion (metricas_lavo la marca al entrar)."""
+    m = metricas_lavo.actual()
+    return time.perf_counter() - m["_t0"] if m and "_t0" in m else 0.0
+
+
+def _hay_tiempo_para_reintento(t_intento) -> bool:
+    """Otro intento cabe si, durando lo que duro el anterior, termina antes del tope."""
+    if TIEMPO_MAX_S <= 0 or t_intento is None:
+        return True
+    ultimo = time.perf_counter() - t_intento
+    return _segundos_generacion() + ultimo + MARGEN_FINAL_S <= TIEMPO_MAX_S
+
+
 def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaResponse":
     """MOTOR LAVO v7: texto -> (memoria validada) -> LLM (bloques + analisis)
     -> lavo_motor (validacion, compilacion determinista, compatibilidad).
@@ -3101,7 +3122,21 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     cfg, errores, candidato = None, [], {}
     intentos = max(1, MAX_AUTOREVISIONES)
     msgs_iter = list(messages)
+    ultimo_cargable, t_intento = None, None
     for intento in range(1, intentos + 1):
+        if intento > 1 and not _hay_tiempo_para_reintento(t_intento):
+            log.warning(f"Banda v7: sin tiempo para el intento {intento}/{intentos} "
+                        f"({_segundos_generacion():.0f} s); se entrega lo mejor que hay.")
+            metricas_lavo.poner("tope_tiempo", intento - 1)
+            if sin_orden is None and sin_comportamiento is None and ultimo_cargable is not None:
+                cfg, candidato = ultimo_cargable
+                errores = []
+                # Se entrega con lo que la simulacion diga de el (sin reintentar).
+                fallas = (comportamiento.verificar(cfg, reqs)
+                          or (reglas_banda.verificar(cfg, reglas_guia) if reglas_guia else [])
+                          or simulacion_etapas.verificar(cfg, etapas))
+            break
+        t_intento = time.perf_counter()
         try:
             candidato = _llamar_modelo(msgs_iter)
         except ValueError as e:
@@ -3147,6 +3182,8 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                 logic={}, name="", outputs=0, device="banda", status="needs_clarification",
                 questions=[preguntas_banda.pregunta("freq_hz")], assumptions=[],
                 analysis={"equipo": "banda", "motor_v7": True, "contexto": plan})
+        if not errores:
+            ultimo_cargable = (cand, candidato)      # si se acaba el tiempo, al menos este carga
         if not errores and vigilar_perdidas:
             perdidas = edicion_incremental.piezas_perdidas("banda", prev, cand["respuesta_llm"])
             if perdidas and intento < intentos and not restauracion_pedida:

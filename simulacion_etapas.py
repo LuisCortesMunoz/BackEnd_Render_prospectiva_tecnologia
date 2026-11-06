@@ -25,6 +25,7 @@ Solo la banda v7 (el maletin se simula en el navegador).
 
 import time
 
+import cache_simulacion
 import etapas_orden as eo
 import lavo_motor as lm
 
@@ -235,40 +236,61 @@ def verificar(cfg: dict, det: dict, presupuesto_s: float = PRESUPUESTO_S) -> lis
     band = (cfg or {}).get("band") or {}
     if (band.get("engine") or {}).get("version") != 7:
         return []
-    import lavo_sim
     limite = time.monotonic() + presupuesto_s
     problemas = []
-    for g in det.get("grupos") or []:
+    grupos = det.get("grupos") or []
+    for g in grupos:
         if time.monotonic() > limite:
             break
-        plan = _plan(det, g)
-        if len(plan) < 2:
-            continue
-        sim = lavo_sim.SimV7()
-        err, campo = sim.cargar({"band": band})
-        if err:
-            return [f"El PLC simulado rechazo la configuracion (error {err}, campo {campo})."]
-        tr = _Traza(sim)
-        tr.correr(0.5)
-        inicio = plan[0]["e"]["entra_con"] or "I1"
-        prefijo = f"[SQ{g['n']}] " if len(det["grupos"]) > 1 else ""
-        corridas = 2 if (g.get("conteo") or any(e.get("reinicia_contador") for e in (p["e"] for p in plan))) else 1
-        for k in range(corridas):
-            if time.monotonic() > limite:
-                break
-            pre = prefijo + ("En la segunda corrida: " if k else "")
-            n0 = len(tr.muestras)
-            ventanas = _correr_plan(tr, plan, inicio)
-            tr_k = _Traza(sim)
-            tr_k.muestras, tr_k.t = tr.muestras[n0:], tr.t
-            fallas = _revisar(tr_k, ventanas, pre)
-            sigue = g.get("repite") or any(p["e"].get("hasta_paro") for p in plan)
-            if not fallas and not sigue:           # "hasta que yo la detenga": seguir es lo pedido
-                fallas = _quieta_al_final(tr, plan[-1]["e"], pre)
-            if fallas and k and g.get("conteo"):
-                fallas = [fallas[0] + " La primera corrida funciono: lo mas probable es que el contador no "
-                          "vuelva a cero al terminar (reset = SQ1_FIN)."] + fallas[1:]
-            problemas += fallas
-            if fallas:
-                break
+        # Cada grupo se simula aparte: su resultado se reutiliza (cache) cuando
+        # el mismo programa vuelve a probarse (diagnostico, regresion, final).
+        prueba = {"det": {k: v for k, v in det.items() if k != "grupos"}, "g": g, "varios": len(grupos) > 1}
+        fallas = cache_simulacion.obtener("etapas", band, prueba)
+        if fallas is None:
+            fallas, completo = _verificar_grupo(band, det, g, limite)
+            if completo:
+                cache_simulacion.guardar("etapas", band, prueba, fallas)
+        if fallas and fallas[0].startswith(_RECHAZO):
+            return fallas
+        problemas += fallas
     return problemas
+
+
+_RECHAZO = "El PLC simulado rechazo la configuracion"
+
+
+def _verificar_grupo(band: dict, det: dict, g: dict, limite: float):
+    """(fallas, completo) de un grupo; completo=False si se acabo el tiempo."""
+    import lavo_sim
+    plan = _plan(det, g)
+    if len(plan) < 2:
+        return [], True
+    sim = lavo_sim.SimV7()
+    err, campo = sim.cargar({"band": band})
+    if err:
+        return [f"{_RECHAZO} (error {err}, campo {campo})."], True
+    tr = _Traza(sim)
+    tr.correr(0.5)
+    inicio = plan[0]["e"]["entra_con"] or "I1"
+    prefijo = f"[SQ{g['n']}] " if len(det["grupos"]) > 1 else ""
+    corridas = 2 if (g.get("conteo") or any(e.get("reinicia_contador") for e in (p["e"] for p in plan))) else 1
+    problemas = []
+    for k in range(corridas):
+        if time.monotonic() > limite:
+            return problemas, False
+        pre = prefijo + ("En la segunda corrida: " if k else "")
+        n0 = len(tr.muestras)
+        ventanas = _correr_plan(tr, plan, inicio)
+        tr_k = _Traza(sim)
+        tr_k.muestras, tr_k.t = tr.muestras[n0:], tr.t
+        fallas = _revisar(tr_k, ventanas, pre)
+        sigue = g.get("repite") or any(p["e"].get("hasta_paro") for p in plan)
+        if not fallas and not sigue:           # "hasta que yo la detenga": seguir es lo pedido
+            fallas = _quieta_al_final(tr, plan[-1]["e"], pre)
+        if fallas and k and g.get("conteo"):
+            fallas = [fallas[0] + " La primera corrida funciono: lo mas probable es que el contador no "
+                      "vuelva a cero al terminar (reset = SQ1_FIN)."] + fallas[1:]
+        problemas += fallas
+        if fallas:
+            break
+    return problemas, True
