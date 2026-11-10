@@ -26,6 +26,14 @@ y los contadores (comprobados en el ST real con lavo_sim / el banco de pruebas):
 5. PLUMA DE 0 s: un paso mueve una pluma 0 s (o menos de 1 s) y el siguiente ya
    no la mantiene: se le dan 3 s para que alcance a moverse.
 
+6. PASOS CONTADOS DESDE 0: en el motor v7 'siguiente'/'ir_a' N es el numero de
+   paso desde 1 (0/null = el que sigue). Si un paso apunta a SI MISMO por
+   'siguiente' el modelo conto desde 0 (banco C9 r7a: [marcha hasta S2 ->
+   siguiente 1] [paro + pluma 4 s -> siguiente 0]: el paso 1 se repite sin fin).
+   Se suma 1 a todos los destinos numericos de esa secuencia; el que queda en el
+   paso de al lado se deja en null y, con modo repetir/infinita, el regreso del
+   ultimo paso al 1 tambien (ya lo hace el modo y asi cuenta las repeticiones).
+
 aplicar(respuesta, texto, textos) -> (respuesta_reparada, [avisos])
 Nunca quita nada de lo pedido; si no aplica, devuelve la respuesta igual.
 """
@@ -266,12 +274,52 @@ def _plumas_cortas(r: dict, avisos: list):
                           f"moverse); ahora {PLUMA_S:g} s.")
 
 
+def _num(v):
+    """Destino numerico (int) o None si es null / 'fin' / texto."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    if isinstance(v, str) and v.strip().isdigit():
+        return int(v.strip())
+    return None
+
+
+def _indices_base0(r: dict, avisos: list):
+    """'siguiente' que apunta al mismo paso = el modelo numero los pasos desde 0."""
+    for s in [s for s in _lista(r.get("secuencias")) if isinstance(s, dict)]:
+        pasos = [p for p in _lista(s.get("pasos")) if isinstance(p, dict)]
+        n = len(pasos)
+        if not any(_num(p.get("siguiente")) == i + 1 for i, p in enumerate(pasos)):
+            continue
+        ciclica = str(s.get("modo") or "una_vez").lower() in ("repetir", "infinita")
+        cambios = []
+        for i, p in enumerate(pasos):
+            v = _num(p.get("siguiente"))
+            if v is not None:
+                nuevo = v + 1
+                if nuevo == i + 2 or nuevo > n or (ciclica and i == n - 1 and nuevo == 1):
+                    nuevo = None                       # el de al lado / fin natural / lo hace el modo
+                p["siguiente"] = nuevo
+                cambios.append(f"paso {i + 1} -> {'el que sigue' if nuevo is None else 'paso ' + str(nuevo)}")
+            alt = p.get("alternativa")
+            if isinstance(alt, dict) and _num(alt.get("ir_a")) is not None:
+                destino = _num(alt.get("ir_a")) + 1
+                alt["ir_a"] = destino if destino <= n else "fin"
+        if cambios:
+            avisos.append(f"{_s(s.get('id'))}: los pasos estaban contados desde 0 (un paso saltaba a si mismo); "
+                          f"corregido: {', '.join(cambios)}.")
+
+
 def aplicar(respuesta: dict, texto: str = "", textos: list = None) -> tuple:
     if not isinstance(respuesta, dict):
         return respuesta, []
     r = copy.deepcopy(respuesta)
     avisos = []
     try:
+        _indices_base0(r, avisos)
         _parpadeo(r, list(textos) if textos else [texto], avisos)
         _plumas_cortas(r, avisos)
         _reset_contador(r, avisos)

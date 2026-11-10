@@ -835,6 +835,9 @@ BLOQUES (cada uno produce la senal de su id; define todo lo que uses)
   sola); para que siga avanzando al terminar usa motor.arranque = "SQ1_FIN".
   inicio por flanco; paro detiene; reset la reinicia; pausa congela el paso. exclusiva = manda sola sobre las
   salidas/motor que usa. "alternativa" = rama: si esa senal se activa, salta a ir_a.
+  Los pasos se numeran DESDE 1 (el primero es el paso 1). "siguiente": null = pasa al paso de al lado (lo
+  normal: dejalo en null); N = salta al paso N; "fin" = termina. Nunca pongas en un paso su propio numero.
+  Para repetir todo usa modo "repetir"/"infinita" con siguiente null (no regreses a mano al paso 1).
 
 VARIAS ACCIONES EN ORDEN ("primero A, cuando termine B, para cerrar C", luego, despues, al final, por ultimo)
 - Es UNA secuencia: un paso por accion, en el MISMO orden del texto. Nunca eventos ni timers sueltos para
