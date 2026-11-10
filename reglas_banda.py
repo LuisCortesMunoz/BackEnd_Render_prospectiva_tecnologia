@@ -321,16 +321,22 @@ def _probar_apagar(band, senal, h, reglas) -> list:
     return [] if not s.q(q) else [f"Regla {_desc(senal, h)}: al activarse {senal} la luz no se apaga."]
 
 
+def _hasta_que_corra(s):
+    """Arranque con espera previa ("primero la amarilla 5 s y luego arranca"): la misma
+    espera que usa comportamiento."""
+    co._hasta_que_corra(s)
+
+
 def _probar_banda(band, senal, h, arranque) -> list:
     s = _sim(band)
     if h["accion"] == "avanzar":
         _pulsar(s, senal)
-        s.correr(2.0)
+        _hasta_que_corra(s)
         return [] if _corre(s) else [f"Regla {_desc(senal, h)}: al activarse {senal} la banda no avanza."]
     if not arranque or arranque == senal:
         return []                                  # no se sabe arrancarla aparte: lo prueban otras pruebas
     _pulsar(s, arranque)
-    s.correr(2.0)
+    _hasta_que_corra(s)
     if not _corre(s):
         return []                                  # lo reporta la prueba del arranque
     _pulsar(s, senal)
@@ -367,7 +373,7 @@ def _probar_mientras(band, estado, h, arranque) -> list:
     s = _sim(band)
     quieta = s.q(q)
     _pulsar(s, arranque)
-    s.correr(2.0)
+    _hasta_que_corra(s)
     if not _corre(s):
         return []
     if h.get("parpadeo"):

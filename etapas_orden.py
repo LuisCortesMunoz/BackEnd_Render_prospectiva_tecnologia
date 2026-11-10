@@ -839,7 +839,7 @@ def _fmt(x) -> str:
 
 
 # ── Verificacion ────────────────────────────────────────────────────────────
-def _cadenas_banda(eng: dict) -> list:
+def _cadenas_banda(eng: dict, con_fuera: bool = True) -> list:
     """Pasos de cada secuencia en orden de ejecucion (SQ2 que arranca con
     SQ1_FIN va detras de los de SQ1)."""
     seqs = {s.get("id"): s for s in lm._lista(eng.get("secuencias")) if isinstance(s, dict)}
@@ -852,13 +852,101 @@ def _cadenas_banda(eng: dict) -> list:
         except (ValueError, TypeError):
             return None
 
+    extra = _salidas_por_paso(eng) if con_fuera else {}
     cadenas = []
     for sid, s in seqs.items():
         otra = next((o for oid, o in seqs.items() if oid != sid and cod(o.get("inicio")) == cod(f"{sid}_FIN")), None)
         if any(cod(s.get("inicio")) == cod(f"{oid}_FIN") for oid in seqs if oid != sid):
             continue                                       # va encadenada detras de otra
-        cadenas.append(lm._lista(s.get("pasos")) + (lm._lista(otra.get("pasos")) if otra else []))
+        pasos = _con_extra(s, extra) + (_con_extra(otra, extra) if otra else [])
+        cadenas.append(_Cadena(pasos, s.get("inicio")))
     return cadenas
+
+
+class _Cadena(list):
+    """Pasos de una cadena + la senal con la que arranca (para emparejarla con lo pedido)."""
+    def __init__(self, pasos, inicio):
+        super().__init__(pasos)
+        self.inicio = inicio
+
+
+def _con_extra(seq: dict, extra: dict) -> list:
+    """Pasos de 'seq' con las salidas que el programa enciende FUERA de la secuencia
+    mientras ese paso esta activo (p. ej. un timer INTERMITENTE con entrada SQ2_PASO1)."""
+    out = []
+    for i, p in enumerate(lm._lista(seq.get("pasos")), 1):
+        q = extra.get((str(seq.get("id") or "").upper(), i))
+        if isinstance(p, dict) and q:
+            p = dict(p, salidas=list(dict.fromkeys(list(p.get("salidas") or []) + sorted(q))))
+        out.append(p)
+    return out
+
+
+_RX_PASO = re.compile(r"^(SQ\d+)_PASO(\d+)$")
+
+
+def _origenes(eng: dict):
+    """Funcion regla -> senales base de las que depende (a traves de timers,
+    condiciones y memorias)."""
+    deps = {}
+    for t in lm._lista(eng.get("timers")):
+        if isinstance(t, dict) and t.get("id"):
+            deps[str(t["id"]).upper()] = [t.get("entrada")]
+    for c in lm._lista(eng.get("condiciones")):
+        if isinstance(c, dict) and c.get("id"):
+            deps[str(c["id"]).upper()] = list(c.get("entradas") or [])
+    for m in lm._lista(eng.get("memorias")):
+        if isinstance(m, dict) and m.get("id"):
+            deps[str(m["id"]).upper()] = [m.get("set")]
+
+    def base(senal, vistos=None):
+        vistos = set() if vistos is None else vistos
+        s = re.sub(r"^NOT\s+", "", str(senal or "").strip().upper())
+        if not s or s in vistos:
+            return set()
+        vistos.add(s)
+        if s not in deps:
+            return {s}
+        return set().union(*[base(x, vistos) for x in deps[s]] or [set()])
+    return base
+
+
+def _salidas_por_paso(eng: dict) -> dict:
+    """(SQk, i) -> salidas de 'salidas' cuya regla depende (directo o por timers /
+    condiciones / memorias) de SQk_PASOi."""
+    base = _origenes(eng)
+    out = {}
+    sal = eng.get("salidas") if isinstance(eng.get("salidas"), dict) else {}
+    for q, regla in sal.items():
+        for b in base(regla):
+            m = _RX_PASO.match(b)
+            if m:
+                out.setdefault((m.group(1), int(m.group(2))), set()).add(lm.salida_canonica(q))
+    return out
+
+
+def _hecha_fuera(eng: dict, de_g: list) -> bool:
+    """Una secuencia pedida de UNA etapa con disparo ("cuando S2 detecte, la roja parpadea
+    4 s") puede ir sin secuencia: sus salidas en 'salidas' con una regla que depende de esa
+    senal (timers / condiciones). Lo que hace en el tiempo lo prueba la simulacion."""
+    if len(de_g) != 1 or not de_g[0].get("entra_con"):
+        return False
+    e = de_g[0]
+    qs = [r["q"] for r in e["requisitos"] if r["tipo"] == "salida"]
+    if not qs or len(qs) != len(e["requisitos"]):
+        return False
+    base = _origenes(eng)
+    sal = eng.get("salidas") if isinstance(eng.get("salidas"), dict) else {}
+    por_q = {lm.salida_canonica(q): base(regla) for q, regla in sal.items()}
+    return all(any(any(_mismo(b, e["entra_con"]) for b in por_q.get(q, ())) for q in grupo) for grupo in qs)
+
+
+def _mejor_cadena(de_g, cadenas, verificar_c):
+    """La cadena del JSON que corresponde a lo pedido: la que arranca con la misma senal
+    que la primera etapa (si la hay); si no, la que menos problemas da."""
+    ini = de_g[0].get("entra_con") if de_g else None
+    mismas = [c for c in cadenas if ini and _mismo(getattr(c, "inicio", None), ini)]
+    return min(mismas or cadenas, key=lambda c: len(verificar_c(c)))
 
 
 def _es_decision(p) -> bool:
@@ -901,7 +989,7 @@ def verificar(cfg: dict, det: dict, dispositivo: str = "banda") -> list:
 
     eng = ((cfg or {}).get("band") or {}).get("engine") or {}
     # Los pasos de decision (0 s, sin acciones, con alternativa) no son etapas.
-    cadenas = [[p for p in c if not _es_decision(p)] for c in _cadenas_banda(eng)]
+    cadenas = [_Cadena([p for p in c if not _es_decision(p)], c.inicio) for c in _cadenas_banda(eng)]
     if not cadenas:
         return [f"Pediste {len(etapas)} acciones en orden y el JSON no tiene una secuencia: arma SQ1 con un "
                 f"paso por etapa en ese orden (no las encadenes con eventos ni timers sueltos)."]
@@ -915,8 +1003,11 @@ def verificar(cfg: dict, det: dict, dispositivo: str = "banda") -> list:
         if (len(de_g) > 1 and de_g[0]["entra_con"] and _solo_plumas(de_g[0])
                 and all(r["q"] & fuera for r in de_g[0]["requisitos"] if r["tipo"] == "salida")):
             de_g = de_g[1:]
-        # Cada secuencia pedida se compara con la secuencia del JSON que mejor la cumple.
-        problemas += min((_verificar_cadena(de_g, c, _cumple_banda, "banda") for c in cadenas), key=len)
+        if _hecha_fuera(eng, de_g):
+            continue
+        # Cada secuencia pedida se compara con la secuencia del JSON que le corresponde.
+        vc = lambda c: _verificar_cadena(de_g, c, _cumple_banda, "banda")  # noqa: E731
+        problemas += vc(_mejor_cadena(de_g, cadenas, vc))
     return problemas
 
 
@@ -931,7 +1022,12 @@ def _verificar_cadena(etapas, pasos, cumple, dispositivo) -> list:
             problemas.append(f"La etapa {e['n']} («{e['texto']}») no aparece {donde}: necesita un paso propio con "
                              + ("; ".join(r["desc"] for r in e["requisitos"]) or "su espera") + ".")
             continue
-        tramo = [p for p in pasos[previo + 1:j + 1] if isinstance(p, dict)]
+        # Una etapa con varios tiempos ("avanza 10 s, se detiene 3 s y vuelve a avanzar 5 s")
+        # ocupa varios pasos seguidos: sus tiempos se buscan en esos pasos.
+        fin = j + max(1, len(e["tiempos"]))
+        while fin < len(pasos) and isinstance(pasos[fin - 1], dict) and not float(seg(pasos[fin - 1]) or 0):
+            fin += 1                 # un paso de 0 s (decision, cambio de salidas) no cierra la etapa
+        tramo = [p for p in pasos[previo + 1:fin] if isinstance(p, dict)]
         for x in e["tiempos"]:
             if not any(_num_igual(seg(p), x) for p in tramo):
                 problemas.append(f"La etapa {e['n']} («{e['texto']}») dura {_fmt(x)} s, pero su paso ({j + 1}) "
@@ -985,13 +1081,15 @@ def reparar_esperas(resp: dict, det: dict):
     if not det.get("aplica") or not isinstance(resp, dict):
         return None
     rep = copy.deepcopy(resp)
-    cadenas = [[p for p in c if isinstance(p, dict) and not _es_decision(p)] for c in _cadenas_banda(rep)]
+    # Sin las salidas de fuera: aqui se modifican los pasos reales de la secuencia.
+    cadenas = [_Cadena([p for p in c if isinstance(p, dict) and not _es_decision(p)], c.inicio)
+               for c in _cadenas_banda(rep, con_fuera=False)]
     if not cadenas:
         return None
     cambios = 0
     for g in det.get("grupos") or [{"etapas": [e["n"] for e in det["etapas"]]}]:
         de_g = [e for e in det["etapas"] if e["n"] in g["etapas"]]
-        mejor = min(cadenas, key=lambda c: len(_verificar_cadena(de_g, c, _cumple_banda, "banda")))
+        mejor = _mejor_cadena(de_g, cadenas, lambda c: _verificar_cadena(de_g, c, _cumple_banda, "banda"))
         pos, previo = 0, -1
         for e in de_g:
             j = next((k for k in range(pos, len(mejor)) if all(_cumple_banda(mejor[k], r) for r in e["requisitos"])),

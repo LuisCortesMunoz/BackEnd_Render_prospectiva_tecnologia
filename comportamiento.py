@@ -34,6 +34,9 @@ MAX_SOLA_S = 45
 # alcance a probarse se omite (no se reporta como falla).
 PRESUPUESTO_S = 15
 _ARRANQUE_S = 2.0       # marcha tras arrancar antes de probar
+# Si al arrancar hay una espera antes de la marcha ("primero la amarilla 5 s y despues
+# arranca") se espera hasta esto a que la banda corra; luego se le dan _ARRANQUE_S de marcha.
+_ARRANQUE_MAX_S = 20.0
 _FRENO_S = 1.5          # lo que tarda en verse el paro (rampa del VFD)
 
 _NUM = {"un": 1, "una": 1, "uno": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6,
@@ -475,7 +478,10 @@ def paro_por_conteo(texto: str) -> dict:
         # el arranque normal debe volver a mover la banda (se prueba en la simulacion).
         ciclo = bool(c.get("reinicia")) or bool(re.search(
             r"\b(?:nuevo ciclo|nueva secuencia|reinici\w*|vuelv\w* a (?:contar|empezar|arrancar)|otro ciclo)\b", t))
-        return {"conteo": c["conteo"], "senal": c["senal"], "segundos": seg, "rearranque": ciclo}
+        out = {"conteo": c["conteo"], "senal": c["senal"], "segundos": seg, "rearranque": ciclo}
+        if c.get("boton"):
+            out["boton_reset"] = c["boton"]       # "con I2 se reinicia el contador"
+        return out
     return {}
 
 
@@ -793,6 +799,21 @@ def _arrancar(s, entradas):
         s.poner(**{e: False})
 
 
+def _hasta_que_corra(s):
+    """Tras pulsar el arranque: _ARRANQUE_S como siempre y, si la banda aun no corre (hay
+    una espera antes de la marcha), se sigue hasta _ARRANQUE_MAX_S y se le dan _ARRANQUE_S
+    de marcha. Si arranca enseguida la linea de tiempo es la misma de antes."""
+    s.correr(_ARRANQUE_S)
+    if _corre(s):
+        return
+    t = _ARRANQUE_S
+    while t < _ARRANQUE_MAX_S and not _corre(s):
+        s.correr(0.2)
+        t += 0.2
+    if _corre(s):
+        s.correr(_ARRANQUE_S)
+
+
 def _corre(s) -> bool:
     return s.motor() in ("dir1", "dir2")
 
@@ -839,17 +860,17 @@ def _verificar_req(band: dict, r: dict, arranque: list) -> list:
         # No exige que la banda corra (un conteo puede manejar solo luces o plumas).
         s._band_conteo = band
         _arrancar(s, arranque)
-        s.correr(_ARRANQUE_S)
+        _hasta_que_corra(s)
         problemas += _probar_conteo(s, r, arranque)
         return problemas
     if r["tipo"] == "arranca_con":
         _arrancar(s, [r["senal"]])
-        s.correr(_ARRANQUE_S)
+        _hasta_que_corra(s)
         if not _corre(s):
             problemas.append(f"Al presionar {r['senal']} la banda no arranca.")
         return problemas
     _arrancar(s, arranque)
-    s.correr(_ARRANQUE_S)
+    _hasta_que_corra(s)
     if not _corre(s):
         problemas.append("La banda no arranca" + (f" con {', '.join(arranque)}" if arranque else "")
                          + f", asi que no se puede comprobar: «{r['texto']}».")
@@ -993,7 +1014,7 @@ def _esperar_fin(s, cambio) -> bool:
 def _rearrancar(s, arranque):
     if not _corre(s) and arranque:
         _arrancar(s, arranque)
-        s.correr(_ARRANQUE_S)
+        _hasta_que_corra(s)
 
 
 def _probar_reinicio_solo(s, r, arranque, cambio, n, sensor) -> list:
@@ -1057,7 +1078,10 @@ def _replica(band, arranque, sensor, objetos, extra_s, objetos_s=1.0, arranque_s
     'objetos_s' s y 'extra_s' s mas) pero sin el ultimo objeto."""
     c = _sim(band)
     _arrancar(c, arranque)
-    c.correr(arranque_s)
+    if arranque_s == _ARRANQUE_S:
+        _hasta_que_corra(c)          # misma linea de tiempo que la prueba
+    else:
+        c.correr(arranque_s)
     for _ in range(objetos):
         c.pulsar(sensor, 0.3)
         c.correr(objetos_s - 0.3)
@@ -1153,10 +1177,16 @@ def _probar_paro_conteo(s, r, band=None, arranque=None) -> list:
         while s.salidas() and t < 15:
             s.correr(0.5)
             t += 0.5
+        # "Con I2 se reinicia el contador": el nuevo ciclo empieza con ese boton y luego el arranque.
+        if r.get("boton_reset") and r["boton_reset"] not in arranque:
+            s.pulsar(r["boton_reset"], 0.3)
+            s.correr(0.5)
         _arrancar(s, arranque)
-        s.correr(_ARRANQUE_S)
+        _hasta_que_corra(s)
         if not _corre(s):
-            return [f"Despues del paro automatico al contar {n} en {senal}, al presionar {', '.join(arranque)} la "
+            return [f"Despues del paro automatico al contar {n} en {senal}, al presionar "
+                    + (f"{r['boton_reset']} y luego " if r.get("boton_reset") and r["boton_reset"] not in arranque
+                       else "") + f"{', '.join(arranque)} la "
                     f"banda ya no vuelve a arrancar (el paro del motor se queda activo: usa una senal que se "
                     f"libere, p. ej. el pulso SQ1_CICLO o el timer de la accion, no una condicion que siga activa)."]
     return []
