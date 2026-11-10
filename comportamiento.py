@@ -330,6 +330,73 @@ def _probar_pausa(s, r) -> list:
     return []
 
 
+# Plumas en la pausa por deteccion: "se detiene 4 s, la pluma 1 sube y vuelve a avanzar"
+# (durante la pausa) y "la pluma 1 debe bajar cuando la banda vuelve a avanzar" (al reanudar).
+_RX_PLUMA_ACCION = re.compile(r"\bpluma\s*(1|2|uno|dos)\b[^.;,]{0,20}?\b(sub\w*|levant\w*|baj\w*)")
+_RX_AL_REANUDAR = re.compile(r"\b(?:cuando|al|en cuanto)\s+(?:la banda\s+)?(?:vuelv\w* a (?:avanzar|moverse|arrancar)|"
+                             r"volver a (?:avanzar|moverse|arrancar)|reanud\w*|continu\w*|retom\w*)")
+_RX_SIN_PLUMA = re.compile(r"\b(?:ya no|quita\w*|elimina\w*|sin)\b[^.;]{0,25}\bpluma\s*(1|2|uno|dos)\b")
+# pluma -> (sube, baja)
+_Q_PLUMA = {1: ("Q8", "Q9"), 2: ("Q6", "Q7")}
+
+
+def plumas_en_pausa(texto: str) -> list:
+    """[{"pluma": 1|2, "accion": "sube"|"baja", "momento": "pausa"|"reanuda"}] de lo que el
+    texto pide a las plumas en una pausa por deteccion; [] si no."""
+    t = _fold(texto)
+    pausa = _RX_PAUSA_SENSOR.search(t)
+    out = []
+    for m in _RX_PLUMA_ACCION.finditer(t):
+        n = 1 if m.group(1) in ("1", "uno") else 2
+        accion = "baja" if m.group(2).startswith("baj") else "sube"
+        antes, despues = t[max(0, m.start() - 40):m.start()], t[m.end():m.end() + 45]
+        if _RX_AL_REANUDAR.search(despues) or re.search(_RX_AL_REANUDAR.pattern + r"[^.;]{0,10}$", antes):
+            momento = "reanuda"
+        elif pausa and pausa.start() <= m.start() < pausa.end():
+            momento = "pausa"
+        else:
+            continue
+        out = [x for x in out if not (x["pluma"] == n and x["momento"] == momento)]
+        out.append({"pluma": n, "accion": accion, "momento": momento,
+                    "q": _Q_PLUMA[n][0 if accion == "sube" else 1]})
+    return out
+
+
+def _probar_pluma_pausa(s, r) -> list:
+    """Con la banda en marcha, un objeto en el sensor de la pausa: la pluma hace lo pedido
+    durante la pausa o al volver a avanzar. Si la pausa misma falla lo reporta pausa_sensor."""
+    sensor = "I4" if r["senal"] == "S1" else "I5"
+    s.pulsar(sensor, 0.3)
+    t, paro, reanuda, vistos = 0.3, None, None, []
+    while t < float(r["segundos"]) + 10:
+        s.correr(0.1)
+        t += 0.1
+        corre = _corre(s)
+        if paro is None and not corre:
+            paro = t
+        elif paro is not None and reanuda is None and corre:
+            reanuda = t
+        vistos.append((t, s.q(r["q"])))
+        if reanuda is not None and t > reanuda + 3.5:
+            break
+    nombre = f"la pluma {r['pluma']} {'sube' if r['accion'] == 'sube' else 'baja'} ({r['q']})"
+    if r["momento"] == "pausa":
+        if paro is None:
+            return []
+        fin = reanuda if reanuda is not None else t
+        if not any(v for x, v in vistos if x <= fin + 0.5):
+            return [f"Al detenerse por {r['senal']} {nombre} NO se activa durante la pausa, y se pidió. Conserva "
+                    f"lo que ya hacía la pluma en la pausa y agrega lo nuevo (no cambies una acción por otra)."]
+        return []
+    if reanuda is None:
+        return []
+    if not any(v for x, v in vistos if reanuda - 1.0 <= x <= reanuda + 3.0):
+        return [f"Cuando la banda vuelve a avanzar tras la pausa por {r['senal']}, {nombre} NO se activa, y se "
+                f"pidió. Agrégalo (p. ej. un paso con {r['q']} unos 3 s al reanudar) sin quitar lo que la pluma "
+                f"hace durante la pausa."]
+    return []
+
+
 def cambio_conteo(texto: str):
     """N si el texto CAMBIA el numero de un conteo ya pedido ('cambia el conteo a 5');
     None si no."""
@@ -488,6 +555,13 @@ def requisitos(textos) -> list:
             # "ahora la amarilla en lugar de la roja": la mas reciente manda (una por disparador).
             reqs = [r for r in reqs if not (r["tipo"] == "parpadea" and r.get("senal") == p["senal"])]
             reqs.append({"tipo": "parpadea", **p, "texto": _fold(texto).strip()[:160]})
+        for mp in _RX_SIN_PLUMA.finditer(_fold(texto)):
+            n = 1 if mp.group(1) in ("1", "uno") else 2
+            reqs = [r for r in reqs if not (r["tipo"] == "pluma_pausa" and r["pluma"] == n)]
+        for pl in plumas_en_pausa(texto):
+            reqs = [r for r in reqs if not (r["tipo"] == "pluma_pausa" and r["pluma"] == pl["pluma"]
+                                            and r["momento"] == pl["momento"])]
+            reqs.append({"tipo": "pluma_pausa", **pl, "texto": _fold(texto).strip()[:160]})
         tg = toggle_en(texto)
         if tg:
             reqs = [r for r in reqs if r["tipo"] != "toggle"]
@@ -524,6 +598,11 @@ def requisitos(textos) -> list:
     # prueba suelta del conteo no aplica (veria la banda detenida en cada caja) y el
     # reinicio lo prueba el nuevo ciclo del paro.
     pausa = next((r for r in reqs if r["tipo"] == "pausa_sensor"), None)
+    # Plumas de la pausa: solo se prueban si hay una pausa por deteccion (de ella sale el sensor).
+    for r in reqs:
+        if r["tipo"] == "pluma_pausa" and pausa:
+            r["senal"], r["segundos"] = pausa["senal"], pausa["segundos"]
+    reqs = [r for r in reqs if r["tipo"] != "pluma_pausa" or r.get("senal")]
     if pausa:
         for r in reqs:
             if r["tipo"] == "para_sola" and r.get("conteo") and r.get("senal") == pausa["senal"]:
@@ -649,6 +728,15 @@ def bloque_modelo(reqs: list) -> str:
                 f"(la banda se detiene). Puede llevar \"paro\" (I2) si el usuario lo pide. NO uses motor.arranque/"
                 f"motor.paro con {b} ni una condicion '{b} AND BANDA_CORRIENDO' ni memorias set/reset con {b}: "
                 f"simulado en el ST, la banda nunca arranca. Los Hz van en banda.frecuencia_hz.")
+        elif r["tipo"] == "pluma_pausa":
+            accion = "sube" if r["accion"] == "sube" else "baja"
+            if r["momento"] == "pausa":
+                filas.append(f"- Al detenerse por {r['senal']}, durante la pausa, la pluma {r['pluma']} {accion} "
+                             f"({r['q']}).")
+            else:
+                filas.append(f"- Cuando la banda VUELVE A AVANZAR tras la pausa por {r['senal']}, la pluma "
+                             f"{r['pluma']} {accion} ({r['q']}, unos 3 s). Es ADEMAS de lo que la pluma hace en la "
+                             f"pausa: no lo reemplaces.")
         elif r["tipo"] == "para_con":
             filas.append(f"- {r['senal']} detiene la banda.")
         elif r["tipo"] == "arranca_con":
@@ -777,6 +865,8 @@ def _verificar_req(band: dict, r: dict, arranque: list) -> list:
         problemas += _probar_repite_y_para(s, r)
     elif r["tipo"] == "pausa_sensor":
         problemas += _probar_pausa(s, r)
+    elif r["tipo"] == "pluma_pausa":
+        problemas += _probar_pluma_pausa(s, r)
     elif r["tipo"] == "parpadea":
         problemas += _probar_parpadeo(s, r)
     elif r["tipo"] == "sigue_al_contar":

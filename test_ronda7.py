@@ -12,6 +12,7 @@ test_ronda7.py — banco C9 r7a: el modelo numero los pasos de la secuencia desd
   1. reparaciones_banda._indices_base0 corrige los destinos (incl. alternativa)
   2. no toca secuencias bien numeradas
   3. en lavo_sim la logica reparada hace los 3 ciclos y se detiene
+  4. C9 t3: lo que hace la pluma en la pausa y al reanudar se prueba simulando
 
 Corre sin Groq y sin PLC (lavo_sim):  python test_ronda7.py
 """
@@ -24,6 +25,7 @@ import logging
 logging.disable(logging.WARNING)
 
 import lavo_sim as ls
+import comportamiento as co
 import reparaciones_banda as rb
 
 OK = 0
@@ -112,5 +114,56 @@ r, av = rb.aplicar(dec, "")
 p = r["secuencias"][0]["pasos"]
 check(p[1]["siguiente"] is None and p[1]["alternativa"]["ir_a"] == 4, "decision: sigue al 3, con CT1 salta al 4")
 check(p[2]["siguiente"] == 1 and p[3]["siguiente"] == "fin", "regreso al paso 1 y 'fin' intactos")
+
+# ── C9 t3 (r8a, r6b): "la pluma 1 debe bajar cuando la banda vuelve a avanzar" -> el modelo
+# cambio la subida (Q8) por la bajada (Q9) en vez de agregarla. Ahora se prueba simulando.
+H9 = ["Al presionar I1 la banda avanza a 30 Hz hasta que el sensor 2 detecta una caja; entonces se detiene 4 "
+      "segundos, la pluma 1 sube y la banda vuelve a avanzar. Esto se repite 3 veces y después la banda se detiene.",
+      "En vez de 3 veces que sean 2.",
+      "La pluma 1 debe bajar cuando la banda vuelve a avanzar."]
+
+
+def cfg_banda(engine):
+    return {"band": {"enable": True, "direction": "derecha", "freq_hz": 30, "stop_mode": 0,
+                     "engine": {"version": 7, **engine}}}
+
+
+_MOTOR9 = {"arranque": "I1", "paro": "C2", "modo": "enclavado", "pausa": "T1"}
+_COND9 = [{"id": "C1", "op": "AND", "entradas": ["I5"], "flanco": "subida"},
+          {"id": "C2", "op": "OR", "entradas": ["I3", "T2"], "flanco": "nivel"}]
+# r8a t3 (fallo): la pluma solo baja; ya no sube en la pausa
+MAL9 = cfg_banda({"motor": _MOTOR9, "condiciones": _COND9,
+                  "timers": [{"id": "T1", "tipo": "PULSO", "entrada": "C1", "segundos": 4.0},
+                             {"id": "T2", "tipo": "RETARDO", "entrada": "CT1", "segundos": 6.0},
+                             {"id": "T3", "tipo": "RETARDO", "entrada": "C1", "segundos": 4.0},
+                             {"id": "T4", "tipo": "PULSO", "entrada": "T3", "segundos": 2.0}],
+                  "contadores": [{"id": "CT1", "entrada": "C1", "preset": 2, "modo": "una_vez"}],
+                  "salidas": {"Q9": "T4"}})
+# r8b t3 (bien): SQ1 [Q8 4 s][Q9 3 s] por cada deteccion
+BIEN9 = cfg_banda({"motor": _MOTOR9, "condiciones": _COND9,
+                   "timers": [{"id": "T1", "tipo": "PULSO", "entrada": "C1", "segundos": 4.0},
+                              {"id": "T2", "tipo": "RETARDO", "entrada": "CT1", "segundos": 4.0}],
+                   "contadores": [{"id": "CT1", "entrada": "C1", "reset": "I1", "preset": 2, "modo": "una_vez"}],
+                   "secuencias": [{"id": "SQ1", "inicio": "C1", "modo": "una_vez", "exclusiva": True,
+                                   "pausa_apaga": True, "pasos": [
+                                       {"salidas": ["Q8"], "avanza": "tiempo", "segundos": 4, "motor": []},
+                                       {"salidas": ["Q9"], "avanza": "tiempo", "segundos": 3, "motor": []}]}]})
+
+escenario("4. plumas en la pausa por deteccion (C9 t3)")
+reqs = co.requisitos(H9)
+pl = [(r["pluma"], r["accion"], r["momento"], r["q"]) for r in reqs if r["tipo"] == "pluma_pausa"]
+check(pl == [(1, "sube", "pausa", "Q8"), (1, "baja", "reanuda", "Q9")],
+      "se leen las dos: sube en la pausa (turno 1) y baja al reanudar (turno 3)")
+check(all(r.get("senal") == "S2" for r in reqs if r["tipo"] == "pluma_pausa"), "el sensor sale de la pausa (S2)")
+check("VUELVE A AVANZAR" in co.bloque_modelo(reqs), "el modelo recibe que la bajada es ADEMAS de la subida")
+f = co.verificar(MAL9, [r for r in reqs if r["tipo"] == "pluma_pausa"])
+check(len(f) == 1 and "sube (Q8)" in f[0], "r8a t3: se detecta que la pluma ya no sube en la pausa")
+check(co.verificar(BIEN9, [r for r in reqs if r["tipo"] == "pluma_pausa"]) == [], "r8b t3: cumple")
+solo_t1 = [r for r in co.requisitos(H9[:1]) if r["tipo"] == "pluma_pausa"]
+check(len(solo_t1) == 1 and solo_t1[0]["momento"] == "pausa", "turno 1 solo: solo la subida en la pausa")
+check(not [r for r in co.requisitos(H9 + ["Ya no uses la pluma 1."]) if r["tipo"] == "pluma_pausa"],
+      "'ya no uses la pluma 1' quita sus requisitos")
+check(not [r for r in co.requisitos(["Cuando S1 detecte, la pluma 1 sube 3 s."]) if r["tipo"] == "pluma_pausa"],
+      "sin pausa por deteccion no se agrega (no se adivina)")
 
 print(f"\n{OK} comprobaciones OK")
