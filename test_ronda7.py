@@ -13,18 +13,34 @@ test_ronda7.py — banco C9 r7a: el modelo numero los pasos de la secuencia desd
   2. no toca secuencias bien numeradas
   3. en lavo_sim la logica reparada hace los 3 ciclos y se detiene
   4. C9 t3: lo que hace la pluma en la pausa y al reanudar se prueba simulando
+  5. si la vigente cumple todo menos eso, parche_plumas lo agrega sin el modelo
 
 Corre sin Groq y sin PLC (lavo_sim):  python test_ronda7.py
 """
 
+import asyncio
 import contextlib
 import copy
 import io
 import logging
+import os
+import tempfile
+
+os.environ["LAVO_MEMORIA_DIR"] = tempfile.mkdtemp(prefix="lavo_mem_r7_")
+os.environ.pop("LAVO_MEMORIA_REPO", None)
+os.environ.pop("LAVO_MEMORIA_TOKEN", None)
+os.environ["MEMORIA_JSON"] = os.path.join(tempfile.gettempdir(), "test_mem_r7.json")
+if os.path.exists(os.environ["MEMORIA_JSON"]):
+    os.remove(os.environ["MEMORIA_JSON"])
+os.environ.setdefault("GROQ_API_KEY", "test-key-local")
 
 logging.disable(logging.WARNING)
 
+with contextlib.redirect_stdout(io.StringIO()):
+    import app
+import lavo_motor as lm
 import lavo_sim as ls
+import parche_plumas as pp
 import comportamiento as co
 import reparaciones_banda as rb
 
@@ -165,5 +181,102 @@ check(not [r for r in co.requisitos(H9 + ["Ya no uses la pluma 1."]) if r["tipo"
       "'ya no uses la pluma 1' quita sus requisitos")
 check(not [r for r in co.requisitos(["Cuando S1 detecte, la pluma 1 sube 3 s."]) if r["tipo"] == "pluma_pausa"],
       "sin pausa por deteccion no se agrega (no se adivina)")
+
+# ── Parche sin el modelo: la vigente del turno 2 ya cumple todo menos la bajada.
+escenario("5. parche de plumas sobre la vigente (sin el modelo)")
+app.HISTORIAL_PATH = os.path.join(tempfile.gettempdir(), "test_hist_r7.json")
+app.BANDA_MOTOR_V7 = True
+llamadas = []
+
+
+def _llm(msgs):
+    llamadas.append(msgs)
+    raise AssertionError("no se debia llamar al modelo")
+
+
+app.llamar_modelo_json = _llm
+app.llamar_extractor_json = _llm
+
+# r9a t2 (secuencia) y r9b t2 (timers + salidas): las dos formas que armo el modelo
+VIG_SEQ = {"name": "C9 t2", "banda": {"mover": True, "direccion": "derecha", "frecuencia_hz": 30},
+           "motor": {"modo": "enclavado", "paro": "I3"},
+           "secuencias": [{"id": "SQ1", "inicio": "I1", "paro": "I3", "modo": "repetir", "repeticiones": 2,
+                           "exclusiva": True, "pausa_apaga": True, "pasos": [
+                               {"motor": ["marcha"], "avanza": "senal", "senal": "I5", "salidas": []},
+                               {"motor": ["paro"], "salidas": ["Q8"], "avanza": "tiempo", "segundos": 4},
+                               {"motor": ["marcha"], "avanza": "tiempo", "segundos": 0, "salidas": []}]}]}
+VIG_TIM = {"name": "C9 t2", "banda": {"mover": True, "direccion": "derecha", "frecuencia_hz": 30},
+           "motor": {"arranque": "I1", "modo": "enclavado", "paro": "C3", "pausa": "T1"},
+           "condiciones": [{"id": "C1", "op": "AND", "entradas": ["I5", "NOT CT1"], "flanco": "subida"},
+                           {"id": "C2", "op": "AND", "entradas": ["I5", "CT1"], "flanco": "subida"},
+                           {"id": "C3", "op": "OR", "entradas": ["I3", "C2"], "flanco": "nivel"},
+                           {"id": "C4", "op": "OR", "entradas": ["T2", "T3"], "flanco": "nivel"}],
+           "timers": [{"id": "T1", "tipo": "PULSO", "entrada": "C1", "segundos": 4.0},
+                      {"id": "T2", "tipo": "PULSO", "entrada": "C1", "segundos": 4.0},
+                      {"id": "T3", "tipo": "PULSO", "entrada": "C2", "segundos": 4.0}],
+           "contadores": [{"id": "CT1", "entrada": "I5", "reset": "I1", "preset": 2, "modo": "una_vez"}],
+           "salidas": {"Q8": "C4"}}
+
+
+def logic_de(resp):
+    cfg = lm.cfg_desde_respuesta(resp)
+    cfg["respuesta_llm"] = resp
+    cfg["name"] = resp["name"]
+    return cfg
+
+
+def ciclos_c9(cfg, n=2, baja=False):
+    """Como el evaluador del banco: n ciclos (para con S2, sube pluma 1, vuelve a avanzar
+    y, si baja, la pluma 1 baja al reanudar) y al final queda detenida."""
+    s = ls.SimV7()
+    with contextlib.redirect_stdout(io.StringIO()):
+        err, _ = s.cargar({"band": cfg["band"]})
+    if err:
+        return False
+    corre = lambda: s.motor() in ("dir1", "dir2")  # noqa: E731
+    s.correr(0.5)
+    s.pulsar("I1")
+    s.correr(2.5)
+    if not corre():
+        return False
+    for k in range(n):
+        s.pulsar("I5")
+        vistos = []
+        for _ in range(70):
+            s.correr(0.1)
+            vistos.append((corre(), "Q8" in s.salidas(), "Q9" in s.salidas()))
+        if not any(not c for c, _, _ in vistos[:15]) or not any(q8 for _, q8, _ in vistos[:55]):
+            return False
+        if k < n - 1:
+            if not any(c for c, _, _ in vistos[35:]):
+                return False
+            if baja and not any(q9 for _, _, q9 in vistos[35:]):
+                return False
+    s.correr(8)
+    return not corre()
+
+
+def generar(texto, vig):
+    ctx = {"programa_anterior": {"metadata": {"name": vig["name"], "engine_config": logic_de(vig)}},
+           "historial": H9[:2]}
+    return asyncio.run(app.generar_logica(app.LogicaRequest(texto=texto, device="banda", contexto=ctx)))
+
+
+for nombre, vig in (("secuencia", VIG_SEQ), ("timers", VIG_TIM)):
+    check(ciclos_c9(logic_de(vig)), f"{nombre}: la vigente cumple el turno 2 (2 ciclos, pluma sube, para)")
+    llamadas.clear()
+    r = generar(H9[2], vig)
+    check(r.status == "ok" and r.analysis.get("fuente") == "parche" and not llamadas,
+          f"{nombre}: /generar-logica lo agrega sin el modelo ({r.status}, {r.analysis.get('fuente')})")
+    check(ciclos_c9(r.logic, baja=True), f"{nombre}: 2 ciclos, la pluma 1 sube en la pausa, baja al reanudar y para")
+    check(any("Agregado sin cambiar" in a for a in r.warnings or []), f"{nombre}: avisa lo agregado")
+
+reqs = co.requisitos(H9)
+cfg_s = lm.cfg_desde_respuesta(VIG_SEQ)
+check(app._respuesta_parche_plumas("La pluma 1 debe bajar cuando la banda vuelve a avanzar y que vaya a 40 Hz.",
+                                   VIG_SEQ, cfg_s, reqs, {"aplica": False}, {}) is None,
+      "si la instruccion pide algo mas (40 Hz) no se parcha: lo resuelve el modelo")
+check(pp.parchear(VIG_SEQ, [r for r in reqs if r["tipo"] == "pluma_pausa" and r["momento"] == "pausa"], cfg_s)
+      is None, "si la vigente ya cumple lo de la pluma no hay nada que agregar")
 
 print(f"\n{OK} comprobaciones OK")

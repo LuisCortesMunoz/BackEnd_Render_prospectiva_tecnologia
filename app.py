@@ -149,6 +149,7 @@ import regresion_banda
 import huella_banda
 import reparaciones_banda
 import receta_conteo
+import parche_plumas
 import cambios_texto
 import enlace_lentes
 try:
@@ -3043,6 +3044,18 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         if r is not None:
             return r
 
+    # "La pluma 1 debe bajar cuando la banda vuelve a avanzar" sobre una logica vigente que
+    # ya cumple lo demas: se agrega sin el modelo (banco C9 t3: el modelo cambiaba la
+    # subida por la bajada o rompia la repeticion).
+    if prev and not correccion:
+        try:
+            cfg_p = lavo_motor.cfg_desde_respuesta(prev)
+        except (ValueError, TypeError):
+            cfg_p = None
+        r = _respuesta_parche_plumas(texto, prev, cfg_p, reqs, etapas, intencion)
+        if r is not None:
+            return r
+
     # Varias acciones en orden ("primero A, cuando termine B, para cerrar C"):
     # las etapas se detectan aqui, se pregunta cuando termina la que no lo dice
     # y despues se comprueba que la secuencia las respete en ese orden.
@@ -3541,6 +3554,59 @@ def _respuesta_constructor(texto: str, resp: dict, reqs: list, intencion: dict, 
         "fuente": fuente, "edicion": False, "intencion": intencion_banda.resumen(intencion),
         "reglas": reglas, "comportamiento": {"probado": probado, "fallas": []},
         "avisos": ["Ajuste automático: " + a for a in ajustes]})
+
+
+# La instruccion SOLO habla de la pluma en la pausa ("la pluma 1 debe bajar cuando la banda
+# vuelve a avanzar"): si dice algo mas (Hz, luces, tiempos, conteo...) lo resuelve el modelo.
+_RX_OTRA_COSA = re.compile(r"\b(?:hz|hertz|frecuencia|velocidad|verde|amarill\w*|roj[ao]s?|luz|luces|lampara\w*|"
+                           r"torreta|veces|contador\w*|conteo|cuent\w*|izquierda|derecha|inviert\w*|invertir|"
+                           r"reversa|sentido|segundos?|seg|[0-9]+\s*s|sensor|s ?[12]|i ?[1-9]|pluma ?[12]\b.*\bpluma ?[12])\b")
+
+
+def _respuesta_parche_plumas(texto: str, prev, cfg_prev, reqs: list, etapas: dict, intencion: dict):
+    """La logica vigente cumple todo menos lo pedido de la pluma en la pausa: se le
+    agrega sin el modelo (parche_plumas) y se entrega solo si la simulacion de TODA
+    la sesion cumple. None = que lo resuelva el camino de siempre."""
+    import lavo_motor
+    if not isinstance(prev, dict) or cfg_prev is None or not comportamiento.plumas_en_pausa(texto):
+        return None
+    t = edicion_incremental._norm(texto)
+    resto = comportamiento._RX_PLUMA_ACCION.sub(" ", t)
+    if _RX_OTRA_COSA.search(resto):
+        return None
+    try:
+        otras = comportamiento.verificar(cfg_prev, [r for r in reqs if r["tipo"] != "pluma_pausa"])
+    except ValueError:
+        return None
+    if otras:
+        return None
+    r = parche_plumas.parchear(prev, reqs, cfg_prev)
+    if r is None:
+        return None
+    resp, avisos = r
+    try:
+        cand = lavo_motor.cfg_desde_respuesta(resp)
+        cand["respuesta_llm"] = {k: v for k, v in resp.items() if k not in ("analisis", "preguntas", "no_soportado")}
+        errores = validar_logica_banda(cand)
+    except (ValueError, TypeError) as e:
+        errores, cand = [str(e)], None
+    if errores:
+        log.warning(f"Parche de plumas: no valida ({errores}); lo resuelve el modelo.")
+        return None
+    fallas = comportamiento.verificar(cand, reqs)
+    if not fallas and etapas.get("aplica"):
+        fallas = simulacion_etapas.verificar(cand, etapas)
+    if fallas:
+        log.warning(f"Parche de plumas: la simulacion no cumple ({fallas}); lo resuelve el modelo.")
+        return None
+    log.info(f"/generar-logica banda v7: parche de plumas sobre la vigente ({avisos})")
+    metricas_lavo.poner("fuente", "parche")
+    metricas_lavo.poner("contexto", ["parche_plumas"])
+    return _respuesta_banda_v7(texto, cand, {}, extra={
+        "fuente": "parche", "edicion": True, "intencion": intencion_banda.resumen(intencion),
+        "comportamiento": {"probado": [r["tipo"] + (f" {r['senal']}" if r.get("senal") else "") for r in reqs],
+                           "fallas": []},
+        "avisos": ["Agregado sin cambiar lo demás: " + "; ".join(avisos) + "."]})
 
 
 def _respuesta_receta(texto: str, plan: dict, textos: list, intencion: dict, prev):
