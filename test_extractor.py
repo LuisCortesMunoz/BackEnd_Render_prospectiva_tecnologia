@@ -209,7 +209,8 @@ PARCIAL = "Con I1 la banda avanza a 30 Hz y con I2 se detiene. Haz que la roja a
 CONTRA = {"reglas": [{"cuando": {"boton": "I2"}, "hacer": [{"recurso": "banda", "accion": "avanzar"}],
                       "fragmento": "Con I1 la banda avanza a 30 Hz"}], "motor": {"hz": 30}, "dudas": []}
 OK_MOTOR = {"name": "x", "banda": {"mover": True, "direccion": "derecha", "frecuencia_hz": 30},
-            "motor": {"arranque": "I1", "paro": "I2"}, "analisis": A, "preguntas": []}
+            "motor": {"arranque": "I1", "paro": "I2"}, "analisis": A, "preguntas": [],
+            "eventos": [{"cuando": "S1", "duracion_s": 2, "acciones": {"roja": "encender"}}]}
 r = generar(PARCIAL, extractor=[CONTRA], modelo=[OK_MOTOR])
 check(len(llamadas) == 1 and "PIEZAS YA ARMADAS" in sistema(0),
       "si el extractor contradice lo entendido se ignora (el modelo recibe las piezas del lector)")

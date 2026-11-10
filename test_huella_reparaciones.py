@@ -278,6 +278,13 @@ def progh(hz, luz):
 
 
 PEDIDO = "La luz ahora debe ser la amarilla en lugar de la roja."
+# Este cambio de color lo resuelve la edicion directa (ediciones.py, sin el modelo); aqui se
+# apaga para probar la huella en el camino del modelo.
+r = generar(PEDIDO, prev=progh(30, "Q5"), historial=[TH])
+check(not llamadas and r.analysis.get("fuente") == "edicion" and "Q4" in r.logic["band"]["engine"]["salidas"],
+      "el cambio de color sale por edicion directa, sin el modelo")
+_ed = app.ediciones.aplicar
+app.ediciones.aplicar = lambda *a, **k: None
 r = generar(PEDIDO, progh(45, "Q4"), progh(30, "Q4"), prev=progh(30, "Q5"), historial=[TH])
 check(len(llamadas) == 2 and "CAMBIO cosas que el usuario no pidio" in llamadas[1][-1]["content"]
       and "Hz" in llamadas[1][-1]["content"],
@@ -289,5 +296,6 @@ check(len(llamadas) == 1 and r.status == "ok", "lo pedido (solo la torreta cambi
 r = generar(PEDIDO, progh(45, "Q4"), progh(45, "Q4"), progh(45, "Q4"), prev=progh(30, "Q5"), historial=[TH])
 check(r.status == "ok" and any("Además de lo pedido cambió" in w for w in r.warnings),
       f"si insiste, se entrega con un aviso de lo que cambio sin pedirlo ({len(llamadas)} llamadas)")
+app.ediciones.aplicar = _ed
 
 print(f"\nTODAS LAS PRUEBAS DE HUELLA Y REPARACIONES PASARON ({OK} comprobaciones).")

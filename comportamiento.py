@@ -206,6 +206,11 @@ def pide_paro_solo(texto: str) -> bool:
 # Paro ligado a un conteo: "cuando el contador llegue a 3, la banda avanza 5 s y luego
 # se detiene (sola)". Lo dispara el conteo, no un boton: basta "se detiene sola",
 # "se detiene", "se para" o "para" (como verbo, no "para que" / "para contar").
+_RX_SIGUE_AL_CONTAR = re.compile(r"\b(?:deja\w*|mant\w*|sigue|siga|continu\w*)\s+(?:la\s+banda\s+|la\s+cinta\s+)?"
+                                 r"(?:andando|avanzando|en marcha|corriendo|moviendose|funcionando)\b|"
+                                 r"\bsin\s+(?:detener\w*|parar\w*)\b|\bno\s+se\s+(?:deten\w*|detien\w*|para)\b")
+_RX_BOTON_SUJETO = re.compile(r"\b(?:(?:el\s+)?(?:boton|pulsador)\s+(?:verde\s+|rojo\s+)?)?(?:i ?[1-9])\s+(?:la\s+|lo\s+)?$|"
+                              r"\b(?:el\s+)?(?:boton|pulsador)\s+(?:verde|rojo)\s+(?:la\s+|lo\s+)?$")
 _RX_PARO_CONTEO = re.compile(
     r"\b(?:se\s+)?(?:deten\w*|detien\w*|deteng\w*)\b|"
     r"\bse\s+par(?:a|e|en|an|ara|ará)\b|"
@@ -365,9 +370,8 @@ def plumas_en_pausa(texto: str) -> list:
     return out
 
 
-def _probar_pluma_pausa(s, r) -> list:
-    """Con la banda en marcha, un objeto en el sensor de la pausa: la pluma hace lo pedido
-    durante la pausa o al volver a avanzar. Si la pausa misma falla lo reporta pausa_sensor."""
+def _ciclo_pluma(s, r):
+    """Un objeto en el sensor de la pausa: (paro, reanuda, [(t, pluma activa)], t_final)."""
     sensor = "I4" if r["senal"] == "S1" else "I5"
     s.pulsar(sensor, 0.3)
     t, paro, reanuda, vistos = 0.3, None, None, []
@@ -382,15 +386,32 @@ def _probar_pluma_pausa(s, r) -> list:
         vistos.append((t, s.q(r["q"])))
         if reanuda is not None and t > reanuda + 3.5:
             break
+    return paro, reanuda, vistos, t
+
+
+def _probar_pluma_pausa(s, r) -> list:
+    """Con la banda en marcha, objetos en el sensor de la pausa: la pluma hace lo pedido
+    durante la pausa (en CADA vuelta, tambien la ultima de un ciclo que se repite N veces)
+    o al volver a avanzar. Si la pausa o la repeticion fallan las reportan sus pruebas."""
     nombre = f"la pluma {r['pluma']} {'sube' if r['accion'] == 'sube' else 'baja'} ({r['q']})"
     if r["momento"] == "pausa":
-        if paro is None:
-            return []
-        fin = reanuda if reanuda is not None else t
-        if not any(v for x, v in vistos if x <= fin + 0.5):
-            return [f"Al detenerse por {r['senal']} {nombre} NO se activa durante la pausa, y se pidió. Conserva "
-                    f"lo que ya hacía la pluma en la pausa y agrega lo nuevo (no cambies una acción por otra)."]
+        veces = max(1, int(r.get("veces") or 1))
+        for k in range(1, veces + 1):
+            paro, reanuda, vistos, t = _ciclo_pluma(s, r)
+            if paro is None:
+                return []
+            fin = reanuda if reanuda is not None else t
+            if not any(v for x, v in vistos if x <= fin + 0.5):
+                cual = f" (deteccion {k} de {veces})" if veces > 1 else ""
+                return [f"Al detenerse por {r['senal']}{cual} {nombre} NO se activa durante la pausa, y se pidió"
+                        + (" en cada vuelta, tambien en la ultima (aunque despues la banda ya no siga)"
+                           if veces > 1 and k == veces else "")
+                        + ". Conserva lo que ya hacía la pluma en la pausa y agrega lo nuevo (no cambies una "
+                          "acción por otra)."]
+            if k < veces and reanuda is None:
+                return []
         return []
+    paro, reanuda, vistos, t = _ciclo_pluma(s, r)
     if reanuda is None:
         return []
     if not any(v for x, v in vistos if reanuda - 1.0 <= x <= reanuda + 3.0):
@@ -443,6 +464,28 @@ _RX_ARRANQUE_OTRO = re.compile(r"\b(?:i ?[12]|boton|pulsador|siempre (?:en march
                                r"\b(?:avanc\w*|avanz\w*|arranc\w*|marcha|muev\w*|invierte|invertir)")
 
 
+def _sigue_sin_paro(oracion: str) -> bool:
+    """'deja la banda andando' SIN un paro en la misma oracion ('continue avanzando 6 s y
+    luego se detenga' es avanzar un rato y parar, no seguir)."""
+    m = _RX_SIGUE_AL_CONTAR.search(oracion)
+    if not m:
+        return False
+    return not any(not _RX_BOTON_SUJETO.search(oracion[max(0, p.start() - 30):p.start()])
+                   for p in _RX_PARO_CONTEO.finditer(oracion))
+
+
+def sigue_al_contar_en(texto: str) -> dict:
+    """{"conteo": N, "senal": S} si el texto dice que al llegar a N la banda SIGUE
+    ("deja la banda andando", "sin detenerla"); {} si no."""
+    t = _fold(texto)
+    c = conteo_en(texto)
+    m = _RX_CUENTA_N.search(t)
+    if not c or not m:
+        return {}
+    primera = re.split(r"[.;\n]", t[m.end():])[0]
+    return {"conteo": c["conteo"], "senal": c["senal"]} if _sigue_sin_paro(primera) else {}
+
+
 def paro_por_conteo(texto: str) -> dict:
     """{"conteo": N, "senal": S1|S2, "segundos": X} si el texto pide que, al llegar el
     contador a N, la banda (siga X s y) se detenga sola; {} si no lo dice.
@@ -458,11 +501,17 @@ def paro_por_conteo(texto: str) -> dict:
     resto = t[m.end():]
     corte = [x.end() for x in re.finditer(r"[.;\n]", resto)]
     resto = resto[:corte[1] if len(corte) > 1 else len(resto)]       # esa oracion y la siguiente
+    # "al llegar a 5 enciende la verde y deja la banda andando": al contar NO se detiene.
+    primera = re.split(r"[.;\n]", resto)[0]
+    if _sigue_sin_paro(primera):
+        return {}
     for p in _RX_PARO_CONTEO.finditer(resto):
         tramo = resto[:p.start()]
         despues = resto[p.end():p.end() + 30]
         de_boton = re.match(r"\s*(?:con|al (?:presionar|pulsar|oprimir)|cuando (?:presione|pulse))\b", despues)
-        if _RX_PARO_DE_BOTON.search(tramo[-60:]) or _RX_PARO_NEGADO.search(tramo) or de_boton:
+        # "el boton I2 detiene la banda", "I2 la detiene": el boton es el sujeto.
+        sujeto_boton = _RX_BOTON_SUJETO.search(tramo[-30:])
+        if _RX_PARO_DE_BOTON.search(tramo[-60:]) or _RX_PARO_NEGADO.search(tramo) or de_boton or sujeto_boton:
             continue
         # De quien es el paro: de la banda (o sin sujeto), no de una luz o una pluma.
         oracion = re.split(r"[.;,\n]|\by\b", tramo)[-1] + p.group(0)
@@ -533,8 +582,14 @@ def requisitos(textos) -> list:
         # (los 5 s se cuentan desde el objeto 3, no desde el arranque).
         pc = {} if _RX_SIN_PARO_SOLA.search(_fold(texto)) else paro_por_conteo(texto)
         if pc:
-            reqs = [r for r in reqs if r["tipo"] != "para_sola"]
+            reqs = [r for r in reqs if r["tipo"] not in ("para_sola", "sigue_al_contar")]
             reqs.append({"tipo": "para_sola", **pc, "texto": _fold(texto).strip()[:160]})
+        else:
+            # "al llegar a 5 enciende la verde y deja la banda andando": se prueba que SIGUE.
+            sigue = sigue_al_contar_en(texto)
+            if sigue:
+                reqs = [r for r in reqs if r["tipo"] not in ("para_sola", "sigue_al_contar")]
+                reqs.append({"tipo": "sigue_al_contar", **sigue, "texto": _fold(texto).strip()[:160]})
         # "la amarilla en lugar de la roja", "cambia los 10 s por 6 s": se actualiza lo ya pedido.
         subs = cambios_texto.sustituciones(texto)
         for r in reqs:
@@ -544,6 +599,20 @@ def requisitos(textos) -> list:
             for viejo, nuevo in subs["t"]:
                 if r.get("segundos") is not None and abs(float(r["segundos"]) - viejo) < 0.05:
                     r["segundos"] = nuevo
+        # "Mejor que sean 12 segundos" (sin decir el anterior): se aplica al UNICO requisito
+        # con tiempo que corresponde (por el contexto si lo hay); si hay varios, no se adivina.
+        tn = None if subs["t"] else cambios_texto.tiempo_nuevo(texto)
+        if tn:
+            ctx, n = tn
+            cand = [r for r in reqs if r.get("segundos") is not None]
+            if ctx & {"espera", "pausa", "retardo"}:
+                cand = [r for r in cand if r["tipo"] == "pausa_sensor"]
+            elif ctx & {"avance", "marcha"}:
+                cand = [r for r in cand if r["tipo"] == "para_sola"]
+            elif ctx:
+                cand = []                          # habla de una luz o pluma: no es de estos requisitos
+            if len(cand) == 1:
+                cand[0]["segundos"] = n
         pp = pausa_por_deteccion(texto)
         if pp:
             reqs = [r for r in reqs if not (r["tipo"] == "pausa_sensor" and r["senal"] == pp["senal"])]
@@ -608,6 +677,10 @@ def requisitos(textos) -> list:
     for r in reqs:
         if r["tipo"] == "pluma_pausa" and pausa:
             r["senal"], r["segundos"] = pausa["senal"], pausa["segundos"]
+            # "esto se repite 3 veces y despues se detiene": la pluma tambien en la ultima vuelta.
+            rep_p = next((x for x in reqs if x["tipo"] == "para_tras_repetir" and x["senal"] == pausa["senal"]), None)
+            if rep_p and r["momento"] == "pausa":
+                r["veces"] = int(rep_p["veces"])
     reqs = [r for r in reqs if r["tipo"] != "pluma_pausa" or r.get("senal")]
     if pausa:
         for r in reqs:

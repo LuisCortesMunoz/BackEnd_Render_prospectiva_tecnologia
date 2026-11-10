@@ -40,6 +40,32 @@ _RX_TIEMPO_NUEVO = re.compile(rf"\b(?:debe|tiene que|deberia)\s+(?:ser|durar|tar
 _RX_CONTEXTO = re.compile(r"\b(verde|amarill[ao]|roj[ao]|pluma\s*[12]|espera|pausa|retardo|avance|marcha)\b")
 
 
+# "Mejor que sean 12 segundos", "que la verde dure solo 3 s", "la espera debe ser de 5 s":
+# un tiempo NUEVO sin decir el anterior, con o sin contexto (luz, pluma, espera...).
+_RX_TIEMPO_SOLO = re.compile(rf"\b(?:(?:mejor|ahora)\s+)?que\s+(?:sean|duren?|tarden?|esperen?)\s+(?:solo\s+|solamente\s+|unos\s+)?"
+                             rf"(?:de\s+)?{_NUM}{_SEG}|"
+                             rf"\b(?:mejor|ahora)\s+(?:sean|pon\w*)\s+{_NUM}{_SEG}|"
+                             rf"\b(?:debe|deben|tiene que|tienen que|deberia)\s+(?:ser|durar|tardar)\s+(?:de\s+)?"
+                             rf"(?:solo\s+)?{_NUM}{_SEG}|"
+                             rf"\b(?:dure|duren|durar|tarde)\s+(?:solo\s+|solamente\s+)?{_NUM}{_SEG}")
+
+
+def tiempo_nuevo(texto: str):
+    """(palabras de contexto, segundos) si el texto fija UN tiempo nuevo sin decir el
+    anterior ("mejor que sean 12 segundos"); None si no (o si dice el anterior)."""
+    t = _fold(texto)
+    if any(rx.search(t) for rx in _RX_T):
+        return None
+    ms = list(_RX_TIEMPO_SOLO.finditer(t))
+    if len(ms) != 1:
+        return None
+    m = ms[0]
+    n = next(g for g in m.groups() if g)
+    oracion = re.split(r"[.;]", t[:m.start()])[-1] + t[m.start():m.end()]
+    ctx = {re.sub(r"\s+", " ", c) for c in _RX_CONTEXTO.findall(oracion)}
+    return ctx, _f(n)
+
+
 def tiempo_por_contexto(texto: str) -> list:
     """[(palabras de contexto, segundos nuevos)] de frases que fijan un tiempo sin decir el anterior."""
     t = _fold(texto)

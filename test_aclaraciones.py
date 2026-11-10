@@ -153,7 +153,8 @@ check(r.logic["respuesta_llm"]["eventos"] == [S1], "y conserva la pausa de S1")
 # ---------------------------------------------------------------------------
 escenario("6. Equipo y proceso elegidos con botones")
 r = generar("Enciende la luz verde 3 segundos", mueve(None, extra={"banda": {"mover": False},
-            "motor": {}, "salidas": {"Q3": "I1"}}), device=None, acl={"equipo": {"respuesta": "Banda transportadora"}})
+            "motor": {}, "timers": [{"id": "T1", "tipo": "PULSO", "entrada": "I1", "segundos": 3}],
+            "salidas": {"Q3": "T1"}}), device=None, acl={"equipo": {"respuesta": "Banda transportadora"}})
 check(r.device == "banda", "la respuesta 'Banda transportadora' elige el equipo sin tocar el texto")
 check(ac.equipo(ac.normalizar({"equipo": "Maletín"})) == "maletin", "y 'Maletín' el maletin")
 check(ac.autoriza_catalogo(ac.normalizar({"proceso": "Autorizar ampliar el catalogo con ese proceso"})),

@@ -150,6 +150,8 @@ import huella_banda
 import reparaciones_banda
 import receta_conteo
 import parche_plumas
+import cobertura
+import ediciones
 import cambios_texto
 import enlace_lentes
 try:
@@ -3044,6 +3046,14 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         if r is not None:
             return r
 
+    # Cambio de un VALOR de lo que ya existe ("mejor que sean 12 s", "cambia a 45 Hz", "la
+    # amarilla en lugar de la roja", "cambia el conteo a 5"...): se aplica sobre la vigente
+    # sin el modelo y se entrega solo si toda la sesion simulada cumple (ediciones).
+    if prev and not correccion:
+        r = _respuesta_edicion(texto, prev, reqs, etapas, intencion)
+        if r is not None:
+            return r
+
     # "La pluma 1 debe bajar cuando la banda vuelve a avanzar" sobre una logica vigente que
     # ya cumple lo demas: se agrega sin el modelo (banco C9 t3: el modelo cambiaba la
     # subida por la bajada o rompia la repeticion).
@@ -3375,6 +3385,19 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                     msgs_iter.append({"role": "assistant", "content": json.dumps(candidato, ensure_ascii=False)})
                     msgs_iter.append({"role": "user", "content": texto_h})
                     continue
+        if not errores and intento < intentos and not fallas:
+            # Cobertura (lo ultimo, cuando todo lo demas ya pasa): cada dato concreto de ESTE
+            # mensaje (tiempos, Hz, sentido, luces, plumas, parpadeo) tiene que estar en la
+            # logica (banco N2/N12: se perdian sin aviso).
+            falta = cobertura.faltantes(texto, cand)
+            if falta:
+                log.warning(f"Banda v7 cobertura {intento}/{intentos}: falta {falta}")
+                metricas_lavo.sumar("errores_cobertura", 1)
+                ultimo_cargable = (cand, candidato)
+                msgs_iter = list(messages)
+                msgs_iter.append({"role": "assistant", "content": json.dumps(candidato, ensure_ascii=False)})
+                msgs_iter.append({"role": "user", "content": cobertura.mensaje(falta)})
+                continue
         if not errores:
             cfg = cand
             break
@@ -3423,6 +3446,12 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     if cfg is not None and fallas:
         log.warning(f"Banda v7: la simulacion aun no cumple: {fallas}")
         avisos_extra.append(_aviso_simulacion(fallas))
+    falta_final = cobertura.faltantes(texto, cfg) if cfg is not None else []
+    if falta_final:
+        # Lo que pidio este mensaje y no esta en la logica: se dice (antes se perdia sin aviso).
+        log.warning(f"Banda v7: cobertura — falta {falta_final}")
+        metricas_lavo.poner("cobertura_falta", falta_final)
+        avisos_extra.append(cobertura.aviso(falta_final))
     if cfg is not None and correccion:
         diag = (analisis_llm or {}).get("diagnostico") or "; ".join(diagnostico)
         if diag:
@@ -3541,6 +3570,9 @@ def _respuesta_constructor(texto: str, resp: dict, reqs: list, intencion: dict, 
     if reglas:
         reqs = reglas_banda.combinar(reqs, reglas_banda.requisitos(reglas))
     fallas = comportamiento.verificar(cand, reqs) + (reglas_banda.verificar(cand, reglas) if reglas else [])
+    falta = cobertura.faltantes(texto, cand)
+    if falta and not fallas:
+        fallas = [f"cobertura: falta {', '.join(falta)}"]
     if fallas:
         log.warning(f"Constructor de la banda ({fuente}): la simulacion no cumple ({fallas}); lo resuelve el modelo.")
         return None
@@ -3554,6 +3586,50 @@ def _respuesta_constructor(texto: str, resp: dict, reqs: list, intencion: dict, 
         "fuente": fuente, "edicion": False, "intencion": intencion_banda.resumen(intencion),
         "reglas": reglas, "comportamiento": {"probado": probado, "fallas": []},
         "avisos": ["Ajuste automático: " + a for a in ajustes]})
+
+
+def _respuesta_edicion(texto: str, prev, reqs: list, etapas: dict, intencion: dict):
+    """Cambio de valor sobre la logica vigente sin el modelo (ediciones.py). Se entrega
+    solo si valida, la simulacion de TODA la sesion cumple (requisitos + etapas), esta lo
+    que pide el mensaje (cobertura) y no rompe nada que la vigente cumplia (regresion).
+    None = que lo resuelva el camino de siempre."""
+    import lavo_motor
+    if not isinstance(prev, dict):
+        return None
+    r = ediciones.aplicar(texto, prev)
+    if r is None:
+        return None
+    resp, hecho = r
+    try:
+        cand = lavo_motor.cfg_desde_respuesta(resp)
+        cand["respuesta_llm"] = {k: v for k, v in resp.items() if k not in ("analisis", "preguntas", "no_soportado")}
+        errores = validar_logica_banda(cand)
+        cfg_prev = lavo_motor.cfg_desde_respuesta(prev)
+    except (ValueError, TypeError) as e:
+        errores, cand, cfg_prev = [str(e)], None, None
+    if errores:
+        log.warning(f"Edicion directa ({hecho}): no valida ({errores}); lo resuelve el modelo.")
+        return None
+    fallas = comportamiento.verificar(cand, reqs) + [f"cobertura: falta {x}" for x in cobertura.faltantes(texto, cand)]
+    if not fallas and etapas.get("aplica"):
+        fallas = simulacion_etapas.verificar(cand, etapas)
+    if not fallas and (reqs or etapas.get("aplica")):
+        antes = regresion_banda.bateria(cfg_prev, reqs, etapas)
+        despues = regresion_banda.bateria(cand, reqs, etapas)
+        cmp_reg = regresion_banda.comparar(antes, despues)
+        if not regresion_banda.aceptable(cmp_reg, antes, despues):
+            fallas = [f"regresion: {regresion_banda.resumen(cmp_reg)}"]
+    if fallas:
+        log.warning(f"Edicion directa ({hecho}): la simulacion no cumple ({fallas}); lo resuelve el modelo.")
+        return None
+    log.info(f"/generar-logica banda v7: edicion directa sobre la vigente ({hecho})")
+    metricas_lavo.poner("fuente", "edicion")
+    metricas_lavo.poner("contexto", ["ediciones"])
+    return _respuesta_banda_v7(texto, cand, {}, extra={
+        "fuente": "edicion", "edicion": True, "intencion": intencion_banda.resumen(intencion),
+        "comportamiento": {"probado": [x["tipo"] + (f" {x['senal']}" if x.get("senal") else "") for x in reqs],
+                           "fallas": []},
+        "avisos": ["Cambio aplicado sin rehacer lo demás: " + "; ".join(hecho) + "."]})
 
 
 # La instruccion SOLO habla de la pluma en la pausa ("la pluma 1 debe bajar cuando la banda
@@ -3593,7 +3669,7 @@ def _respuesta_parche_plumas(texto: str, prev, cfg_prev, reqs: list, etapas: dic
     if errores:
         log.warning(f"Parche de plumas: no valida ({errores}); lo resuelve el modelo.")
         return None
-    fallas = comportamiento.verificar(cand, reqs)
+    fallas = comportamiento.verificar(cand, reqs) + [f"cobertura: falta {x}" for x in cobertura.faltantes(texto, cand)]
     if not fallas and etapas.get("aplica"):
         fallas = simulacion_etapas.verificar(cand, etapas)
     if fallas:
@@ -3625,6 +3701,11 @@ def _respuesta_receta(texto: str, plan: dict, textos: list, intencion: dict, pre
         return None
     reqs = [r for r in comportamiento.requisitos(textos) if r["tipo"] != "conteo"]
     fallas = receta_conteo.verificar(cand, plan) + comportamiento.verificar(cand, reqs)
+    # La receta rearma TODA la sesion: lo de cualquier mensaje tiene que estar (banco N12:
+    # "cambia de sentido" del turno 1 se perdia otra vez en el turno 2).
+    falta = cobertura.faltantes(" ".join(str(x) for x in textos), cand)
+    if falta:
+        fallas.append(f"cobertura: falta {', '.join(falta)} (la receta no lo hace)")
     if fallas:
         log.warning(f"Receta de conteo: la simulacion no cumple ({fallas}); lo resuelve el modelo.")
         return None
