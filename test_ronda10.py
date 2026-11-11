@@ -16,6 +16,10 @@ aunque el modelo lo hiciera bien:
   5. de punta a punta: "esta mal, cambiala a 45 Hz" sin el modelo; "no lo esta haciendo
      bien" pregunta; "quitala" no insiste en volver a ponerla; una edicion que no cambio
      nada lo avisa
+  6. cambiar el boton de arranque ("que arranque con I2", "inicie con I2", "el boton de
+     arranque a I2"): la instruccion mas reciente manda; el paro con el boton que ahora
+     arranca deja de exigirse; "ahora que se detenga con I1" reemplaza el paro;
+     "en lugar de I1" / "cambia el sensor 1 por el 2" actualizan las senales
 
 Corre sin Groq y sin PLC (lavo_sim):  python test_ronda10.py
 """
@@ -42,7 +46,9 @@ logging.disable(logging.WARNING)
 
 with contextlib.redirect_stdout(io.StringIO()):
     import app
+import cambios_texto as ct
 import cobertura
+import comportamiento as co
 import edicion_incremental as ei
 import ediciones
 import huella_banda as hb
@@ -252,5 +258,52 @@ check(res.status == "ok" and len(llamadas) == 1 and not any("No encontré" in w 
 res = pedir("Que la luz verde encienda mientras la banda avanza.", copy.deepcopy(C2))
 check(res.status == "ok" and any("La lógica quedó igual" in w for w in res.warnings),
       "una edicion que no cambio nada lo avisa (nunca en silencio)")
+
+# ── 6. cambiar el boton de arranque (lentes: 'que arranque con I2' seguia en I1) ──
+escenario("6. la instruccion mas reciente manda sobre el boton de arranque y de paro")
+
+
+def reqs_de(hist, texto):
+    return sorted(r["tipo"] + " " + str(r.get("senal")) for r in co.de_sesion(hist, texto, {}))
+
+
+for t1 in ["Quiero que la banda inicie al presionar I1.", "Que la banda arranque al presionar I1 a 30 Hz.",
+           "Al presionar I1 la banda avanza a 30 Hz y con I2 se detiene."]:
+    for t2 in ["Que arranque con I2.", "Ahora quiero que arranque al presionar I2.", "Cambia para que arranque con I2.",
+               "Mejor que inicie con I2.", "Que inicie con I2 en lugar de I1.", "Está mal, debe arrancar con I2.",
+               "Cambia el botón de arranque a I2.", voz("Que la banda inicie al presionar I2.")]:
+        r = reqs_de([t1], t2)
+        check("arranca_con I2" in r and "arranca_con I1" not in r and "para_con I2" not in r,
+              f"«{t1[:30]}…» + «{t2}» -> {r}")
+H = ["Al presionar I1 la banda avanza a 30 Hz y con I2 se detiene."]
+check(reqs_de(H, "Ahora que se detenga con I1.") == ["arranca_con I1", "para_con I1"],
+      "'ahora que se detenga con I1' reemplaza el paro con I2")
+check(reqs_de(H, "Además, con I1 también se detiene.") == ["arranca_con I1", "para_con I1", "para_con I2"],
+      "'tambien con I1' lo suma")
+check(reqs_de(H, "Agrega que la luz roja encienda con I2.") == ["arranca_con I1", "para_con I2"],
+      "hablar de una luz con I2 no toca el arranque ni el paro")
+check(ct.sustituciones("Que arranque con I2 en lugar de I1.")["s"] == [("I1", "I2")], "I1 -> I2 (en lugar de)")
+check(ct.sustituciones("En lugar del sensor 1, usa el sensor 2.")["s"] == [("S1", "S2")], "S1 -> S2 (en lugar del)")
+check(ct.sustituciones("Cambia el sensor 1 por el sensor 2.")["s"] == [("S1", "S2")], "S1 -> S2 (cambia por)")
+r = co.de_sesion(["Al presionar I1 la banda avanza a 30 Hz. Cuando el sensor 1 detecta una caja, la banda se detiene "
+                  "3 segundos y luego sigue."], "Que la pausa sea con el sensor 2 en lugar del sensor 1.", {})
+check([x["senal"] for x in r if x["tipo"] == "pausa_sensor"] == ["S2"], "la pausa pasa al sensor 2")
+
+# De punta a punta: la logica vigente la armo el constructor (eventos I1 avanzar / I2 detener)
+# y el modelo cambia el arranque a I2: antes se conservaba la vigente ("rompia para_con I2").
+VIG = {"name": "Banda con I1", "banda": {"mover": True, "direccion": "derecha", "frecuencia_hz": 30},
+       "eventos": [{"cuando": "I1", "acciones": {"banda": "avanzar"}}, {"cuando": "I2", "acciones": {"banda": "detener"}}]}
+NUEVA = copy.deepcopy(VIG)
+NUEVA["eventos"] = [{"cuando": "I2", "acciones": {"banda": "avanzar"}}, {"cuando": "I1", "acciones": {"banda": "detener"}}]
+llamadas.clear()
+respuesta["r"] = NUEVA
+vig = cfg(copy.deepcopy(VIG))
+ctx = {"programa_anterior": {"metadata": {"name": "x", "engine_config": vig}}, "historial": H}
+with contextlib.redirect_stdout(io.StringIO()):
+    res = asyncio.run(app.generar_logica(app.LogicaRequest(texto="Que arranque con I2.", device="banda", contexto=ctx)))
+mot = res.logic["band"]["engine"].get("motor") or {}
+check(res.status == "ok" and res.analysis.get("fuente") == "modelo" and mot.get("arranque") == "I2"
+      and len(llamadas) == 1, f"'Que arranque con I2' se aplica a la primera ({res.analysis.get('fuente')}, {mot}, "
+                              f"{len(llamadas)} llamadas)")
 
 print(f"\nTODAS LAS PRUEBAS DE LA RONDA 10 PASARON ({OK} comprobaciones).")

@@ -108,12 +108,23 @@ _SIN_OTRO_NI_MARCHA = (r"(?:(?!\b(?:con|i ?\d|s ?\d|boton|y|e|o|avanz\w*|avanc\w
 _RX_PARO_BOTON = re.compile(rf"\b(?:con|al (?:presionar|pulsar|oprimir)|presionando|pulsando|cuando (?:presione|pulse))\s+"
                             rf"(?:el |la )?(?:boton |pulsador )?(i ?[12]|boton rojo|boton verde|rojo|verde)\b"
                             rf"{_SIN_OTRO_NI_MARCHA}{{0,40}}?\b"
-                            rf"{_VERBO_PARO}|\b(i ?[12])\s+(?:la |lo )?(?:detiene|para|apaga|frena)\b")
+                            rf"{_VERBO_PARO}|\b(i ?[12])\s+(?:la |lo )?(?:detiene|para|apaga|frena)\b|"
+                            # verbo antes del boton: "que se detenga con I1", "que pare al presionar I2"
+                            r"\b(?:se\s+)?(?:deten\w*|detien\w*|deteng\w*|pare|paren|frene\w*)\s+(?:la banda\s+)?"
+                            r"(?:con|al (?:presionar|pulsar|oprimir)|presionando|pulsando)\s+"
+                            r"(?:el |la )?(?:boton |pulsador )?(i ?[12])\b")
+# Verbos de arranque: tambien en subjuntivo y con "iniciar/empezar/comenzar" ("que arranque
+# con I2", "que la banda inicie al presionar I2": lentes, 10 nov, el cambio a I2 no se veia).
+_VERBO_ARRANQUE = (r"(?:arranc\w*|arranqu\w*|inici\w*|empiec\w*|empiez\w*|comienc\w*|comienz\w*|avanc\w*|avanz\w*|"
+                   r"muev\w*|mueva\w*|se pone en marcha|se ponga en marcha)")
 _RX_ARRANQUE_BOTON = re.compile(rf"\b(?:con|al (?:presionar|pulsar|oprimir)|presionando|pulsando|cuando (?:presione|pulse))\s+"
                                 rf"(?:el |la )?(?:boton |pulsador )?(i ?[12]|boton verde|boton rojo)\b{_SIN_OTRO}{{0,40}}?\b"
-                                r"(?:arranc\w*|avanc\w*|avanz\w*|muev\w*|se pone en marcha)|"
-                                r"\b(?:arranca\w*|avanz\w*|avanc\w*|mover|mueve)\s+(?:la banda\s+|la cinta\s+)?"
-                                r"con (?:el |la )?(?:boton |pulsador )?(i ?[12])\b")
+                                rf"{_VERBO_ARRANQUE}|"
+                                rf"\b(?:{_VERBO_ARRANQUE}|mover)\s+(?:la banda\s+|la cinta\s+)?"
+                                r"(?:con|al (?:presionar|pulsar|oprimir)|presionando|pulsando)\s+"
+                                r"(?:el |la )?(?:boton |pulsador )?(i ?[12]|boton verde|boton rojo)\b|"
+                                r"\b(?:boton|pulsador) de (?:arranque|inicio|marcha)\s+(?:sea |es |ahora sea |ahora es )?"
+                                r"(?:a |por |el |al )*(i ?[12])\b")
 
 
 # "Cuando S2 cuente 3 cajas prende la roja 5 s y que el contador se reinicie solo",
@@ -548,6 +559,7 @@ def requisitos(textos) -> list:
             if c:
                 reqs = [r for r in reqs if r["tipo"] != "conteo"]
                 reqs.append({"tipo": "conteo", **c, "texto": _fold(texto).strip()[:160]})
+        paro_dicho, arranque_dicho = set(), None        # botones que nombra ESTA instruccion
         for o in _oraciones(texto):
             # Solo oraciones sobre la BANDA: "al presionar I1 enciende la verde"
             # o "que la roja se detenga sola" hablan de luces, no del motor.
@@ -570,14 +582,27 @@ def requisitos(textos) -> list:
                 reqs = [r for r in reqs if r["tipo"] != "para_sola"]
                 reqs.append({"tipo": "para_sola", **cond, "texto": o.strip()})
             for m in _RX_PARO_BOTON.finditer(o):
-                s = _senal(m.group(1) or m.group(2))
-                if s and not any(r["tipo"] == "para_con" and r["senal"] == s for r in reqs):
+                s = _senal(next((g for g in m.groups() if g), None))
+                if not s:
+                    continue
+                if not paro_dicho and not re.search(r"\b(?:tambien|ademas)\b", o):
+                    # El boton de paro de ESTA instruccion reemplaza al de las anteriores
+                    # ("ahora que se detenga con I1"); "tambien con I1" lo suma.
+                    reqs = [r for r in reqs if r["tipo"] != "para_con"]
+                paro_dicho.add(s)
+                if not any(r["tipo"] == "para_con" and r["senal"] == s for r in reqs):
                     reqs.append({"tipo": "para_con", "senal": s, "texto": o.strip()})
             for m in _RX_ARRANQUE_BOTON.finditer(o):
-                s = _senal(m.group(1) or m.group(2))
+                s = _senal(next((g for g in m.groups() if g), None))
                 if s:
                     reqs = [r for r in reqs if r["tipo"] != "arranca_con"]
                     reqs.append({"tipo": "arranca_con", "senal": s, "texto": o.strip()})
+                    arranque_dicho = s
+        # El arranque pasa al boton que antes detenia ("que arranque con I2" y antes I2 la
+        # detenia): ese paro viejo ya no se exige (la mas reciente manda; el modelo decide
+        # con que se detiene ahora y lo dice). Si esta misma instruccion lo pide, se queda.
+        if arranque_dicho and arranque_dicho not in paro_dicho:
+            reqs = [r for r in reqs if not (r["tipo"] == "para_con" and r["senal"] == arranque_dicho)]
         # "Al llegar a 3, la banda avanza 5 s y luego se detiene": el paro es del CONTEO
         # (los 5 s se cuentan desde el objeto 3, no desde el arranque).
         pc = {} if _RX_SIN_PARO_SOLA.search(_fold(texto)) else paro_por_conteo(texto)
@@ -599,6 +624,10 @@ def requisitos(textos) -> list:
             for viejo, nuevo in subs["t"]:
                 if r.get("segundos") is not None and abs(float(r["segundos"]) - viejo) < 0.05:
                     r["segundos"] = nuevo
+            # "con I2 en lugar de I1", "cambia el sensor 1 por el sensor 2"
+            for viejo, nuevo in subs.get("s") or []:
+                if r.get("senal") == viejo:
+                    r["senal"] = nuevo
         # "Mejor que sean 12 segundos" (sin decir el anterior): se aplica al UNICO requisito
         # con tiempo que corresponde (por el contexto si lo hay); si hay varios, no se adivina.
         tn = None if subs["t"] else cambios_texto.tiempo_nuevo(texto)

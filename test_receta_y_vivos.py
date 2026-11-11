@@ -179,7 +179,12 @@ check(se.verificar(prog5(True), eo.detectar(T5, "banda", {})) == [], "la simulac
 escenario("4. Requisitos y etapas vivos")
 AM = "La luz de la secuencia 2 ahora debe ser la amarilla en lugar de la roja."
 SEIS = "En la secuencia 1 cambia los 10 segundos por 6 segundos."
-check(ct.sustituciones(AM) == {"q": [("Q5", "Q4")], "t": []} and ct.sustituciones(SEIS) == {"q": [], "t": [(10.0, 6.0)]},
+def _qt(d):
+    return {k: d[k] for k in ("q", "t")}       # "s" (senales) se prueba en test_ronda10
+
+
+check(_qt(ct.sustituciones(AM)) == {"q": [("Q5", "Q4")], "t": []}
+      and _qt(ct.sustituciones(SEIS)) == {"q": [], "t": [(10.0, 6.0)]},
       "lectura: roja -> amarilla; 10 s -> 6 s")
 check(ct.sustituciones("cambia la roja por la verde")["q"] == [("Q5", "Q3")], "'cambia la roja por la verde'")
 reqs = co.requisitos([T5, SEIS, AM])

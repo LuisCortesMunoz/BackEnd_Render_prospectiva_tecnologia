@@ -6,8 +6,11 @@ pedido, para que los requisitos y las etapas del historial no exijan lo viejo:
     "cambia la roja por la verde"                              -> Q5 -> Q3
     "cambia los 10 segundos por 6 segundos"                    -> 10 s -> 6 s
     "que sean 6 s en vez de 10 s"                              -> 10 s -> 6 s
+    "que arranque con I2 en lugar de I1"                       -> I1 -> I2
+    "cambia el sensor 1 por el sensor 2"                       -> S1 -> S2
 
-sustituciones(texto) -> {"q": [(Q_viejo, Q_nuevo)], "t": [(s_viejo, s_nuevo)]}
+sustituciones(texto) -> {"q": [(Q_viejo, Q_nuevo)], "t": [(s_viejo, s_nuevo)],
+                         "s": [(senal_vieja, senal_nueva)]}
 """
 
 import re
@@ -18,6 +21,22 @@ _COLOR = r"(verde|amarill[ao]|roj[ao])"
 _NUM = r"(\d+(?:[.,]\d+)?)"
 _SEG = r"\s*(?:s|seg|segundos?)\b"
 _ART = r"(?:(?:la|el|los|las)\s+)?(?:luz\s+)?"
+# Boton (I1/I2) o sensor (S1/S2); "boton verde/rojo" no (se confunde con las luces).
+_SEN = r"(?:(?:el|la|del)\s+)?((?:boton\s+|pulsador\s+)?i\s?[12]|(?:sensor\s?|s\s?)[12])\b"
+_RX_S = [
+    # Y en lugar/vez de Z
+    re.compile(rf"\b{_SEN}\s+en\s+(?:lugar|vez)\s+del?\s+{_SEN}"),
+    # cambia Z por Y
+    re.compile(rf"\bcambi\w*\s+{_SEN}\s+por\s+{_SEN}"),
+    # en lugar de Z, (usa|con|que sea) Y
+    re.compile(rf"\ben\s+(?:lugar|vez)\s+del?\s+{_SEN}\s*,?\s*(?:usa|use|utiliza|con|que sea|sea|pon\w*)\s+{_SEN}"),
+]
+
+
+def _canon_senal(x: str) -> str:
+    """"boton i2" -> I2, "sensor 1" / "s1" -> S1."""
+    x = re.sub(r"\s+", "", x)
+    return ("S" if x.startswith(("sensor", "s")) else "I") + x[-1]
 
 _RX_Q = [
     # Y en lugar/vez de Z
@@ -131,4 +150,13 @@ def sustituciones(texto: str) -> dict:
         m = rx.search(t)
         if m:
             s.append((_f(m.group(1)), _f(m.group(2))))
-    return {"q": [x for x in q if x[0] != x[1]], "t": [x for x in s if x[0] != x[1]]}
+    sen = []
+    m = _RX_S[0].search(t)
+    if m:
+        sen.append((_canon_senal(m.group(2)), _canon_senal(m.group(1))))
+    for rx in _RX_S[1:]:
+        m = rx.search(t)
+        if m:
+            sen.append((_canon_senal(m.group(1)), _canon_senal(m.group(2))))
+    return {"q": [x for x in q if x[0] != x[1]], "t": [x for x in s if x[0] != x[1]],
+            "s": [x for x in sen if x[0] != x[1]]}
