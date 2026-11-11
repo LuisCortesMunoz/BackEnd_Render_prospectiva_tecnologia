@@ -138,7 +138,9 @@ r = s.enviar("Cambia el último tiempo de 5 a 8 segundos", j([S1], segundos=8))
 check(r.status == "ok", "cambio aceptado")
 check(motor_v7(r)["timers"][0]["segundos"] == 8, "el timer quedo en 8 s")
 check(motor_v7(r)["eventos"] == [S1], "la pausa de S1 sigue igual")
-check("Cambia el último tiempo" in usuario() or "Ahora agrega" in usuario(), "historial en el prompt")
+# Desde la ronda 11 "de 5 a 8 segundos" es una edicion directa (sin el modelo, sin prompt).
+check(r.analysis.get("fuente") == "edicion" or "Cambia el último tiempo" in usuario() or "Ahora agrega" in usuario(),
+      "edicion directa (o historial en el prompt)")
 
 # ---------------------------------------------------------------------------
 escenario("4. Incorporar un segundo sensor a la logica existente")

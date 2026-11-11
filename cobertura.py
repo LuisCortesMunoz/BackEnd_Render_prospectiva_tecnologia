@@ -80,6 +80,25 @@ def _negado(t: str, pos: int, fin: int = None) -> bool:
     return bool(_NEG_DESPUES.search(despues[:m.start()] if m and m.start() > 0 else despues))
 
 
+# El valor VIEJO de un cambio ("cambia los 5 segundos ... a 6"): no se exige aunque
+# cambios_texto no reconozca la forma exacta (antes se pedia volver a poner el 5).
+_VIEJO_ANTES = re.compile(r"\b(?:cambi|aument|reduc|modific|ajust)\w*\s+[^\d.;]{0,30}?$")
+_VIEJO_DESPUES = re.compile(r"^[^\d.;]{0,40}?\b(?:a|por)\s+(?:los\s+|unos\s+)?\d")
+
+
+def _es_viejo(t: str, pos: int, fin: int) -> bool:
+    antes = t[max(0, pos - 45):pos]
+    cortes = list(_CORTE.finditer(antes))
+    clausula = antes[cortes[-1].end():] if cortes else antes
+    if not _VIEJO_ANTES.search(clausula) or re.search(r"\b(?:a|por)\s+$", clausula):
+        return False
+    # "de la pluma 1 a 6": el numero de una etiqueta no corta la busqueda del valor nuevo.
+    despues = re.sub(r"\b(pluma|sensor|secuencia|paso|salida|entrada|boton|contador|[iqs])\s*\d\b", r"\1",
+                     t[fin:fin + 50])
+    m = _CORTE.search(despues)
+    return bool(_VIEJO_DESPUES.search(despues[:m.start()] if m else despues))
+
+
 def _tiempos(o, out):
     if isinstance(o, dict):
         for k, v in o.items():
@@ -102,21 +121,28 @@ def faltantes(texto: str, cfg: dict) -> list:
     s_eng = json.dumps(eng, ensure_ascii=False).upper()
     subs = cambios_texto.sustituciones(texto)
     viejos_t = {round(a, 2) for a, _ in subs["t"]}
+    viejos_hz = {round(a, 2) for a, _ in subs["hz"]}
     viejos_q = {a for a, _ in subs["q"]}
     out = []
 
     tiempos = _tiempos(eng, set())
+    pedidos = []
     for m in _RX_SEG.finditer(t):
-        if _negado(t, m.start(), m.end()):
+        if _negado(t, m.start(), m.end()) or _es_viejo(t, m.start(), m.end()):
             continue
         v = float(m.group(1).replace(",", ".")) * (60 if m.group(2).startswith("min") else 1)
-        v = round(v, 2)
+        pedidos.append(round(v, 2))
+    # El valor nuevo de un cambio aunque se diga sin unidad ("cambia los 5 segundos a 6").
+    pedidos += [round(b, 2) for _, b in subs["t"]]
+    for v in dict.fromkeys(pedidos):
         if v in viejos_t or v <= 0:
             continue
         if not any(abs(v - x) < 0.06 for x in tiempos):
             out.append(f"{v:g} s")
 
-    hz = [float(m.group(1).replace(",", ".")) for m in _RX_HZ.finditer(t) if not _negado(t, m.start(), m.end())]
+    hz = [float(m.group(1).replace(",", ".")) for m in _RX_HZ.finditer(t)
+          if not _negado(t, m.start(), m.end()) and not _es_viejo(t, m.start(), m.end())]
+    hz = [x for x in hz if round(x, 2) not in viejos_hz] + [b for _, b in subs["hz"]]
     if hz and band.get("enable") is not False:
         f = band.get("freq_hz")
         if f is None or not any(abs(float(f) - x) < 0.6 for x in hz):

@@ -6,7 +6,8 @@ rehacer todo (100 s y a veces rompia lo demas) o a no aplicarlo (banco N2: "mejo
 que sean 12 segundos" se quedaba en 8 s). Aqui se aplica directo sobre el JSON
 vigente:
 
-  tiempo con el anterior   "cambia los 10 s por 6 s", "6 s en vez de 10 s"
+  tiempo con el anterior   "cambia los 10 s por 6 s", "6 s en vez de 10 s", hablado: "cambia los 5
+                           segundos a 6", "cambia los cinco segundos a seis" (cambios_texto)
   tiempo nuevo             "mejor que sean 12 segundos", "que la verde dure solo 3 s",
                            "la espera debe ser de 5 s"  -> el UNICO tiempo que
                            corresponde (la luz / pluma que nombra manda; si no nombra
@@ -147,6 +148,12 @@ def _tiempo_nuevo(resp, ctx, n, sq=None):
         cand = [x for x in tiempos if x[3] & quiere_q]
     else:
         cand = [x for x in tiempos if not quiere or x[3] & quiere]
+    # Pasos de menos de 1 s (el pulso de paro al final de una secuencia) no son un tiempo
+    # que el usuario haya dicho: "que sean 6 segundos" se refiere al otro.
+    if len(cand) > 1:
+        dichos = [x for x in cand if x[2] >= 1]
+        if len(dichos) == 1:
+            cand = dichos
     if len(cand) == 1:
         cont, clave, viejo, _ = cand[0]
         if abs(viejo - n) < 0.05:
@@ -224,7 +231,9 @@ def aplicar(texto: str, resp_vigente: dict):
         hecho = _tiempo_viejo(resp, viejo, nuevo, sq)
     else:
         tn = cambios_texto.tiempo_nuevo(texto)
-        m_hz = _RX_HZ.search(t)
+        # "cambia los 30 Hz a 45": el nuevo es el de despues (antes se tomaba el primero).
+        sub_hz = [m for rx in cambios_texto._RX_HZ_SUB for m in rx.finditer(t)]
+        m_hz = sub_hz[0] if sub_hz else _RX_HZ.search(t)
         m_v = _RX_VECES.search(t)
         n_conteo = comportamiento.cambio_conteo(texto)
         if tn and not m_hz:
@@ -232,9 +241,9 @@ def aplicar(texto: str, resp_vigente: dict):
             spans = [m.span() for m in cambios_texto._RX_TIEMPO_SOLO.finditer(t)]
             hecho = _tiempo_nuevo(resp, ctx, n, sq)
         elif m_hz and not tn:
-            spans = [m_hz.span()]
+            spans = [m.span() for m in sub_hz] or [m_hz.span()]
             b = resp.setdefault("banda", {})
-            nuevo = float(m_hz.group(1).replace(",", "."))
+            nuevo = float((m_hz.group("n") if sub_hz else m_hz.group(1)).replace(",", "."))
             if b.get("frecuencia_hz") is not None and abs(float(b["frecuencia_hz"]) - nuevo) > 0.5:
                 b["frecuencia_hz"] = int(round(nuevo))
                 hecho = [f"{nuevo:g} Hz"]

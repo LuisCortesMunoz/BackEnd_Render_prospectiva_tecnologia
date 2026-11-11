@@ -235,7 +235,12 @@ _RX_PARO_NEGADO = re.compile(r"\b(?:sin|nunca|jamas|ya no|no)\s+(?:que\s+)?(?:se
 # Cambios sobre lo ya pedido (la instruccion mas reciente manda sobre el historial):
 # "cambia el conteo a 5", "5 cajas en lugar de 3", "en vez de 3 que sean 5".
 _RX_CAMBIA_CONTEO = re.compile(
-    rf"\b(?:conteo|contador|cuenta|preset|limite)\b[^.;]{{0,40}}?\b(?:a|en|de|sea|sean)\s+({_NUM_RX})\b{_NO_TIEMPO}|"
+    # "cambia el contador de 3 a 5": el 3 es el viejo (antes se tomaba el primero).
+    rf"\b(?:conteo|contador|cuenta|preset|limite)\b[^.;]{{0,40}}?\b(?:a|en|de|sea|sean)\s+({_NUM_RX})\b"
+    rf"(?!\s+(?:cajas\s+|piezas\s+|objetos\s+)?(?:a|por)\s+(?:{_NUM_RX})\b){_NO_TIEMPO}|"
+    # "cambia las 3 cajas a 5"
+    rf"\bcambi\w*\s+(?:las\s+|los\s+)?(?:{_NUM_RX})\s+(?:cajas|piezas|objetos|productos|detecciones|conteos)\s+"
+    rf"(?:a|por)\s+({_NUM_RX})\b{_NO_TIEMPO}|"
     rf"\b({_NUM_RX})\s+(?:cajas|piezas|objetos|productos|detecciones|conteos)?\s*en (?:lugar|vez) de\s+(?:{_NUM_RX})\b|"
     rf"\ben (?:lugar|vez) de\s+(?:{_NUM_RX})\s+(?:cajas|piezas|objetos|productos|detecciones|conteos)?\s*,?\s*"
     rf"(?:que sean|sean|a|que llegue a)\s+({_NUM_RX})\b{_NO_TIEMPO}")
