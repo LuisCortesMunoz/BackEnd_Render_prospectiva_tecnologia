@@ -91,7 +91,10 @@ def mensajes(texto: str, acl: dict = None) -> list:
 
 def _dudas(data: dict, acl: dict) -> list:
     out = []
-    for i, d in enumerate(data.get("dudas") or [], 1):
+    dudas = data.get("dudas")
+    if not isinstance(dudas, list):
+        return out                                    # otra forma: se ignora (no es una pregunta usable)
+    for i, d in enumerate(dudas, 1):
         if not isinstance(d, dict):
             continue
         campo = _CAMPO.sub("_", co._fold(d.get("campo") or f"duda_{i}")).strip("_")[:30] or f"duda_{i}"
@@ -116,13 +119,19 @@ def extraer(texto: str, acl: dict, llamar) -> dict:
     if data.get("secuencia"):
         out["secuencia"] = True
         return out
-    out["dudas"] = _dudas(data, acl)
+    try:
+        out["dudas"] = _dudas(data, acl)
+    except Exception as e:                            # dudas con otra forma: no se preguntan
+        out["problemas"].append(f"dudas del extractor ilegibles ({type(e).__name__})")
     if out["dudas"]:
         return out
     try:
         out["reglas"] = reglas_banda.validar(data, texto)
     except ValueError as e:
         out["problemas"] += list(e.args[0]) if e.args and isinstance(e.args[0], list) else [str(e)]
+    except Exception as e:                            # reglas con otra forma: se sigue sin ellas
+        out["reglas"] = None
+        out["problemas"].append(f"el extractor devolvio reglas con otra forma ({type(e).__name__}: {e})")
     return out
 
 

@@ -5,7 +5,7 @@
 # Historial : respuestas/historial.json   (persistente entre reinicios)
 # Memoria   : memoria/ejemplos.json       (feedback del usuario → mejores respuestas)
 
-import os, re, json, time, logging, datetime, threading, copy
+import os, re, json, time, logging, datetime, threading, copy, traceback
 import hmac, hashlib, asyncio
 import socket, ipaddress, subprocess, platform
 from concurrent.futures import ThreadPoolExecutor
@@ -151,6 +151,7 @@ import reparaciones_banda
 import receta_conteo
 import parche_plumas
 import cobertura
+import forma_v7
 import ediciones
 import cambios_texto
 import enlace_lentes
@@ -1126,7 +1127,14 @@ def validar_logica_banda(cfg: dict) -> list:
         # con NameError, y eso tumbaba /generar-logica con un 500.
         log.warning(f"plc_banda no disponible, validacion minima de la banda: {e!r}")
     else:
-        return plc_banda.validar_config(cfg)
+        try:
+            return plc_banda.validar_config(cfg)
+        except (AttributeError, KeyError, IndexError, TypeError, ValueError) as e:
+            # Un JSON del modelo con otra forma (p. ej. pasos de secuencia como texto)
+            # es un error de validacion que el modelo puede corregir, no un 500.
+            log.warning(f"validar_logica_banda: forma inesperada ({type(e).__name__}: {e})")
+            return [f"El JSON no tiene la forma esperada del motor v7 ({type(e).__name__}: {e}). "
+                    "Cada bloque debe ser un objeto o lista de objetos como en el formato indicado."]
 
     errores = []
     if not isinstance(cfg, dict):
@@ -2307,6 +2315,29 @@ def _token_valido(token: str) -> bool:
     return hmac.compare_digest(firma, esperada)
 
 
+# Red general: ningun endpoint responde un 500 sin explicacion (los lentes solo
+# mostraban "HTTP 500"). Se registra PRIMERO, asi queda por dentro de la
+# contrasena y de CORS: la respuesta de error lleva cabeceras CORS y la web
+# puede leer el mensaje. El traceback completo queda en el log (Render -> Logs).
+def _lugar_del_error(e: BaseException) -> str:
+    tb = traceback.extract_tb(e.__traceback__)
+    propios = [x for x in tb if os.path.dirname(os.path.abspath(x.filename)) == os.path.dirname(os.path.abspath(__file__))]
+    x = (propios or tb or [None])[-1]
+    return f" en {os.path.basename(x.filename)}:{x.lineno}" if x else ""
+
+
+@app.middleware("http")
+async def errores_controlados(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as e:
+        log.exception(f"Error no controlado en {request.method} {request.url.path}")
+        return JSONResponse(
+            {"detail": f"Error interno del servidor ({type(e).__name__}{_lugar_del_error(e)}: "
+                       f"{str(e)[:200]}). Intenta de nuevo; si se repite, avisa con este mensaje."},
+            status_code=500)
+
+
 # OJO con el orden: este middleware se registra ANTES que CORSMiddleware, para
 # que CORS quede por fuera. Starlette ejecuta primero el ultimo registrado, y
 # si el 401 saliera sin cabeceras CORS el navegador reportaria un error de CORS
@@ -2914,17 +2945,34 @@ def _programa_previo_v7(req) -> Optional[dict]:
     import lavo_motor
     if not (req.contexto and req.contexto.programa_anterior):
         return None
-    prev_cfg = (req.contexto.programa_anterior.get("metadata", {}) or {}).get("engine_config") or {}
-    band = prev_cfg.get("band") if isinstance(prev_cfg, dict) else None
-    if lavo_motor.es_motor_v7(prev_cfg):
-        return prev_cfg.get("respuesta_llm") or {"banda": {"mover": band.get("enable") is not False,
-                                                          "direccion": band.get("direction"),
-                                                          "frecuencia_hz": band.get("freq_hz")},
-                                                 **band["engine"]}
-    if banda_motor.es_motor(prev_cfg):
-        return {"banda": {"mover": band.get("enable") is not False, "direccion": band.get("direction"),
-                          "frecuencia_hz": band.get("freq_hz")}, **lavo_motor.desde_v6(band["engine"])}
-    return None
+    # Lo manda el cliente (web o lentes): con otra forma se ignora en lugar de tumbar
+    # la generacion (se genera como logica nueva y queda en el log).
+    try:
+        meta = req.contexto.programa_anterior.get("metadata")
+        prev_cfg = (meta.get("engine_config") if isinstance(meta, dict) else None) or {}
+        if not isinstance(prev_cfg, dict):
+            return None
+        band = prev_cfg.get("band")
+        prev = None
+        if lavo_motor.es_motor_v7(prev_cfg):
+            prev = prev_cfg.get("respuesta_llm") or {"banda": {"mover": band.get("enable") is not False,
+                                                               "direccion": band.get("direction"),
+                                                               "frecuencia_hz": band.get("freq_hz")},
+                                                     **band["engine"]}
+        elif banda_motor.es_motor(prev_cfg):
+            prev = {"banda": {"mover": band.get("enable") is not False, "direccion": band.get("direction"),
+                              "frecuencia_hz": band.get("freq_hz")}, **lavo_motor.desde_v6(band["engine"])}
+        if prev is None:
+            return None
+        prev, forma = forma_v7.normalizar(copy.deepcopy(prev))
+        if forma:
+            log.warning(f"Programa anterior con otra forma, se ignora: {forma}")
+            return None
+        lavo_motor.cfg_desde_respuesta(prev)             # que se pueda leer
+        return prev
+    except Exception as e:
+        log.warning(f"Programa anterior ilegible, se ignora ({type(e).__name__}: {e})")
+        return None
 
 
 def _segundos_generacion() -> float:
@@ -2939,6 +2987,13 @@ def _hay_tiempo_para_reintento(t_intento) -> bool:
         return True
     ultimo = time.perf_counter() - t_intento
     return _segundos_generacion() + ultimo + MARGEN_FINAL_S <= TIEMPO_MAX_S
+
+
+class _FormaV7(Exception):
+    """El JSON del modelo no tiene la forma del motor v7 (ver forma_v7)."""
+    def __init__(self, problemas):
+        super().__init__("; ".join(problemas))
+        self.problemas = problemas
 
 
 def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaResponse":
@@ -3236,7 +3291,14 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
             raise HTTPException(422, str(e))
         except Exception as e:
             log.error(f"Error generar-logica banda v7 (modelo): {e}")
-            raise HTTPException(500, str(e))
+            raise HTTPException(500, f"No se pudo consultar el modelo de IA ({type(e).__name__}: {e}). Intenta de nuevo.")
+
+        # Forma del JSON (forma_v7): con otra forma ("motor": "I1", pasos como texto...)
+        # nada de lo que sigue la puede leer; el modelo la corrige en el siguiente intento.
+        candidato, forma = forma_v7.normalizar(candidato)
+        if forma:
+            log.warning(f"Banda v7 forma {intento}/{intentos}: {forma}")
+            metricas_lavo.sumar("errores_forma", 1)
 
         pedidas = [q for q in (candidato.get("preguntas") or []) if isinstance(q, dict)]
         preguntas = aclaraciones.sin_respondidas(pedidas, acl)
@@ -3259,6 +3321,8 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                 assumptions=[], analysis={"equipo": "banda", "motor_v7": True, "contexto": plan,
                                           "analisis": candidato.get("analisis") or {}})
         try:
+            if forma:
+                raise _FormaV7(forma)
             candidato = aclaraciones.aplicar_banda_v7(candidato, acl)
             candidato, ajustes = reparaciones_banda.aplicar(candidato, texto_sesion,
                                                             [str(h) for h in historial] + [texto])
@@ -3270,8 +3334,11 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
             cand["respuesta_llm"] = {k: v for k, v in candidato.items()
                                      if k not in ("analisis", "preguntas", "no_soportado")}
             errores = validar_logica_banda(cand)
-        except (ValueError, TypeError) as e:
-            cand, errores = None, [str(e)]
+        except _FormaV7 as e:
+            cand, errores = None, list(e.problemas)
+        except (ValueError, TypeError, AttributeError, KeyError, IndexError) as e:
+            # Forma inesperada del JSON (p. ej. "motor": "I1"): se le pide al modelo corregirla.
+            cand, errores = None, [f"El JSON no tiene la forma esperada ({type(e).__name__}: {e})."]
 
         if cand is not None and lavo_motor.falta_frecuencia(cand) and all("frecuencia" in e for e in errores):
             return LogicaResponse(
@@ -3439,6 +3506,8 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                 "comportamiento": {"probado": list(base_reg), "fallas": [k for k, f in base_reg.items() if f]}})
         metricas_lavo.poner("regresion", {"arregladas": cmp_reg["arregladas"], "siguen": cmp_reg["siguen"]})
     analisis_llm = candidato.get("analisis") if isinstance(candidato, dict) else {}
+    if not isinstance(analisis_llm, dict):
+        analisis_llm = {}
     # Avisos informativos: el programa se entrega igual (sin pedir confirmar);
     # si no hace lo pedido, el usuario pide corregirlo. El detalle tecnico de
     # las fallas queda en analysis.comportamiento y en el log.
@@ -3780,6 +3849,8 @@ def _respuesta_banda_v7(texto: str, cfg: dict, analisis_llm: dict, extra: dict =
                         confirmada_antes: bool = False) -> "LogicaResponse":
     """Compatibilidad, registros, historial y estado final (modelo o memoria)."""
     import lavo_motor
+    if not isinstance(analisis_llm, dict):
+        analisis_llm = {}             # el modelo a veces manda "analisis" como texto
     compat = lavo_motor.analizar_compatibilidad(texto, cfg["band"], analisis_llm)
     cfg["compatibilidad"] = compat
     bloque = lavo_motor.compilar_motor(cfg["band"])
@@ -4057,6 +4128,16 @@ async def generar_logica(req: LogicaRequest):
             metricas_lavo.sumar("errores_validacion", 1)
         metricas_lavo.cerrar(f"error_{e.status_code}")
         raise
+    except Exception as e:
+        # Nunca un 500 sin explicacion (los lentes solo veian "HTTP 500"): el traceback
+        # completo va al log de Render y el mensaje dice que fallo y donde.
+        log.exception("Error no controlado en /generar-logica")
+        try:
+            metricas_lavo.cerrar("error_500")
+        except Exception:
+            pass
+        raise HTTPException(500, f"Error interno al generar ({type(e).__name__}{_lugar_del_error(e)}: "
+                                 f"{str(e)[:200]}). Intenta de nuevo o dilo con otras palabras.")
     resp.analysis = {**(resp.analysis or {}), "metricas": metricas_lavo.cerrar(resp.status)}
     return resp
 
