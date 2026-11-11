@@ -3031,8 +3031,12 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
         log.info(f"/generar-logica banda v7: texto corregido: {texto!r} -> {corregido!r}")
         texto = corregido
     historial = [cambios_texto.corregir(h) for h in historial]
-    # "revisa", "no esta funcionando", "corrige"...: la logica activa falla.
-    correccion = bool(prev) and edicion_incremental.es_correccion(texto)
+    # Queja sobre la logica activa (edicion_incremental.clasificar): "vaga" ("no lo hace
+    # bien"), "falla" ("con I2 no se detiene") o "con_dato" ("esta mal, cambiala a 45 Hz").
+    clase = edicion_incremental.clasificar(texto) if prev else None
+    correccion = clase is not None
+    if clase:
+        metricas_lavo.poner("clase_correccion", clase)
     # Lo que se entendio de la instruccion, en un solo formato (intencion_banda):
     # movimiento basico, acciones en orden y comportamientos que se prueban simulando.
     intencion = intencion_banda.analizar(texto, historial, acl, prev, correccion)
@@ -3058,7 +3062,7 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     zona = edicion_incremental.localizar(texto, etapas, diagnostico, acl) if correccion else None
     if zona is not None:
         metricas_lavo.poner("zona", {k: zona[k] for k in ("modulos", "etapas")})
-        if zona["vago"] and not diagnostico and "falla" not in acl:
+        if zona["vago"] and not diagnostico and "falla" not in acl and clase != "con_dato":
             # "revisa" sin decir que y la simulacion no ve fallas: se pregunta con las etapas reales.
             log.info("/generar-logica banda v7: correccion vaga — se pregunta que parte falla")
             return LogicaResponse(
@@ -3104,8 +3108,10 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
     # Cambio de un VALOR de lo que ya existe ("mejor que sean 12 s", "cambia a 45 Hz", "la
     # amarilla en lugar de la roja", "cambia el conteo a 5"...): se aplica sobre la vigente
     # sin el modelo y se entrega solo si toda la sesion simulada cumple (ediciones).
-    if prev and not correccion:
-        r = _respuesta_edicion(texto, prev, reqs, etapas, intencion)
+    # "Esta mal, cambiala a 45 Hz" tambien: la queja no cambia que sea un cambio de valor.
+    if prev and (not correccion or clase == "con_dato"):
+        r = _respuesta_edicion(texto, prev, reqs, etapas, intencion,
+                               texto_cambio=edicion_incremental.sin_queja(texto) if correccion else None)
         if r is not None:
             return r
 
@@ -3435,7 +3441,7 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                 log.warning(f"Banda v7: huella no disponible ({e}).")
                 difs_h = None
             if difs_h is not None:
-                fuera = huella_banda.fuera_de_zona(difs_h, zona_h)
+                fuera = huella_banda.fuera_de_zona(difs_h, zona_h, prev, cand.get("respuesta_llm"))
                 texto_h = None
                 # Solo cambios FUERA de lo pedido. "Sin efecto" no se juzga con la huella:
                 # la bateria fija no reproduce cada historia (S1 -> S2 con pausa...) y
@@ -3452,10 +3458,11 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
                     msgs_iter.append({"role": "assistant", "content": json.dumps(candidato, ensure_ascii=False)})
                     msgs_iter.append({"role": "user", "content": texto_h})
                     continue
-        if not errores and intento < intentos and not fallas:
+        if not errores and intento < intentos and not fallas and not edicion_incremental.pide_quitar(texto):
             # Cobertura (lo ultimo, cuando todo lo demas ya pasa): cada dato concreto de ESTE
             # mensaje (tiempos, Hz, sentido, luces, plumas, parpadeo) tiene que estar en la
-            # logica (banco N2/N12: se perdian sin aviso).
+            # logica (banco N2/N12: se perdian sin aviso). Si el mensaje QUITA o REEMPLAZA algo
+            # no se insiste (un falso "falta" haria volver a poner lo quitado): solo se avisa.
             falta = cobertura.faltantes(texto, cand)
             if falta:
                 log.warning(f"Banda v7 cobertura {intento}/{intentos}: falta {falta}")
@@ -3543,10 +3550,16 @@ def _generar_logica_banda_v7(texto: str, req: "LogicaRequest") -> "LogicaRespons
 
     if perdidas:
         avisos_extra.append(edicion_incremental.aviso_perdidas(perdidas))
+    if prev and not correccion and edicion_incremental.misma_logica("banda", prev, cfg.get("respuesta_llm") or {}):
+        # Edicion que no cambio nada: nunca en silencio (en los lentes no se ve la logica).
+        metricas_lavo.poner("sin_cambios", True)
+        avisos_extra.append("La lógica quedó igual: no encontré qué cambiar con esa instrucción. "
+                            "Si algo no funciona, dime qué debe hacer distinto.")
     avisos_extra += ["Ajuste automático: " + a for a in ajustes_de.get(id(cfg), [])]
     if huella_prev:
         try:
-            fuera_final = huella_banda.fuera_de_zona(huella_banda.comparar(huella_prev, huella_banda.huella(cfg)), zona_h)
+            fuera_final = huella_banda.fuera_de_zona(huella_banda.comparar(huella_prev, huella_banda.huella(cfg)), zona_h,
+                                                     prev, cfg.get("respuesta_llm"))
             if fuera_final:
                 metricas_lavo.poner("huella_fuera_final", len(fuera_final))
                 avisos_extra.append(huella_banda.aviso(fuera_final))
@@ -3657,7 +3670,7 @@ def _respuesta_constructor(texto: str, resp: dict, reqs: list, intencion: dict, 
         "avisos": ["Ajuste automático: " + a for a in ajustes]})
 
 
-def _respuesta_edicion(texto: str, prev, reqs: list, etapas: dict, intencion: dict):
+def _respuesta_edicion(texto: str, prev, reqs: list, etapas: dict, intencion: dict, texto_cambio: str = None):
     """Cambio de valor sobre la logica vigente sin el modelo (ediciones.py). Se entrega
     solo si valida, la simulacion de TODA la sesion cumple (requisitos + etapas), esta lo
     que pide el mensaje (cobertura) y no rompe nada que la vigente cumplia (regresion).
@@ -3665,7 +3678,8 @@ def _respuesta_edicion(texto: str, prev, reqs: list, etapas: dict, intencion: di
     import lavo_motor
     if not isinstance(prev, dict):
         return None
-    r = ediciones.aplicar(texto, prev)
+    cambio = texto_cambio or texto            # sin la queja ("Esta mal, ...") si la habia
+    r = ediciones.aplicar(cambio, prev)
     if r is None:
         return None
     resp, hecho = r
@@ -3679,7 +3693,7 @@ def _respuesta_edicion(texto: str, prev, reqs: list, etapas: dict, intencion: di
     if errores:
         log.warning(f"Edicion directa ({hecho}): no valida ({errores}); lo resuelve el modelo.")
         return None
-    fallas = comportamiento.verificar(cand, reqs) + [f"cobertura: falta {x}" for x in cobertura.faltantes(texto, cand)]
+    fallas = comportamiento.verificar(cand, reqs) + [f"cobertura: falta {x}" for x in cobertura.faltantes(cambio, cand)]
     if not fallas and etapas.get("aplica"):
         fallas = simulacion_etapas.verificar(cand, etapas)
     if not fallas and (reqs or etapas.get("aplica")):

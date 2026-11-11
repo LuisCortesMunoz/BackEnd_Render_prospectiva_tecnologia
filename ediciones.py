@@ -127,6 +127,17 @@ def _ctx_recursos(ctx) -> set:
     return rec
 
 
+_GRUPO_Q = {"Q8": "pluma1", "Q9": "pluma1", "Q6": "pluma2", "Q7": "pluma2"}
+
+
+def _grupos(cand) -> set:
+    """Recursos que controlan esos tiempos (pluma 1, pluma 2, cada luz, pausa, marcha)."""
+    out = set()
+    for _, _, _, rec in cand:
+        out |= {_GRUPO_Q.get(r, r) for r in rec if not str(r).startswith("SQ")}
+    return out
+
+
 def _tiempo_nuevo(resp, ctx, n, sq=None):
     tiempos = [x for x in _tiempos(resp) if not sq or sq in x[3]]
     quiere = _ctx_recursos(ctx)
@@ -141,6 +152,15 @@ def _tiempo_nuevo(resp, ctx, n, sq=None):
         if abs(viejo - n) < 0.05:
             return None
         cont[clave] = n
+        return [f"{viejo:g} s -> {n:g} s"]
+    # El mismo tiempo repetido para UN solo recurso (el timer de la pluma 1 y la duracion
+    # de su evento, ambos 3 s): es un solo dato para el usuario, se cambian todos.
+    if len(cand) > 1 and len({round(x[2], 2) for x in cand}) == 1 and len(_grupos(cand)) == 1:
+        viejo = cand[0][2]
+        if abs(viejo - n) < 0.05:
+            return None
+        for cont, clave, _, _ in cand:
+            cont[clave] = n
         return [f"{viejo:g} s -> {n:g} s"]
     # "que la verde dure 3 s" y la verde no tiene tiempo: su regla pasa por un PULSO.
     luces = [q for q in quiere_q if q in ("Q3", "Q4", "Q5")]

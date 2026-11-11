@@ -30,7 +30,9 @@ def _norm(texto: str) -> str:
 _RX_QUITAR = re.compile(
     r"\b(quita\w*|quitar|elimina\w*|borra\w*|remueve\w*|retira\w*|suprime\w*|ya no|"
     r"reemplaza\w*|sustituye\w*|en vez de|en lugar de|cambia\w* .+ por|solo deja|deja solo|"
-    r"unicamente|nada mas|desde cero|de nuevo todo|nueva logica|logica nueva|otra logica)\b")
+    r"unicamente|nada mas|desde cero|de nuevo todo|nueva logica|logica nueva|otra logica|"
+    r"no quiero|sobra\w*|no uses?|no utilices?|"
+    r"(?:no|nunca) (?:debe|deben|deberia|tiene que) (?:haber|usar\w*|encender\w*|prender\w*|mover\w*|subir|bajar))\b")
 
 
 def pide_quitar(texto: str) -> bool:
@@ -77,26 +79,103 @@ def mensajes_edicion(prev: dict, historial, titulo: str, respuesta: str,
 
 
 # ---------------------------------------------------------------------------
-# Correcciones: "revisa", "checa", "no esta funcionando", "corrige"
+# Correcciones: "revisa", "esta mal", "no lo hace bien", "con I2 no se detiene"
 # ---------------------------------------------------------------------------
 # El usuario dice que la logica activa NO hace lo que pidio. Antes la regla
 # era "ajusta la parte indicada; no la rehagas" y, con la restauracion de
 # piezas, el modelo devolvia casi la misma solucion. Ahora: diagnostico,
 # rediseño de la parte que falla y prueba de que la version nueva cambio.
-_RX_CORRECCION = re.compile(
-    r"\b(revis\w*|chec\w*|cheque\w*|verifica\w*|corrig\w*|corrige\w*|arregl\w*|repar\w*|"
-    r"no (?:esta |estan )?(?:funcionando|funciona|funcionan|sirve|sirven|jala|jalan|hace|hizo|cumple|quedo|"
-    r"respeta|obedece|detiene|detuvo|para|paro|arranca|arranco|mueve|movio|avanza|enciende|prende|apaga|"
-    r"sube|baja|cuenta|cambia|cambio|se (?:detiene|detuvo|para|paro|mueve|movio|enciende|prende|apaga|"
-    r"apago|sube|baja|activa|repite|reinicia))|"
-    r"esta mal|estan mal|salio mal|quedo mal|mal hecho|falla\w*|incorrect\w*|"
-    r"sigue (?:igual|sin|mal|sin funcionar)|todavia no|aun no|tampoco|otra vez (?:no|mal)|"
-    r"no es (?:lo que|asi)|eso no)\b")
+#
+# clasificar(texto) separa tres casos (banco de frases reales, 10 nov: el regex
+# anterior no veia 13/30 quejas como "no lo hace bien" y tomaba como queja 4/8
+# ordenes como "Ademas la roja no se enciende al arrancar"):
+#   "vaga"     queja sin dato ("no lo esta haciendo bien", "esta mal, cambiala"):
+#              diagnostico por simulacion y, si no se ve la falla, se pregunta.
+#   "falla"    describe lo que hace mal ("con I2 no se detiene", "la verde se
+#              queda prendida"): correccion con diagnostico.
+#   "con_dato" dice como debe ser ("esta mal, la pluma debe bajar", "esta mal,
+#              cambiala a 45 Hz"): se aplica eso; antes se prueban las ediciones
+#              directas sobre lo que queda sin la queja.
+#   None       no es queja: edicion normal.
+
+# Queja explicita: con estas palabras siempre es correccion.
+_RX_QUEJA = re.compile(
+    r"\b(?:revis\w*|chec\w*|cheque\w*|verifica\w*|corrig\w*|corrige\w*|arregl\w*|repar\w*|"
+    r"esta mal|estan mal|salio mal|quedo mal|hecho mal|hizo mal|hiciste mal|hicieron mal|lo hace mal|mal hecho|"
+    r"no (?:lo |la |los |las |me |te |se )?(?:esta |estan |estas )?(?:funcionando|funciona|funcionan|sirve|sirven|"
+    r"jala|jalan|cumple|cumplio|respeta|obedece)|"
+    r"no (?:lo |la |los |las |me |se )?(?:esta |estas |estan )?(?:hace|hizo|haciendo|hiciste|sale|salio|quedo|"
+    r"quedando) (?:bien|caso|nada|lo que|como)|"
+    r"no hace (?:nada|caso|lo que)|no (?:me )?hizo caso|"
+    r"no (?:esta|estan|quedo|salio|sale|queda) bien|no es correct\w*|no es (?:lo que|asi)|asi no|eso no|"
+    r"incorrect\w*|error\w*|falla\w*|equivoc\w*|"
+    r"sigue (?:igual|sin|mal)|todavia no|aun no|otra vez (?:no|mal)|"
+    r"tampoco (?:funciona|sirve|jala|hace|cumple))\b")
+
+# Describe una falla en presente ("no se detiene", "la verde se queda prendida").
+# Es queja salvo que el mensaje empiece como una orden ("Ademas la roja no se
+# enciende al arrancar", "Cambia: al llegar a 4 ya no se detiene").
+_VERBOS_FALLA = (r"funcionando|detiene|detuvo|para|paro|arranca|arranco|mueve|movio|avanza|avanzo|enciende|"
+                 r"encendio|prende|prendio|apaga|apago|sube|subio|baja|bajo|cuenta|conto|cambia|cambio|regresa|"
+                 r"regreso|reinicia|reinicio|activa|activo|repite|repitio|invierte|invirtio|parpadea|hace|hizo")
+_RX_NO_HACE = re.compile(
+    r"\bno (?:lo |la |los |las |me |se |le )?(?:esta |estan )?(?:" + _VERBOS_FALLA + r")\b|"
+    r"\bnunca (?:se )?(?:" + _VERBOS_FALLA + r")\b|"
+    r"\b(?:se queda|sigue|siguen|se quedan) (?:prendid\w*|encendid\w*|apagad\w*|parad\w*|detenid\w*|arriba|abajo|"
+    r"subid\w*|bajad\w*|andando|avanzando|corriendo|moviendose)\b")
+_RX_ORDEN_INICIO = re.compile(
+    r"^(?:(?:ok|bien|listo|perfecto|y|ahora)\s+)*(?:cambia\w*|agrega\w*|anade\w*|ademas|tambien|ahora|haz que|"
+    r"quiero que|necesito que|pon\w*|usa|quita\w*|elimina\w*|que)\b")
+
+# Lo que pide (como debe ser) y el dato concreto del que habla.
+_RX_PIDE = re.compile(
+    r"\b(?:debe\w*|deberia\w*|tiene que|tienen que|hay que|quiero que|queria que|necesito que|mejor|"
+    r"que sea\w*|sean|cambia\w*|pon\w*|usa|use|utiliza\w*|agrega\w*|anade\w*|haz\w*|en lugar de|en vez de|sino|"
+    r"(?<!sin )quita\w*|(?<!sin )elimina\w*|(?<!sin )borra\w*|"
+    r"que (?:se |la |el |lo |los |las )?(?:encienda\w*|prenda\w*|apague\w*|suba\w*|baje\w*|detenga\w*|pare|paren|"
+    r"arranque\w*|avance\w*|vaya\w*|mueva\w*|cuente\w*|parpadee\w*|invierta\w*|regrese\w*|espere\w*|dure\w*|"
+    r"reinicie\w*|siga\w*|quede\w*))\b")
+_RX_DATO = re.compile(
+    r"\b(?:\d+(?:[.,]\d+)?\s*(?:s|seg|segundos?|min|minutos?|hz|hertz|veces|cajas?|piezas?)|hz|hertz|"
+    r"verde|amarill\w*|roj[ao]s?|luz|luces|lampara\w*|torreta|pluma\w*|sensor\w*|s ?[12]|i ?[1-5]|boton\w*|"
+    r"izquierda|derecha|sentido|invert\w*|inviert\w*|reversa|contador\w*|conteo|parpade\w*|intermit\w*|"
+    r"velocidad|rapid\w*|lent\w*|frecuencia|pausa\w*)\b")
+
+
+def clasificar(texto: str):
+    """None (no es queja) | "vaga" | "falla" | "con_dato". Ver arriba."""
+    t = _norm(texto)
+    fuerte = _RX_QUEJA.search(t)
+    debil = _RX_NO_HACE.search(t)
+    if not fuerte and not (debil and not _RX_ORDEN_INICIO.match(t)):
+        return None
+    resto = _norm(sin_queja(texto))
+    if _RX_DATO.search(resto) and _RX_PIDE.search(resto):
+        return "con_dato"
+    if debil or _RX_DATO.search(resto):
+        return "falla"
+    return "vaga"
 
 
 def es_correccion(texto: str) -> bool:
     """True si el usuario reporta que la logica activa no funciona como pidio."""
-    return bool(_RX_CORRECCION.search(_norm(texto)))
+    return clasificar(texto) is not None
+
+
+# Palabras de queja que se quitan para quedarse con lo que pide ("Esta mal, cambiala a
+# 45 Hz" -> "cambiala a 45 Hz"); el resto del texto queda igual (con acentos y numeros).
+_RX_QUEJA_TXT = re.compile(
+    r"(?i)\b(?:no,?\s+)?(?:est[aá]n? mal|sali[oó] mal|qued[oó] mal|lo hiciste mal|hiciste mal|mal hecho|"
+    r"no (?:lo |la |me )?(?:est[aá]s? )?(?:haciendo|hace|hizo|sale|qued[oó]) (?:bien|caso|nada)|"
+    r"no (?:est[aá]|qued[oó]|sali[oó]) bien|no es correcto|es incorrecto|est[aá] incorrecto|"
+    r"no (?:est[aá] )?funciona(?:ndo)?|no sirve|no jala|hay un error|tiene un error|"
+    r"revisa(?:lo|la)?|ch[eé]ca(?:lo|la)?|corr[ií]ge(?:lo|la)?|arr[eé]gla(?:lo|la)?|sigue igual|eso no|as[ií] no)\b"
+    r"[\s,.:;!¡-]*")
+
+
+def sin_queja(texto: str) -> str:
+    """El mensaje sin las palabras de queja (lo que queda es lo que pide)."""
+    return _RX_QUEJA_TXT.sub(" ", str(texto or "")).strip(" ,.;:")
 
 
 REGLAS_CORRECCION = (
@@ -106,7 +185,8 @@ REGLAS_CORRECCION = (
     "2. REDISEÑA esa parte desde cero si hace falta: puedes cambiar el tipo de bloque, usar condiciones, "
     "memorias, timers, contadores, eventos o secuencias distintos, cambiar campos del motor e ids. No "
     "repitas la misma estructura con otro valor si la estructura es la que falla.\n"
-    "3. Conserva TAL CUAL lo que si funciona y no tiene que ver con la falla.\n"
+    "3. Conserva TAL CUAL lo que si funciona y no tiene que ver con la falla. Si el mensaje actual dice COMO debe "
+    "funcionar, eso manda sobre las instrucciones anteriores.\n"
     "4. En \"analisis\" agrega \"diagnostico\": que estaba mal y que cambiaste para corregirlo (una o dos "
     "frases). \"modificado\" sigue siendo SOLO para lo que no se pudo hacer como el usuario pidio.\n"
     "5. Devolver el mismo JSON NO es una respuesta valida. Si de verdad no encuentras ninguna falla, pregunta "

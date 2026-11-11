@@ -169,10 +169,113 @@ def comparar(antes: dict, despues: dict) -> list:
     return difs
 
 
-def fuera_de_zona(difs: list, zona: dict) -> list:
+# ── Que modulos dependen de los tiempos que cambiaron en el JSON ───────────
+_CAMPOS_TIEMPO = ("segundos", "segundos_off", "duracion_s", "espera_s", "paro_inversion_s")
+_MOD_Q = {"Q3": "torreta", "Q4": "torreta", "Q5": "torreta", "Q6": "plumas", "Q7": "plumas", "Q8": "plumas",
+          "Q9": "plumas"}
+_MOD_ACCION = {"pluma1": "plumas", "pluma2": "plumas", "verde": "torreta", "amarilla": "torreta", "roja": "torreta",
+               "banda": "motor"}
+
+
+def _lst(x) -> list:
+    return [y for y in (x if isinstance(x, list) else []) if isinstance(y, dict)]
+
+
+def _tiempos_de(o: dict) -> tuple:
+    return tuple(o.get(k) for k in _CAMPOS_TIEMPO)
+
+
+def _modulos_q(qs) -> set:
+    out = set()
+    for q in (qs if isinstance(qs, list) else [qs]):
+        canon = lm.salida_canonica(q) if q else None
+        if canon in _MOD_Q:
+            out.add(_MOD_Q[canon])
+    return out
+
+
+def _usuarios(resp: dict, ids: set) -> set:
+    """Modulos que usan alguno de esos ids (timers/condiciones/memorias), un salto de
+    condiciones y memorias incluido."""
+    import json
+    import re
+
+    def menciona(obj) -> bool:
+        s = json.dumps(obj, ensure_ascii=False).upper()
+        return any(re.search(rf"\b{re.escape(i)}\b", s) for i in ids)
+    ids = {str(i).upper() for i in ids if i}
+    for blq in ("condiciones", "memorias"):
+        for c in _lst(resp.get(blq)):
+            if c.get("id") and menciona({k: v for k, v in c.items() if k != "id"}):
+                ids.add(str(c["id"]).upper())
+    mods = set()
+    sal = resp.get("salidas") if isinstance(resp.get("salidas"), dict) else {}
+    for q, regla in sal.items():
+        if menciona(regla):
+            mods |= _modulos_q(q)
+    motor = resp.get("motor") if isinstance(resp.get("motor"), dict) else {}
+    if menciona(motor):
+        mods.add("motor")
+    for ev in _lst(resp.get("eventos")):
+        if menciona({k: v for k, v in ev.items() if k != "acciones"}):
+            mods |= {_MOD_ACCION[k] for k in (ev.get("acciones") or {}) if k in _MOD_ACCION}
+    for sq in _lst(resp.get("secuencias")):
+        if menciona({k: v for k, v in sq.items() if k != "pasos"}) or menciona(sq.get("pasos") or []):
+            for p in _lst(sq.get("pasos")):
+                mods |= _modulos_q(p.get("salidas") or [])
+                if p.get("motor"):
+                    mods.add("motor")
+    return mods
+
+
+def modulos_por_tiempos(antes: dict, despues: dict) -> set:
+    """Modulos cuyo comportamiento depende de un TIEMPO que cambio entre las dos versiones
+    (JSON del modelo). "Mejor que sean 5 s" sobre la pluma de 3 s: cambia cuando se mueve
+    la pluma y, con cajas seguidas, hasta su orden; eso es lo pedido, no un cambio de mas."""
+    try:
+        return _modulos_por_tiempos(antes or {}, despues or {})
+    except Exception:
+        return set()
+
+
+def _modulos_por_tiempos(antes: dict, despues: dict) -> set:
+    mods = set()
+    # timers por id
+    ta = {str(t.get("id")).upper(): t for t in _lst(antes.get("timers")) if t.get("id")}
+    td = {str(t.get("id")).upper(): t for t in _lst(despues.get("timers")) if t.get("id")}
+    cambiados = {i for i in ta.keys() & td.keys() if _tiempos_de(ta[i]) != _tiempos_de(td[i])}
+    if cambiados:
+        mods |= _usuarios(despues, cambiados)
+    # eventos (por posicion si son los mismos; si no, por su disparo)
+    ea, ed = _lst(antes.get("eventos")), _lst(despues.get("eventos"))
+    pares = list(zip(ea, ed)) if len(ea) == len(ed) else [
+        (a, d) for a in ea for d in ed if a.get("cuando") == d.get("cuando") and a.get("acciones") == d.get("acciones")]
+    for a, d in pares:
+        if _tiempos_de(a) != _tiempos_de(d):
+            mods |= {_MOD_ACCION[k] for k in (d.get("acciones") or {}) if k in _MOD_ACCION}
+    # pasos de secuencias por id y posicion
+    sa = {str(s.get("id")).upper(): s for s in _lst(antes.get("secuencias")) if s.get("id")}
+    for s in _lst(despues.get("secuencias")):
+        viejo = sa.get(str(s.get("id")).upper())
+        if not viejo:
+            continue
+        for pa, pd in zip(_lst(viejo.get("pasos")), _lst(s.get("pasos"))):
+            if _tiempos_de(pa) != _tiempos_de(pd):
+                mods |= _modulos_q(pd.get("salidas") or [])
+                mods.add("motor")
+    ma = antes.get("motor") if isinstance(antes.get("motor"), dict) else {}
+    md = despues.get("motor") if isinstance(despues.get("motor"), dict) else {}
+    if _tiempos_de(ma) != _tiempos_de(md):
+        mods.add("motor")
+    return mods
+
+
+def fuera_de_zona(difs: list, zona: dict, antes: dict = None, despues: dict = None) -> list:
     """Diferencias en modulos que el usuario no menciono (zona vaga: no se juzga).
     - Si habla de tiempos o del contador, eso mueve el MOMENTO de todo: la banda
-      queda permitida y de lo demas solo se juzga el ORDEN de las plumas.
+      queda permitida y de lo demas solo se juzga el ORDEN de las plumas, salvo en
+      los modulos que dependen del tiempo que cambio (antes/despues = JSON del
+      modelo de las dos versiones; ver modulos_por_tiempos).
     - Una luz que cambia en un escenario donde tambien cambio lo pedido puede ser
       consecuencia (verde = BANDA_CORRIENDO): no se juzga. Las plumas si."""
     mods = set((zona or {}).get("modulos") or [])
@@ -180,6 +283,8 @@ def fuera_de_zona(difs: list, zona: dict) -> list:
         return []
     temporal = bool(mods & {"tiempos", "conteo"})
     permitidos = mods | ({"motor"} if temporal else set())
+    if temporal and antes is not None and despues is not None:
+        permitidos |= modulos_por_tiempos(antes, despues)
     con_pedido = {d["escenario"] for d in difs if d["modulo"] in permitidos and d["canal"] != "plumas_orden"}
     out = []
     for d in difs:
